@@ -6,21 +6,35 @@ from models.news import News
 
 
 def parse(news: News, html: str) -> Article:
-    """Parse a JPL page into an Article."""
+    """Parse a NASA Science page into an Article."""
     soup = BeautifulSoup(html, "html.parser")
-    article = soup.find(
-        "div",
-        attrs={
-            "itemprop": "articleBody"
-        }
-    )
+    article = _find_article(soup)
     body = _extract_body(article)
 
     return Article(
         news=news,
         body=body,
-        parser="JPL"
+        parser="NASA Science"
     )
+
+
+def _find_article(soup: BeautifulSoup) -> Tag | None:
+    selectors = [
+        "article",
+        "main article",
+        "main",
+        "div.entry-content",
+        "div.article-content",
+        "div.content",
+    ]
+
+    for selector in selectors:
+        article = soup.select_one(selector)
+
+        if article is not None:
+            return article
+
+    return None
 
 
 def _extract_body(article: Tag | None) -> str:
