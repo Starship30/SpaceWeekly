@@ -61,17 +61,6 @@ def save_article(article: Article) -> bool:
             return cursor.rowcount == 1
 
 
-def article_exists(url: str) -> bool:
-    """Return True when an article URL already exists."""
-    with closing(_connect()) as connection:
-        cursor = connection.execute(
-            "SELECT 1 FROM articles WHERE url = ? LIMIT 1",
-            (url,),
-        )
-
-        return cursor.fetchone() is not None
-
-
 def get_articles() -> list[Article]:
     """Return all saved articles."""
     with closing(_connect()) as connection:
@@ -88,6 +77,29 @@ def get_articles() -> list[Article]:
             FROM articles
             ORDER BY published DESC, id DESC
             """
+        )
+
+        return [_row_to_article(row) for row in cursor.fetchall()]
+
+
+def get_articles_by_date(start_date: str, end_date: str) -> list[Article]:
+    """Return articles saved between two dates in YYYY-MM-DD format."""
+    with closing(_connect()) as connection:
+        cursor = connection.execute(
+            """
+            SELECT
+                source,
+                title,
+                published,
+                summary,
+                url,
+                body,
+                parser
+            FROM articles
+            WHERE date(created_at) BETWEEN date(?) AND date(?)
+            ORDER BY published DESC, id DESC
+            """,
+            (start_date, end_date),
         )
 
         return [_row_to_article(row) for row in cursor.fetchall()]

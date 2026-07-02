@@ -1,49 +1,50 @@
-from collections.abc import Callable
+import logging
 
+from ai.deepseek import summarize
 from database.sqlite import get_articles, initialize_database, save_article
 from downloader.client import download
 from exporters.markdown import export_markdown
 from feeds.cneos import get_news
-from models.article import Article
-from models.news import News
-from parsers.jpl import parse as parse_jpl
-from parsers.science import parse as parse_science
+from logging_config import setup_logging
+from models.ai_summary import AISummary
+from parsers.registry import get_parser
 
-Parser = Callable[[News, str], Article]
-PARSERS: dict[str, Parser] = {
-    "jpl.nasa.gov": parse_jpl,
-    "science.nasa.gov": parse_science,
-}
-
-
-def get_parser(url: str) -> Parser | None:
-    for domain, parser in PARSERS.items():
-        if domain in url:
-            return parser
-
-    return None
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    setup_logging()
+    ai_summaries: dict[str, AISummary] = {}
+
     initialize_database()
+    logger.info("Fetch RSS")
     news_list = get_news()
 
     for news in news_list:
         parser = get_parser(news.url)
 
         if parser is None:
+            logger.warning("No Parser %s", news.url)
             continue
 
         html = download(news.url)
+        logger.info("Parse Article")
         article = parser(news, html)
 
-        if save_article(article):
-            print("SAVE")
+        try:
+            ai_summary = summarize(article)
+        except Exception as exc:
+            logger.warning("AI Summary Failed %s", exc)
         else:
-            print("SKIP")
+            logger.info("AI Summary Success")
+            ai_summaries[article.news.url] = ai_summary
 
-    export_markdown(get_articles())
+        save_status = "SAVE" if save_article(article) else "SKIP"
+        logger.info("Save SQLite %s", save_status)
 
+    logger.info("Export Markdown")
+    export_markdown(get_articles(), ai_summaries)
+    logger.info("Markdown Exported")
 
 if __name__ == "__main__":
     main()

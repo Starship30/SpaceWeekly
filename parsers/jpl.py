@@ -3,6 +3,7 @@ from bs4.element import Tag
 
 from models.article import Article
 from models.news import News
+from parsers.cleaning import clean_body
 
 
 def parse(news: News, html: str) -> Article:
@@ -36,4 +37,4 @@ def _extract_body(article: Tag | None) -> str:
         if text:
             body.append(text)
 
-    return "\n".join(body)
+    return clean_body("\n".join(body))
