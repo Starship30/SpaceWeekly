@@ -1,6 +1,8 @@
 from collections.abc import Callable
 
+from database.sqlite import get_articles, initialize_database, save_article
 from downloader.client import download
+from exporters.markdown import export_markdown
 from feeds.cneos import get_news
 from models.article import Article
 from models.news import News
@@ -8,42 +10,39 @@ from parsers.jpl import parse as parse_jpl
 from parsers.science import parse as parse_science
 
 Parser = Callable[[News, str], Article]
+PARSERS: dict[str, Parser] = {
+    "jpl.nasa.gov": parse_jpl,
+    "science.nasa.gov": parse_science,
+}
 
 
 def get_parser(url: str) -> Parser | None:
-    if "jpl.nasa.gov" in url:
-        return parse_jpl
-
-    if "science.nasa.gov" in url:
-        return parse_science
+    for domain, parser in PARSERS.items():
+        if domain in url:
+            return parser
 
     return None
 
 
-def parse_article(news: News) -> Article | None:
-    parser = get_parser(news.url)
-
-    if parser is None:
-        return None
-
-    html = download(news.url)
-
-    return parser(news, html)
-
-
 def main() -> None:
+    initialize_database()
     news_list = get_news()
 
     for news in news_list:
-        article = parse_article(news)
+        parser = get_parser(news.url)
 
-        if article is None:
+        if parser is None:
             continue
 
-        print("=" * 80)
-        print(article.news.title)
-        print(article.news.published)
-        print(article.body[:300])
+        html = download(news.url)
+        article = parser(news, html)
+
+        if save_article(article):
+            print("SAVE")
+        else:
+            print("SKIP")
+
+    export_markdown(get_articles())
 
 
 if __name__ == "__main__":
