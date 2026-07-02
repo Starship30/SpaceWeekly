@@ -13,8 +13,10 @@ NOISE_PREFIXES = (
     "follow us",
     "get the jpl newsletter",
     "image credit",
+    "photo credit",
     "newsletter",
     "share",
+    "social links",
     "subscribe",
     "video credit",
 )

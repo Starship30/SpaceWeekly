@@ -1,0 +1,17 @@
+[
+  {
+    "name": "CNEOS",
+    "rss": "https://cneos.jpl.nasa.gov/feed/news.xml",
+    "enabled": true
+  },
+  {
+    "name": "NASA Science",
+    "rss": "https://science.nasa.gov/feed/",
+    "enabled": true
+  },
+  {
+    "name": "JPL",
+    "rss": "https://www.jpl.nasa.gov/news/news.rss",
+    "enabled": true
+  }
+]

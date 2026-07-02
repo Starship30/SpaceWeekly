@@ -3,12 +3,16 @@ from urllib import error
 from urllib import request
 
 from ai.prompts import build_summary_prompt
+from ai.prompts import build_translation_prompt
 from config import DEEPSEEK_API_KEY
 from config import DEEPSEEK_BASE_URL
 from config import DEEPSEEK_MODEL
 from config import REQUEST_TIMEOUT
 from models.ai_summary import AISummary
 from models.article import Article
+
+DEEPSEEK_TEMPERATURE = 0.2
+DEEPSEEK_MAX_TOKENS = 2000
 
 
 def summarize(article: Article) -> AISummary:
@@ -19,6 +23,15 @@ def summarize(article: Article) -> AISummary:
     content = _extract_content(response_data)
 
     return _parse_summary(content)
+
+
+def translate(article: Article) -> str:
+    """Translate an article body into Simplified Chinese."""
+    _validate_config()
+    payload = _build_translation_payload(article)
+    response_data = _post_chat_completion(payload)
+
+    return _extract_content(response_data).strip()
 
 
 def _validate_config() -> None:
@@ -45,7 +58,26 @@ def _build_payload(article: Article) -> dict[str, object]:
                 "content": build_summary_prompt(article),
             },
         ],
-        "temperature": 0.2,
+        "temperature": DEEPSEEK_TEMPERATURE,
+        "max_tokens": DEEPSEEK_MAX_TOKENS,
+    }
+
+
+def _build_translation_payload(article: Article) -> dict[str, object]:
+    return {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是专业航天新闻翻译，输出简体中文。",
+            },
+            {
+                "role": "user",
+                "content": build_translation_prompt(article),
+            },
+        ],
+        "temperature": DEEPSEEK_TEMPERATURE,
+        "max_tokens": DEEPSEEK_MAX_TOKENS,
     }
 
 
