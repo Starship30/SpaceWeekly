@@ -46,7 +46,7 @@ def _extract_body(article: Tag | None) -> str:
     body = []
 
     for paragraph in paragraphs:
-        text = paragraph.get_text(strip=True)
+        text = paragraph.get_text(" ", strip=True)
 
         if text:
             body.append(text)

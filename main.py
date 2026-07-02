@@ -28,8 +28,8 @@ def main() -> None:
             continue
 
         html = download(news.url)
-        logger.info("Parse Article")
         article = parser(news, html)
+        logger.info("Parse %s", article.parser)
 
         try:
             ai_summary = summarize(article)

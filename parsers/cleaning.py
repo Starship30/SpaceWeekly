@@ -1,21 +1,30 @@
+import re
+
+KNOWN_AUTHOR_NAMES = {
+    "karen fox",
+    "molly wasser",
+    "nasa science editorial team",
+}
+
 NOISE_PREFIXES = (
     "author:",
-    "by ",
     "credit:",
     "credits:",
-    "image credit:",
+    "follow us",
+    "get the jpl newsletter",
+    "image credit",
     "newsletter",
+    "share",
+    "subscribe",
+    "video credit",
 )
 
 NOISE_PHRASES = (
-    "nasa science editorial team",
-    "molly wasser",
     "get the latest jpl news",
     "news from infinity and beyond",
-    "more information about",
-    "sign up",
-    "subscribe",
 )
+
+AUTHOR_NAME_PATTERN = re.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}$")
 
 
 def clean_body(text: str) -> str:
@@ -39,7 +48,23 @@ def _is_noise(text: str) -> bool:
 
     lower_text = text.lower()
 
+    if lower_text in KNOWN_AUTHOR_NAMES:
+        return True
+
     if lower_text.startswith(NOISE_PREFIXES):
         return True
 
-    return any(phrase in lower_text for phrase in NOISE_PHRASES)
+    if lower_text in NOISE_PHRASES:
+        return True
+
+    return _looks_like_author_name(text)
+
+
+def _looks_like_author_name(text: str) -> bool:
+    if len(text) > 40:
+        return False
+
+    if any(character in text for character in ".,:;!?()[]"):
+        return False
+
+    return AUTHOR_NAME_PATTERN.match(text) is not None
