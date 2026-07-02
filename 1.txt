@@ -1,0 +1,54 @@
+SpaceWeekly/
+│
+├── main.py                 # 程序入口
+├── config.py               # 配置
+├── requirements.txt
+│
+├── models/                 # 数据模型
+│   ├── news.py
+│   ├── article.py
+│   └── report.py
+│
+├── feeds/                  # RSS/API 获取新闻列表
+│   ├── base.py
+│   ├── cneos.py
+│   ├── nasa.py
+│   ├── esa.py
+│   ├── jaxa.py
+│   └── spacex.py
+│
+├── downloader/             # 下载网页
+│   ├── client.py
+│   └── cache.py
+│
+├── parsers/                # 网页解析器
+│   ├── base.py
+│   ├── jpl.py
+│   ├── nasa_science.py
+│   ├── cneos.py
+│   └── esa.py
+│
+├── database/
+│   ├── sqlite.py
+│   └── schema.sql
+│
+├── pipeline/               # 数据处理流水线
+│   ├── merge.py
+│   ├── deduplicate.py
+│   ├── classify.py
+│   └── report.py
+│
+├── exporters/
+│   ├── markdown.py
+│   ├── json.py
+│   └── html.py
+│
+├── ai/
+│   ├── provider.py
+│   ├── none.py
+│   ├── ollama.py
+│   └── openai.py
+│
+└── utils/
+    ├── logger.py
+    └── date.py
