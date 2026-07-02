@@ -3,13 +3,17 @@ from urllib import error
 from urllib import request
 
 from ai.prompts import build_summary_prompt
+from ai.prompts import build_analysis_prompt
 from ai.prompts import build_translation_prompt
+from ai.providers import ProviderConfig
+from ai.providers import complete
 from config import DEEPSEEK_API_KEY
 from config import DEEPSEEK_BASE_URL
 from config import DEEPSEEK_MODEL
 from config import REQUEST_TIMEOUT
 from models.ai_summary import AISummary
 from models.article import Article
+from models.news_analysis import NewsAnalysis
 
 DEEPSEEK_TEMPERATURE = 0.2
 DEEPSEEK_MAX_TOKENS = 2000
@@ -32,6 +36,41 @@ def translate(article: Article) -> str:
     response_data = _post_chat_completion(payload)
 
     return _extract_content(response_data).strip()
+
+
+def analyze(
+    article: Article,
+    provider: str = "DeepSeek",
+    summary_prompt: str = "",
+    translation_prompt: str = "",
+    category_prompt: str = "",
+    score_prompt: str = "",
+    filter_prompt: str = "",
+) -> NewsAnalysis:
+    """Analyze an article with the configured OpenAI-compatible provider."""
+    _validate_config()
+    prompt = build_analysis_prompt(
+        article,
+        summary_prompt=summary_prompt,
+        translation_prompt=translation_prompt,
+        category_prompt=category_prompt,
+        score_prompt=score_prompt,
+        filter_prompt=filter_prompt,
+    )
+    content = complete(
+        prompt,
+        ProviderConfig(
+            provider=provider,
+            api_key=DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL,
+            model=DEEPSEEK_MODEL,
+            temperature=DEEPSEEK_TEMPERATURE,
+            max_tokens=DEEPSEEK_MAX_TOKENS,
+            timeout=REQUEST_TIMEOUT,
+        ),
+    )
+
+    return _parse_analysis(content)
 
 
 def _validate_config() -> None:
@@ -150,3 +189,26 @@ def _strip_json_block(content: str) -> str:
         text = text.removesuffix("```").strip()
 
     return text
+
+
+def _parse_analysis(content: str) -> NewsAnalysis:
+    data = json.loads(_strip_json_block(content))
+    keywords = data.get("keywords", [])
+    categories = data.get("categories", [])
+
+    if not isinstance(keywords, list):
+        keywords = []
+
+    if not isinstance(categories, list):
+        categories = []
+
+    return NewsAnalysis(
+        summary=str(data.get("summary", "")),
+        translation=str(data.get("translation", "")),
+        keywords=[str(keyword) for keyword in keywords],
+        categories=[str(category) for category in categories],
+        importance=str(data.get("importance", "")),
+        score=int(data.get("score", 0) or 0),
+        keep=bool(data.get("keep", True)),
+        reason=str(data.get("reason", "")),
+    )

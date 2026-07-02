@@ -2,16 +2,26 @@
   {
     "name": "CNEOS",
     "rss": "https://cneos.jpl.nasa.gov/feed/news.xml",
-    "enabled": true
+    "enabled": false
   },
   {
     "name": "NASA Science",
     "rss": "https://science.nasa.gov/feed/",
-    "enabled": true
+    "enabled": false
   },
   {
     "name": "JPL",
     "rss": "https://www.jpl.nasa.gov/news/news.rss",
+    "enabled": false
+  },
+  {
+    "name": "Artemis",
+    "rss": "https://www.nasa.gov/missions/artemis/feed/",
+    "enabled": false
+  },
+  {
+    "name": "Space.com",
+    "rss": "https://www.space.com/feeds.xml",
     "enabled": true
   }
 ]

@@ -1,12 +1,10 @@
 import logging
 from dataclasses import replace
 from datetime import date
-from datetime import datetime
 from datetime import timedelta
 from email.utils import parsedate_to_datetime
 
-from ai.deepseek import summarize
-from ai.deepseek import translate
+from ai.deepseek import analyze
 from database.sqlite import get_articles
 from database.sqlite import get_articles_by_date
 from database.sqlite import initialize_database
@@ -19,6 +17,7 @@ from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
 from models.news import News
+from models.news_analysis import NewsAnalysis
 from services.feed_manager import FeedSource
 from services.feed_manager import enabled_feeds
 from services.settings import AppSettings
@@ -42,6 +41,7 @@ def generate_weekly(
     markdown_enabled = _enabled(export_markdown_enabled, settings.export_markdown)
     word_enabled = _enabled(export_word_enabled, settings.export_word)
     ai_summaries: dict[str, AISummary] = {}
+    analyses: dict[str, NewsAnalysis] = {}
     translations: dict[str, str] = {}
     articles: list[Article] = []
     api_calls = 0
@@ -50,8 +50,8 @@ def generate_weekly(
     if export_sqlite:
         initialize_database()
 
-    logger.info("✔ 抓取 RSS")
-    news_list = _filter_news(_fetch_news(selected_feeds), date_range)
+    logger.info("抓取 RSS")
+    news_list = _filter_news(_fetch_news(selected_feeds, settings.rss_limit), date_range)
     logger.info("预计文章数量：%s", len(news_list))
     logger.info("预计 Token：%s", _estimate_tokens(news_list, settings))
     logger.info("预计耗时：约 %s 秒", _estimate_seconds(news_list, settings))
@@ -64,23 +64,35 @@ def generate_weekly(
             continue
 
         article_for_ai = _limit_article_tokens(article, settings.max_article_tokens)
-        api_calls = _run_ai(article_for_ai, settings, ai_summaries, translations, api_calls)
+        api_calls = _run_ai(
+            article_for_ai,
+            settings,
+            ai_summaries,
+            translations,
+            analyses,
+            api_calls,
+        )
+
+        if _should_ignore(article, settings, analyses):
+            continue
+
         articles.append(article)
 
         if export_sqlite:
             save_status = "SAVE" if save_article(article) else "SKIP"
-            logger.info("✔ 保存 SQLite %s", save_status)
+            logger.info("保存 SQLite %s", save_status)
 
     export_articles = _export_articles(export_sqlite, articles, date_range)
     context = _export_context(settings, translations)
-    _export_reports(export_articles, ai_summaries, context, markdown_enabled, word_enabled)
+    _export_reports(export_articles, ai_summaries, analyses, context, markdown_enabled, word_enabled)
 
     return articles
 
 
 def estimate_generation(feeds: list[FeedSource], settings: AppSettings) -> tuple[int, int, int]:
     """Return rough article, token, and seconds estimates for the GUI."""
-    article_count = max(len([feed for feed in feeds if feed.enabled]) * 10, 0)
+    per_feed = settings.rss_limit if settings.rss_limit > 0 else 100
+    article_count = max(len([feed for feed in feeds if feed.enabled]) * per_feed, 0)
     token_count = article_count * settings.max_article_tokens
     api_factor = int(settings.ai_summary_enabled) + int(settings.ai_translation_enabled)
     seconds = article_count * max(api_factor, 1) * 8
@@ -92,14 +104,20 @@ def _enabled(value: bool | None, fallback: bool) -> bool:
     return fallback if value is None else value
 
 
-def _fetch_news(feeds: list[FeedSource]) -> list[News]:
-    news_list: list[News] = []
+def _fetch_news(feeds: list[FeedSource], rss_limit: int = 0) -> list[News]:
     import feedparser
+
+    news_list: list[News] = []
 
     for feed in feeds:
         parsed_feed = feedparser.parse(feed.rss)
 
-        for item in parsed_feed.entries:
+        entries = parsed_feed.entries
+
+        if rss_limit > 0:
+            entries = entries[:rss_limit]
+
+        for item in entries:
             url = str(getattr(item, "link", ""))
 
             if not url or url.endswith(".js"):
@@ -154,13 +172,22 @@ def _parse_article(news: News) -> Article | None:
 
     parser = get_parser(news.url)
 
-    if parser is None:
-        logger.warning("⚠ 未找到 Parser %s", news.url)
+    try:
+        html = download(news.url)
+    except Exception as exc:
+        logger.warning("HTML 获取失败 %s %s", news.url, exc)
         return None
 
-    html = download(news.url)
-    article = parser(news, html)
-    logger.info("✔ 解析 %s", article.parser)
+    try:
+        article = parser(news, html)
+    except Exception as exc:
+        logger.warning("Parser 异常 %s %s", news.url, exc)
+        return None
+
+    if article.parser == "Generic":
+        logger.info("Using Generic Parser")
+    else:
+        logger.info("解析 %s", article.parser)
 
     return article
 
@@ -170,6 +197,7 @@ def _run_ai(
     settings: AppSettings,
     ai_summaries: dict[str, AISummary],
     translations: dict[str, str],
+    analyses: dict[str, NewsAnalysis],
     api_calls: int,
 ) -> int:
     if _ai_limit_reached(settings, api_calls):
@@ -178,11 +206,7 @@ def _run_ai(
 
     if _summary_enabled(settings):
         api_calls += 1
-        _summarize_article(article, settings, ai_summaries)
-
-    if settings.ai_translation_enabled and not _ai_limit_reached(settings, api_calls):
-        api_calls += 1
-        _translate_article(article, translations)
+        _analyze_article(article, settings, ai_summaries, translations, analyses)
 
     return api_calls
 
@@ -194,6 +218,9 @@ def _summary_enabled(settings: AppSettings) -> bool:
             settings.ai_keywords_enabled,
             settings.ai_category_enabled,
             settings.ai_importance_enabled,
+            settings.ai_translation_enabled,
+            settings.ai_auto_filter_enabled,
+            settings.include_score,
         ]
     )
 
@@ -208,41 +235,64 @@ def _handle_ai_limit(settings: AppSettings) -> None:
     if settings.ai_limit_action == "stop":
         raise RuntimeError(message)
 
-    logger.warning("⚠ %s，跳过后续 AI 调用", message)
+    logger.warning("%s，跳过后续 AI 调用", message)
 
 
-def _summarize_article(
+def _analyze_article(
     article: Article,
     settings: AppSettings,
     ai_summaries: dict[str, AISummary],
+    translations: dict[str, str],
+    analyses: dict[str, NewsAnalysis],
 ) -> None:
     try:
-        ai_summary = summarize(article)
+        analysis = analyze(
+            article,
+            provider=settings.ai_provider,
+            summary_prompt=settings.summary_prompt,
+            translation_prompt=settings.translation_prompt,
+            category_prompt=settings.category_prompt,
+            score_prompt=settings.score_prompt,
+            filter_prompt=settings.filter_prompt,
+        )
     except Exception as exc:
-        logger.warning("⚠ AI 摘要失败 %s", exc)
+        logger.warning("AI 分析失败 %s", exc)
         return
 
-    ai_summaries[article.news.url] = _apply_summary_options(ai_summary, settings)
-    logger.info("✔ AI 摘要完成")
+    analyses[article.news.url] = analysis
+    translations[article.news.url] = analysis.translation
+    ai_summaries[article.news.url] = _analysis_to_summary(analysis, settings)
+    logger.info("AI 分析完成，新闻价值评分：%s", analysis.score)
 
 
-def _apply_summary_options(summary: AISummary, settings: AppSettings) -> AISummary:
+def _analysis_to_summary(analysis: NewsAnalysis, settings: AppSettings) -> AISummary:
     return AISummary(
-        summary=summary.summary if settings.ai_summary_enabled else "",
-        keywords=summary.keywords if settings.ai_keywords_enabled else [],
-        category=summary.category if settings.ai_category_enabled else "",
-        importance=summary.importance if settings.ai_importance_enabled else "",
+        summary=analysis.summary if settings.ai_summary_enabled else "",
+        keywords=analysis.keywords if settings.ai_keywords_enabled else [],
+        category="、".join(analysis.categories) if settings.ai_category_enabled else "",
+        importance=analysis.importance if settings.ai_importance_enabled else "",
     )
 
 
-def _translate_article(article: Article, translations: dict[str, str]) -> None:
-    try:
-        translations[article.news.url] = translate(article)
-    except Exception as exc:
-        logger.warning("⚠ AI 翻译失败 %s", exc)
-        return
+def _should_ignore(
+    article: Article,
+    settings: AppSettings,
+    analyses: dict[str, NewsAnalysis],
+) -> bool:
+    analysis = analyses.get(article.news.url)
 
-    logger.info("✔ AI 翻译完成")
+    if analysis is None:
+        return False
+
+    if analysis.score < settings.min_news_score:
+        logger.info("忽略低分新闻：%s 分，%s", analysis.score, analysis.reason)
+        return True
+
+    if settings.ai_auto_filter_enabled and not analysis.keep:
+        logger.info("AI 智能筛选忽略：%s", analysis.reason)
+        return True
+
+    return False
 
 
 def _export_articles(
@@ -264,29 +314,39 @@ def _export_context(
     translations: dict[str, str],
 ) -> ExportContext:
     return ExportContext(
+        report_title=settings.report_title,
         show_summary=settings.ai_summary_enabled,
         show_keywords=settings.ai_keywords_enabled,
         show_category=settings.ai_category_enabled,
         show_importance=settings.ai_importance_enabled,
         body_mode=settings.body_mode,
         translations=translations,
+        include_title=settings.include_title,
+        include_source=settings.include_source,
+        include_published=settings.include_published,
+        include_link=settings.include_link,
+        include_score=settings.include_score,
+        include_body=settings.include_body,
+        include_original=settings.include_original,
+        include_chinese=settings.include_chinese,
     )
 
 
 def _export_reports(
     articles: list[Article],
     ai_summaries: dict[str, AISummary],
+    analyses: dict[str, NewsAnalysis],
     context: ExportContext,
     markdown_enabled: bool,
     word_enabled: bool,
 ) -> None:
     if markdown_enabled:
-        export_markdown(articles, ai_summaries, context)
-        logger.info("✔ 导出 Markdown")
+        export_markdown(articles, ai_summaries, context, analyses)
+        logger.info("导出 Markdown")
 
     if word_enabled:
-        export_word(articles, ai_summaries, context)
-        logger.info("✔ 导出 Word")
+        export_word(articles, ai_summaries, context, analyses)
+        logger.info("导出 Word")
 
 
 def _date_range(settings: AppSettings) -> tuple[str, str] | None:

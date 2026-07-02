@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QMainWindow
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import QPushButton
 from PySide6.QtWidgets import QRadioButton
+from PySide6.QtWidgets import QSpinBox
 from PySide6.QtWidgets import QTextEdit
 from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
@@ -160,16 +161,74 @@ class MainWindow(QMainWindow):
         self.sqlite_check = QCheckBox(tr("sqlite"))
         self.markdown_check = QCheckBox(tr("markdown"))
         self.word_check = QCheckBox(tr("word"))
+        self.report_title_edit = QLabel("周报标题：")
+        self.rss_limit_combo = QComboBox()
+        self.min_score_spin = QSpinBox()
+        self.auto_filter_check = QCheckBox("AI 自动筛选新闻")
         self.sqlite_check.setChecked(True)
         self.markdown_check.setChecked(self.settings.export_markdown)
         self.word_check.setChecked(self.settings.export_word)
+        self._setup_limit_controls()
+        layout.addWidget(QLabel("周报标题"))
+        from PySide6.QtWidgets import QLineEdit
+
+        self.report_title_line = QLineEdit(self.settings.report_title)
+        layout.addWidget(self.report_title_line)
         layout.addWidget(self.sqlite_check)
         layout.addWidget(self.markdown_check)
         layout.addWidget(self.word_check)
+        layout.addWidget(QLabel("每个 RSS 最大读取数量"))
+        layout.addWidget(self.rss_limit_combo)
+        layout.addWidget(QLabel("最低保留分数"))
+        layout.addWidget(self.min_score_spin)
+        layout.addWidget(self.auto_filter_check)
         layout.addWidget(self._ai_box())
         layout.addWidget(self._body_mode_box())
+        layout.addWidget(self._content_box())
         layout.addWidget(self._date_box())
         layout.addStretch()
+
+        return box
+
+    def _setup_limit_controls(self) -> None:
+        for label, value in [
+            ("10", 10),
+            ("20", 20),
+            ("30", 30),
+            ("50", 50),
+            ("100", 100),
+            ("无限制", 0),
+        ]:
+            self.rss_limit_combo.addItem(label, value)
+
+        self.rss_limit_combo.setCurrentIndex(
+            max(self.rss_limit_combo.findData(self.settings.rss_limit), 1)
+        )
+        self.rss_limit_combo.currentIndexChanged.connect(self._update_estimate)
+        self.min_score_spin.setRange(0, 100)
+        self.min_score_spin.setValue(self.settings.min_news_score)
+        self.auto_filter_check.setChecked(self.settings.ai_auto_filter_enabled)
+
+    def _content_box(self) -> QGroupBox:
+        box = QGroupBox("导出内容")
+        layout = QVBoxLayout(box)
+        self.include_title_check = QCheckBox("标题")
+        self.include_source_check = QCheckBox("来源")
+        self.include_published_check = QCheckBox("发布时间")
+        self.include_link_check = QCheckBox("链接")
+        self.include_score_check = QCheckBox("新闻价值评分")
+        self.include_body_check = QCheckBox("正文")
+
+        for checkbox, checked in [
+            (self.include_title_check, self.settings.include_title),
+            (self.include_source_check, self.settings.include_source),
+            (self.include_published_check, self.settings.include_published),
+            (self.include_link_check, self.settings.include_link),
+            (self.include_score_check, self.settings.include_score),
+            (self.include_body_check, self.settings.include_body),
+        ]:
+            checkbox.setChecked(checked)
+            layout.addWidget(checkbox)
 
         return box
 
@@ -397,11 +456,21 @@ class MainWindow(QMainWindow):
             load_settings(),
             export_markdown=self.markdown_check.isChecked(),
             export_word=self.word_check.isChecked(),
+            report_title=self.report_title_line.text().strip() or "SpaceWeekly",
+            rss_limit=int(self.rss_limit_combo.currentData()),
+            min_news_score=self.min_score_spin.value(),
+            ai_auto_filter_enabled=self.auto_filter_check.isChecked(),
             ai_translation_enabled=self.ai_translation_check.isChecked(),
             ai_summary_enabled=self.ai_summary_check.isChecked(),
             ai_keywords_enabled=self.ai_keywords_check.isChecked(),
             ai_category_enabled=self.ai_category_check.isChecked(),
             ai_importance_enabled=self.ai_importance_check.isChecked(),
+            include_title=self.include_title_check.isChecked(),
+            include_source=self.include_source_check.isChecked(),
+            include_published=self.include_published_check.isChecked(),
+            include_link=self.include_link_check.isChecked(),
+            include_score=self.include_score_check.isChecked(),
+            include_body=self.include_body_check.isChecked(),
             body_mode=str(body_mode),
             date_mode=str(self.date_mode_combo.currentData()),
             start_date=self.start_date_edit.date().toString("yyyy-MM-dd"),

@@ -34,6 +34,31 @@ class AppSettings:
     max_article_tokens: int
     max_daily_api_calls: int
     ai_limit_action: str
+    rss_limit: int
+    min_news_score: int
+    ai_auto_filter_enabled: bool
+    report_title: str
+    ai_provider: str
+    summary_prompt: str
+    translation_prompt: str
+    category_prompt: str
+    score_prompt: str
+    filter_prompt: str
+    include_title: bool
+    include_source: bool
+    include_published: bool
+    include_link: bool
+    include_score: bool
+    include_summary: bool
+    include_translation: bool
+    include_categories: bool
+    include_keywords: bool
+    include_body: bool
+    include_original: bool
+    include_chinese: bool
+    daily_token_limit: int
+    token_limit_action: str
+    release_mode: bool
 
 
 def default_settings() -> AppSettings:
@@ -62,6 +87,31 @@ def default_settings() -> AppSettings:
         max_article_tokens=2000,
         max_daily_api_calls=100,
         ai_limit_action="skip",
+        rss_limit=20,
+        min_news_score=70,
+        ai_auto_filter_enabled=True,
+        report_title="SpaceWeekly",
+        ai_provider="DeepSeek",
+        summary_prompt="",
+        translation_prompt="",
+        category_prompt="",
+        score_prompt="",
+        filter_prompt="",
+        include_title=True,
+        include_source=True,
+        include_published=True,
+        include_link=True,
+        include_score=True,
+        include_summary=True,
+        include_translation=True,
+        include_categories=True,
+        include_keywords=True,
+        include_body=True,
+        include_original=True,
+        include_chinese=True,
+        daily_token_limit=100000,
+        token_limit_action="ask",
+        release_mode=True,
     )
 
 
@@ -99,6 +149,31 @@ def load_settings() -> AppSettings:
         max_article_tokens=int(data.get("max_article_tokens") or defaults.max_article_tokens),
         max_daily_api_calls=int(data.get("max_daily_api_calls") or defaults.max_daily_api_calls),
         ai_limit_action=str(data.get("ai_limit_action") or defaults.ai_limit_action),
+        rss_limit=int(data.get("rss_limit") or defaults.rss_limit),
+        min_news_score=int(data.get("min_news_score") or defaults.min_news_score),
+        ai_auto_filter_enabled=bool(data.get("ai_auto_filter_enabled", defaults.ai_auto_filter_enabled)),
+        report_title=str(data.get("report_title") or defaults.report_title),
+        ai_provider=str(data.get("ai_provider") or defaults.ai_provider),
+        summary_prompt=str(data.get("summary_prompt") or defaults.summary_prompt),
+        translation_prompt=str(data.get("translation_prompt") or defaults.translation_prompt),
+        category_prompt=str(data.get("category_prompt") or defaults.category_prompt),
+        score_prompt=str(data.get("score_prompt") or defaults.score_prompt),
+        filter_prompt=str(data.get("filter_prompt") or defaults.filter_prompt),
+        include_title=bool(data.get("include_title", defaults.include_title)),
+        include_source=bool(data.get("include_source", defaults.include_source)),
+        include_published=bool(data.get("include_published", defaults.include_published)),
+        include_link=bool(data.get("include_link", defaults.include_link)),
+        include_score=bool(data.get("include_score", defaults.include_score)),
+        include_summary=bool(data.get("include_summary", defaults.include_summary)),
+        include_translation=bool(data.get("include_translation", defaults.include_translation)),
+        include_categories=bool(data.get("include_categories", defaults.include_categories)),
+        include_keywords=bool(data.get("include_keywords", defaults.include_keywords)),
+        include_body=bool(data.get("include_body", defaults.include_body)),
+        include_original=bool(data.get("include_original", defaults.include_original)),
+        include_chinese=bool(data.get("include_chinese", defaults.include_chinese)),
+        daily_token_limit=int(data.get("daily_token_limit") or defaults.daily_token_limit),
+        token_limit_action=str(data.get("token_limit_action") or defaults.token_limit_action),
+        release_mode=bool(data.get("release_mode", defaults.release_mode)),
     )
 
 

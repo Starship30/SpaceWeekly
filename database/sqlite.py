@@ -106,6 +106,8 @@ def get_articles_by_date(start_date: str, end_date: str) -> list[Article]:
 
 
 def _connect() -> sqlite3.Connection:
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     return sqlite3.connect(DATABASE_PATH)
 
 

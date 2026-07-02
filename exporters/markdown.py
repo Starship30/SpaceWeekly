@@ -6,17 +6,19 @@ from config import OUTPUT_DIR
 from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
+from models.news_analysis import NewsAnalysis
 
 
 def export_markdown(
     articles: list[Article],
     ai_summaries: dict[str, AISummary] | None = None,
     context: ExportContext | None = None,
+    analyses: dict[str, NewsAnalysis] | None = None,
 ) -> Path:
     """Export articles to a UTF-8 Markdown weekly report."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = _output_path()
-    content = _build_markdown(articles, ai_summaries or {}, context)
+    content = _build_markdown(articles, ai_summaries or {}, context, analyses or {})
     output_path.write_text(content, encoding="utf-8")
 
     return output_path
@@ -32,11 +34,12 @@ def _build_markdown(
     articles: list[Article],
     ai_summaries: dict[str, AISummary],
     context: ExportContext | None,
+    analyses: dict[str, NewsAnalysis],
 ) -> str:
     sorted_articles = _sort_articles(articles)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
-        "# SpaceWeekly",
+        f"# {_report_title(context)}",
         "",
         f"生成时间：{now}",
         "",
@@ -45,8 +48,8 @@ def _build_markdown(
         *_stats_lines(sorted_articles, ai_summaries),
     ]
 
-    for source, source_articles in _group_by_source(sorted_articles).items():
-        lines.extend(_source_lines(source, source_articles, ai_summaries, context))
+    for category, category_articles in _group_by_category(sorted_articles, analyses).items():
+        lines.extend(_category_lines(category, category_articles, ai_summaries, context, analyses))
 
     return "\n".join(lines)
 
@@ -93,11 +96,25 @@ def _stats_lines(
     return lines
 
 
-def _group_by_source(articles: list[Article]) -> dict[str, list[Article]]:
+def _report_title(context: ExportContext | None) -> str:
+    if context is None:
+        return "SpaceWeekly"
+
+    return context.report_title or "SpaceWeekly"
+
+
+def _group_by_category(
+    articles: list[Article],
+    analyses: dict[str, NewsAnalysis],
+) -> dict[str, list[Article]]:
     grouped: dict[str, list[Article]] = {}
 
     for article in articles:
-        grouped.setdefault(_source_name(article), []).append(article)
+        analysis = analyses.get(article.news.url)
+        categories = analysis.categories if analysis and analysis.categories else ["其它"]
+
+        for category in categories:
+            grouped.setdefault(category, []).append(article)
 
     return grouped
 
@@ -144,16 +161,24 @@ def _category_stats(
     return stats
 
 
-def _source_lines(
-    source: str,
+def _category_lines(
+    category: str,
     articles: list[Article],
     ai_summaries: dict[str, AISummary],
     context: ExportContext | None,
+    analyses: dict[str, NewsAnalysis],
 ) -> list[str]:
-    lines = [f"# {source}", ""]
+    lines = [f"# {category}", ""]
 
     for article in articles:
-        lines.extend(_article_lines(article, ai_summaries.get(article.news.url), context))
+        lines.extend(
+            _article_lines(
+                article,
+                ai_summaries.get(article.news.url),
+                context,
+                analyses.get(article.news.url),
+            )
+        )
 
     return lines
 
@@ -162,25 +187,34 @@ def _article_lines(
     article: Article,
     ai_summary: AISummary | None,
     context: ExportContext | None,
+    analysis: NewsAnalysis | None,
 ) -> list[str]:
     news = article.news
-    lines = [
-        f"## {news.title}",
-        "",
-        f"来源：{_source_name(article)}",
-        "",
-        f"发布时间：{news.published}",
-        "",
-        f"链接：{news.url}",
-        "",
-    ]
+    lines: list[str] = []
+
+    if context is None or context.include_title:
+        lines.extend([f"## {news.title}", ""])
+
+    if context is None or context.include_source:
+        lines.extend([f"来源：{_source_name(article)}", ""])
+
+    if context is None or context.include_published:
+        lines.extend([f"发布时间：{news.published}", ""])
+
+    if analysis is not None and (context is None or context.include_score):
+        lines.extend([f"新闻价值评分：{analysis.score} 分", f"筛选原因：{analysis.reason}", ""])
+
+    if context is None or context.include_link:
+        lines.extend([f"链接：{news.url}", ""])
 
     if ai_summary is None:
         lines.extend([f"摘要：{news.summary}", ""])
     else:
         lines.extend(_ai_summary_lines(ai_summary, context))
 
-    lines.extend(_body_lines(article, context))
+    if context is None or context.include_body:
+        lines.extend(_body_lines(article, context))
+
     lines.extend(["---", ""])
 
     return lines
@@ -219,6 +253,9 @@ def _body_lines(article: Article, context: ExportContext | None) -> list[str]:
 
     if context is not None and context.body_mode == "bilingual" and translation:
         return ["正文：", "", _bilingual_body(article.body, translation), ""]
+
+    if context is not None and not context.include_original:
+        return []
 
     return ["正文：", "", article.body, ""]
 

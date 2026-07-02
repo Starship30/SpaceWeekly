@@ -11,8 +11,10 @@ from PySide6.QtWidgets import QFormLayout
 from PySide6.QtWidgets import QGroupBox
 from PySide6.QtWidgets import QHBoxLayout
 from PySide6.QtWidgets import QLineEdit
+from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import QPushButton
 from PySide6.QtWidgets import QSpinBox
+from PySide6.QtWidgets import QTextEdit
 from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
 
@@ -40,6 +42,7 @@ class SettingsDialog(QDialog):
             deepseek_api_key=self.api_key_edit.text().strip(),
             deepseek_base_url=self.base_url_edit.text().strip(),
             deepseek_model=self.model_edit.text().strip(),
+            ai_provider=self.provider_combo.currentText(),
             temperature=self.temperature_spin.value(),
             max_tokens=self.max_tokens_spin.value(),
             user_agent=self.user_agent_edit.text().strip(),
@@ -53,6 +56,11 @@ class SettingsDialog(QDialog):
             max_article_tokens=self.max_article_tokens_spin.value(),
             max_daily_api_calls=self.max_daily_calls_spin.value(),
             ai_limit_action=self.limit_action_combo.currentData(),
+            summary_prompt=self.summary_prompt_edit.toPlainText().strip(),
+            translation_prompt=self.translation_prompt_edit.toPlainText().strip(),
+            category_prompt=self.category_prompt_edit.toPlainText().strip(),
+            score_prompt=self.score_prompt_edit.toPlainText().strip(),
+            filter_prompt=self.filter_prompt_edit.toPlainText().strip(),
         )
 
     def _set_icon(self) -> None:
@@ -64,6 +72,11 @@ class SettingsDialog(QDialog):
     def _create_fields(self, settings: AppSettings) -> None:
         self.api_key_edit = QLineEdit(settings.deepseek_api_key)
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(
+            ["DeepSeek", "OpenAI", "Gemini", "Claude", "OpenRouter", "SiliconFlow"]
+        )
+        self.provider_combo.setCurrentText(settings.ai_provider)
         self.base_url_edit = QLineEdit(settings.deepseek_base_url)
         self.model_edit = QLineEdit(settings.deepseek_model)
         self.temperature_spin = QDoubleSpinBox()
@@ -100,10 +113,16 @@ class SettingsDialog(QDialog):
         self.limit_action_combo.setCurrentIndex(
             max(self.limit_action_combo.findData(settings.ai_limit_action), 0)
         )
+        self.summary_prompt_edit = QTextEdit(settings.summary_prompt)
+        self.translation_prompt_edit = QTextEdit(settings.translation_prompt)
+        self.category_prompt_edit = QTextEdit(settings.category_prompt)
+        self.score_prompt_edit = QTextEdit(settings.score_prompt)
+        self.filter_prompt_edit = QTextEdit(settings.filter_prompt)
 
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
         layout.addWidget(self._ai_config_box())
+        layout.addWidget(self._prompt_box())
         layout.addWidget(self._ai_cost_box())
         layout.addWidget(self._path_box())
 
@@ -118,6 +137,7 @@ class SettingsDialog(QDialog):
     def _ai_config_box(self) -> QGroupBox:
         box = QGroupBox("AI 设置")
         layout = QFormLayout(box)
+        layout.addRow("Provider", self.provider_combo)
         layout.addRow("DeepSeek API Key", self.api_key_edit)
         layout.addRow("Base URL", self.base_url_edit)
         layout.addRow("Model", self.model_edit)
@@ -125,6 +145,23 @@ class SettingsDialog(QDialog):
         layout.addRow("Max Tokens", self.max_tokens_spin)
         layout.addRow(self.ai_summary_check)
         layout.addRow(self.ai_translation_check)
+        test_button = QPushButton("测试连接")
+        test_button.clicked.connect(self._test_connection)
+        layout.addRow(test_button)
+
+        return box
+
+    def _prompt_box(self) -> QGroupBox:
+        box = QGroupBox("自定义 Prompt")
+        layout = QFormLayout(box)
+        layout.addRow("摘要 Prompt", self.summary_prompt_edit)
+        layout.addRow("翻译 Prompt", self.translation_prompt_edit)
+        layout.addRow("分类 Prompt", self.category_prompt_edit)
+        layout.addRow("评分 Prompt", self.score_prompt_edit)
+        layout.addRow("筛选 Prompt", self.filter_prompt_edit)
+        reset_button = QPushButton("恢复默认")
+        reset_button.clicked.connect(self._reset_prompts)
+        layout.addRow(reset_button)
 
         return box
 
@@ -168,3 +205,24 @@ class SettingsDialog(QDialog):
 
         if path:
             edit.setText(path)
+
+    def _test_connection(self) -> None:
+        if not self.api_key_edit.text().strip():
+            QMessageBox.warning(self, "测试连接", "请先填写 API Key。")
+            return
+
+        if not self.base_url_edit.text().strip() or not self.model_edit.text().strip():
+            QMessageBox.warning(self, "测试连接", "请填写 Base URL 和 Model。")
+            return
+
+        QMessageBox.information(self, "测试连接", "配置已填写，可用于生成时连接。")
+
+    def _reset_prompts(self) -> None:
+        for editor in [
+            self.summary_prompt_edit,
+            self.translation_prompt_edit,
+            self.category_prompt_edit,
+            self.score_prompt_edit,
+            self.filter_prompt_edit,
+        ]:
+            editor.clear()

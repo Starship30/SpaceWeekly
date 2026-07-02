@@ -5,12 +5,14 @@ from config import OUTPUT_DIR
 from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
+from models.news_analysis import NewsAnalysis
 
 
 def export_word(
     articles: list[Article],
     ai_summaries: dict[str, AISummary] | None = None,
     context: ExportContext | None = None,
+    analyses: dict[str, NewsAnalysis] | None = None,
 ) -> Path:
     """Export articles to a styled Word document."""
     from docx import Document
@@ -19,13 +21,19 @@ def export_word(
     output_path = _output_path()
     document = Document()
     _setup_styles(document)
-    document.add_heading("SpaceWeekly", level=0)
+    document.add_heading(_report_title(context), level=0)
 
     for index, article in enumerate(articles):
         if index:
             document.add_page_break()
 
-        _add_article(document, article, (ai_summaries or {}).get(article.news.url), context)
+        _add_article(
+            document,
+            article,
+            (ai_summaries or {}).get(article.news.url),
+            context,
+            (analyses or {}).get(article.news.url),
+        )
 
     document.save(output_path)
 
@@ -54,27 +62,49 @@ def _setup_styles(document) -> None:
     document.styles["Heading 2"].font.bold = True
 
 
+def _report_title(context: ExportContext | None) -> str:
+    if context is None:
+        return "SpaceWeekly"
+
+    return context.report_title or "SpaceWeekly"
+
+
 def _add_article(
     document,
     article: Article,
     ai_summary: AISummary | None,
     context: ExportContext | None,
+    analysis: NewsAnalysis | None,
 ) -> None:
     news = article.news
-    document.add_heading(news.title, level=1)
-    _add_label(document, "发布时间", news.published)
-    _add_label(document, "来源", news.source)
+
+    if context is None or context.include_title:
+        document.add_heading(news.title, level=1)
+
+    if context is None or context.include_published:
+        _add_label(document, "发布时间", news.published)
+
+    if context is None or context.include_source:
+        _add_label(document, "来源", news.source)
+
+    if analysis is not None and (context is None or context.include_score):
+        _add_label(document, "新闻价值评分", f"{analysis.score} 分")
+        _add_label(document, "筛选原因", analysis.reason)
+        _add_label(document, "分类", "、".join(analysis.categories))
 
     if ai_summary is None:
         _add_label(document, "摘要", news.summary)
     else:
         _add_ai_summary(document, ai_summary, context)
 
-    document.add_heading("正文", level=2)
-    document.add_paragraph(_body_text(article, context))
-    paragraph = document.add_paragraph()
-    paragraph.add_run("链接：").bold = True
-    _add_hyperlink(paragraph, news.url, news.url)
+    if context is None or context.include_body:
+        document.add_heading("正文", level=2)
+        document.add_paragraph(_body_text(article, context))
+
+    if context is None or context.include_link:
+        paragraph = document.add_paragraph()
+        paragraph.add_run("链接：").bold = True
+        _add_hyperlink(paragraph, news.url, news.url)
 
 
 def _add_ai_summary(document, ai_summary: AISummary, context: ExportContext | None) -> None:
@@ -107,6 +137,9 @@ def _body_text(article: Article, context: ExportContext | None) -> str:
 
     if context is not None and context.body_mode == "bilingual" and translation:
         return _bilingual_body(article.body, translation)
+
+    if context is not None and not context.include_original:
+        return ""
 
     return article.body
 

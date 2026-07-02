@@ -43,3 +43,60 @@ def build_translation_prompt(article: Article) -> str:
 正文：
 {article.body}
 """.strip()
+
+
+def build_analysis_prompt(
+    article: Article,
+    summary_prompt: str = "",
+    translation_prompt: str = "",
+    category_prompt: str = "",
+    score_prompt: str = "",
+    filter_prompt: str = "",
+) -> str:
+    """Build a full intelligent analysis prompt."""
+    return f"""
+请分析下面的航天新闻，并只返回 JSON，不要输出 Markdown。
+除 NASA、ESA、JPL、SpaceX、Falcon 9、Artemis 等专有名词外，全部使用简体中文。
+
+你需要返回：
+- summary：中文摘要
+- translation：正文中文译文
+- keywords：中文关键词数组
+- categories：分类数组，可多选
+- importance：高、中、低
+- score：0 到 100 的新闻价值评分
+- keep：true 或 false，是否值得进入周报
+- reason：保留或忽略的原因
+
+可选分类：
+火箭与发射、卫星、月球、火星、太阳、行星科学、小行星、深空探测、宇宙学、天文学、
+空间站、载人航天、探测器、地球观测、空间科学、商业航天、航天政策、科普、娱乐、其它。
+
+评分标准：
+重大航天任务、重大科学发现、首次事件、重大政策、重大事故、重要论文评分高。
+普通更新、摄影作品、每日天象、娱乐内容、广告、重复报道评分低。
+
+自定义摘要 Prompt：
+{summary_prompt}
+
+自定义翻译 Prompt：
+{translation_prompt}
+
+自定义分类 Prompt：
+{category_prompt}
+
+自定义评分 Prompt：
+{score_prompt}
+
+自定义筛选 Prompt：
+{filter_prompt}
+
+新闻标题：
+{article.news.title}
+
+RSS 摘要：
+{article.news.summary}
+
+正文：
+{article.body}
+""".strip()
