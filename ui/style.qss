@@ -1,0 +1,100 @@
+QMainWindow {
+    background: #f6f8fa;
+}
+
+QToolBar {
+    background: #ffffff;
+    border: none;
+    border-bottom: 1px solid #d8dee4;
+    spacing: 6px;
+    padding: 6px 10px;
+}
+
+QToolButton {
+    padding: 6px 8px;
+    border-radius: 6px;
+}
+
+QToolButton:hover {
+    background: #eef2f6;
+}
+
+QSplitter::handle {
+    background: #d8dee4;
+}
+
+QLabel#PanelTitle {
+    color: #24292f;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+QLabel#SectionTitle {
+    color: #24292f;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+QFrame#SubtlePanel {
+    background: #ffffff;
+    border: 1px solid #d8dee4;
+    border-radius: 8px;
+}
+
+QListWidget,
+QTextEdit,
+QPlainTextEdit,
+QLineEdit,
+QSpinBox,
+QDoubleSpinBox,
+QComboBox,
+QDateEdit {
+    background: #ffffff;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 5px 7px;
+    selection-background-color: #0969da;
+}
+
+QPushButton {
+    background: #ffffff;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    color: #24292f;
+    min-height: 28px;
+    padding: 4px 10px;
+}
+
+QPushButton:hover {
+    background: #f3f4f6;
+}
+
+QPushButton#PrimaryButton {
+    background: #2da44e;
+    border-color: #2a9146;
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 700;
+    min-width: 150px;
+}
+
+QPushButton#PrimaryButton:hover {
+    background: #2c974b;
+}
+
+QLabel#MetricLabel {
+    color: #57606a;
+    font-size: 12px;
+}
+
+QLabel#MetricValue {
+    color: #24292f;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+QStatusBar {
+    background: #ffffff;
+    border-top: 1px solid #d8dee4;
+    color: #57606a;
+}

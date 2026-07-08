@@ -2,7 +2,7 @@ import sys
 import shutil
 from pathlib import Path
 
-WRITABLE_ROOTS = {"config.json", "feeds.json", "output", "database"}
+WRITABLE_ROOTS = {"config.json", "feeds.json", "output", "database", "prompts"}
 
 
 def resource_path(*parts: str) -> Path:
@@ -28,6 +28,9 @@ def _writable_path(*parts: str) -> Path:
         return target
 
     bundled = Path(sys._MEIPASS).joinpath(*parts)
+
+    if bundled.is_dir():
+        shutil.copytree(bundled, target, dirs_exist_ok=True)
 
     if bundled.is_file():
         target.parent.mkdir(parents=True, exist_ok=True)

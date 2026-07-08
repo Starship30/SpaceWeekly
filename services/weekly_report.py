@@ -20,6 +20,8 @@ from models.news import News
 from models.news_analysis import NewsAnalysis
 from services.feed_manager import FeedSource
 from services.feed_manager import enabled_feeds
+from services.prompt_manager import find_preset
+from services.prompt_manager import prompt_value
 from services.settings import AppSettings
 from services.settings import apply_settings
 from services.settings import load_settings
@@ -40,12 +42,12 @@ def generate_weekly(
     selected_feeds = feeds if feeds is not None else enabled_feeds()
     markdown_enabled = _enabled(export_markdown_enabled, settings.export_markdown)
     word_enabled = _enabled(export_word_enabled, settings.export_word)
+    date_range = _date_range(settings)
     ai_summaries: dict[str, AISummary] = {}
     analyses: dict[str, NewsAnalysis] = {}
     translations: dict[str, str] = {}
     articles: list[Article] = []
     api_calls = 0
-    date_range = _date_range(settings)
 
     if export_sqlite:
         initialize_database()
@@ -84,7 +86,14 @@ def generate_weekly(
 
     export_articles = _export_articles(export_sqlite, articles, date_range)
     context = _export_context(settings, translations)
-    _export_reports(export_articles, ai_summaries, analyses, context, markdown_enabled, word_enabled)
+    _export_reports(
+        export_articles,
+        ai_summaries,
+        analyses,
+        context,
+        markdown_enabled,
+        word_enabled,
+    )
 
     return articles
 
@@ -94,7 +103,7 @@ def estimate_generation(feeds: list[FeedSource], settings: AppSettings) -> tuple
     per_feed = settings.rss_limit if settings.rss_limit > 0 else 100
     article_count = max(len([feed for feed in feeds if feed.enabled]) * per_feed, 0)
     token_count = article_count * settings.max_article_tokens
-    api_factor = int(settings.ai_summary_enabled) + int(settings.ai_translation_enabled)
+    api_factor = int(_pipeline_ai_enabled(settings))
     seconds = article_count * max(api_factor, 1) * 8
 
     return article_count, token_count, seconds
@@ -111,7 +120,6 @@ def _fetch_news(feeds: list[FeedSource], rss_limit: int = 0) -> list[News]:
 
     for feed in feeds:
         parsed_feed = feedparser.parse(feed.rss)
-
         entries = parsed_feed.entries
 
         if rss_limit > 0:
@@ -175,14 +183,14 @@ def _parse_article(news: News) -> Article | None:
     try:
         html = download(news.url)
     except Exception as exc:
-        logger.warning("HTML 获取失败 %s %s", news.url, exc)
-        return None
+        logger.warning("HTML 获取失败 %s %s，使用 RSS Summary 回退", news.url, exc)
+        return _rss_summary_article(news)
 
     try:
         article = parser(news, html)
     except Exception as exc:
-        logger.warning("Parser 异常 %s %s", news.url, exc)
-        return None
+        logger.warning("Parser 异常 %s %s，使用 RSS Summary 回退", news.url, exc)
+        return _rss_summary_article(news)
 
     if article.parser == "Generic":
         logger.info("Using Generic Parser")
@@ -190,6 +198,12 @@ def _parse_article(news: News) -> Article | None:
         logger.info("解析 %s", article.parser)
 
     return article
+
+
+def _rss_summary_article(news: News) -> Article:
+    body = news.summary.strip() or news.title
+
+    return Article(news=news, body=body, parser="RSS Summary")
 
 
 def _run_ai(
@@ -200,27 +214,31 @@ def _run_ai(
     analyses: dict[str, NewsAnalysis],
     api_calls: int,
 ) -> int:
+    if not _pipeline_ai_enabled(settings):
+        return api_calls
+
     if _ai_limit_reached(settings, api_calls):
         _handle_ai_limit(settings)
         return api_calls
 
-    if _summary_enabled(settings):
-        api_calls += 1
-        _analyze_article(article, settings, ai_summaries, translations, analyses)
+    api_calls += 1
+    _analyze_article(article, settings, ai_summaries, translations, analyses)
 
     return api_calls
 
 
-def _summary_enabled(settings: AppSettings) -> bool:
+def _pipeline_ai_enabled(settings: AppSettings) -> bool:
     return any(
         [
+            settings.pipeline_score_enabled,
+            settings.pipeline_filter_enabled,
+            settings.pipeline_category_enabled,
+            settings.pipeline_keywords_enabled,
+            settings.pipeline_summary_enabled,
+            settings.pipeline_translation_enabled,
             settings.ai_summary_enabled,
-            settings.ai_keywords_enabled,
-            settings.ai_category_enabled,
-            settings.ai_importance_enabled,
             settings.ai_translation_enabled,
             settings.ai_auto_filter_enabled,
-            settings.include_score,
         ]
     )
 
@@ -245,32 +263,43 @@ def _analyze_article(
     translations: dict[str, str],
     analyses: dict[str, NewsAnalysis],
 ) -> None:
+    preset = find_preset(settings.prompt_preset)
+
     try:
         analysis = analyze(
             article,
             provider=settings.ai_provider,
-            summary_prompt=settings.summary_prompt,
-            translation_prompt=settings.translation_prompt,
-            category_prompt=settings.category_prompt,
-            score_prompt=settings.score_prompt,
-            filter_prompt=settings.filter_prompt,
+            summary_prompt=prompt_value(settings.summary_prompt, preset, "summary"),
+            translation_prompt=prompt_value(
+                settings.translation_prompt,
+                preset,
+                "translation",
+            ),
+            category_prompt=prompt_value(settings.category_prompt, preset, "category"),
+            score_prompt=prompt_value(settings.score_prompt, preset, "score"),
+            filter_prompt=prompt_value(settings.filter_prompt, preset, "filter"),
         )
     except Exception as exc:
         logger.warning("AI 分析失败 %s", exc)
         return
 
     analyses[article.news.url] = analysis
-    translations[article.news.url] = analysis.translation
+
+    if settings.pipeline_translation_enabled:
+        translations[article.news.url] = analysis.translation
+
     ai_summaries[article.news.url] = _analysis_to_summary(analysis, settings)
-    logger.info("AI 分析完成，新闻价值评分：%s", analysis.score)
+    logger.info("AI 分析完成，重要程度：%s", _importance_level(analysis))
 
 
 def _analysis_to_summary(analysis: NewsAnalysis, settings: AppSettings) -> AISummary:
     return AISummary(
-        summary=analysis.summary if settings.ai_summary_enabled else "",
-        keywords=analysis.keywords if settings.ai_keywords_enabled else [],
-        category="、".join(analysis.categories) if settings.ai_category_enabled else "",
-        importance=analysis.importance if settings.ai_importance_enabled else "",
+        summary=analysis.summary if settings.pipeline_summary_enabled else "",
+        keywords=analysis.keywords if settings.pipeline_keywords_enabled else [],
+        category="、".join(analysis.categories)
+        if settings.pipeline_category_enabled
+        else "",
+        importance=_importance_level(analysis) if settings.ai_importance_enabled else "",
     )
 
 
@@ -284,15 +313,71 @@ def _should_ignore(
     if analysis is None:
         return False
 
-    if analysis.score < settings.min_news_score:
-        logger.info("忽略低分新闻：%s 分，%s", analysis.score, analysis.reason)
+    if settings.pipeline_score_enabled and not _importance_allowed(analysis, settings):
+        logger.info(
+            "忽略非目标重要程度新闻：%s，%s",
+            _importance_level(analysis),
+            analysis.reason,
+        )
         return True
 
-    if settings.ai_auto_filter_enabled and not analysis.keep:
+    if (
+        settings.pipeline_filter_enabled
+        and settings.ai_auto_filter_enabled
+        and not analysis.keep
+    ):
         logger.info("AI 智能筛选忽略：%s", analysis.reason)
         return True
 
     return False
+
+
+def _importance_allowed(analysis: NewsAnalysis, settings: AppSettings) -> bool:
+    level = _importance_level(analysis)
+    style = settings.report_style or "standard"
+
+    if style == "complete":
+        return True
+
+    if style == "curated":
+        return level == "High"
+
+    if style == "custom":
+        return (
+            (level == "High" and settings.report_style_custom_high)
+            or (level == "Medium" and settings.report_style_custom_medium)
+            or (level == "Low" and settings.report_style_custom_low)
+        )
+
+    return level in {"High", "Medium"}
+
+
+def _importance_level(analysis: NewsAnalysis) -> str:
+    text = (analysis.importance or "").strip().lower()
+    aliases = {
+        "high": "High",
+        "高": "High",
+        "重点": "High",
+        "本周重点": "High",
+        "medium": "Medium",
+        "中": "Medium",
+        "推荐": "Medium",
+        "推荐阅读": "Medium",
+        "low": "Low",
+        "低": "Low",
+        "简讯": "Low",
+    }
+
+    if text in aliases:
+        return aliases[text]
+
+    if analysis.score >= 80:
+        return "High"
+
+    if analysis.score >= 50:
+        return "Medium"
+
+    return "Low"
 
 
 def _export_articles(
@@ -315,9 +400,9 @@ def _export_context(
 ) -> ExportContext:
     return ExportContext(
         report_title=settings.report_title,
-        show_summary=settings.ai_summary_enabled,
-        show_keywords=settings.ai_keywords_enabled,
-        show_category=settings.ai_category_enabled,
+        show_summary=settings.pipeline_summary_enabled,
+        show_keywords=settings.pipeline_keywords_enabled,
+        show_category=settings.pipeline_category_enabled,
         show_importance=settings.ai_importance_enabled,
         body_mode=settings.body_mode,
         translations=translations,
@@ -326,6 +411,10 @@ def _export_context(
         include_published=settings.include_published,
         include_link=settings.include_link,
         include_score=settings.include_score,
+        include_summary=settings.include_summary,
+        include_translation=settings.include_translation,
+        include_categories=settings.include_categories,
+        include_keywords=settings.include_keywords,
         include_body=settings.include_body,
         include_original=settings.include_original,
         include_chinese=settings.include_chinese,
@@ -382,8 +471,7 @@ def _estimate_tokens(news_list: list[News], settings: AppSettings) -> int:
 
 
 def _estimate_seconds(news_list: list[News], settings: AppSettings) -> int:
-    api_factor = int(_summary_enabled(settings)) + int(settings.ai_translation_enabled)
-    return len(news_list) * max(api_factor, 1) * 8
+    return len(news_list) * max(int(_pipeline_ai_enabled(settings)), 1) * 8
 
 
 def _limit_article_tokens(article: Article, max_tokens: int) -> Article:

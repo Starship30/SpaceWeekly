@@ -1,5 +1,5 @@
 {
-  "app.title": "SpaceWeekly v1.5 AI Translation Edition",
+  "app.title": "SpaceWeekly v2.1 AI Workflow Edition",
   "feed.sources": "RSS Feeds",
   "add": "Add",
   "edit": "Edit",
@@ -36,7 +36,7 @@
   "running": "Running...",
   "finished": "Finished",
   "estimate": "Articles: {articles}  Tokens: {tokens}  Time: about {seconds}s",
-  "about.text": "SpaceWeekly v1.5 AI Translation Edition\\n\\nAerospace weekly report generator.",
+  "about.text": "SpaceWeekly v2.1 AI Workflow Edition\\n\\nAI Aerospace News Workspace.",
   "feed.dialog.title": "RSS Feed",
   "name": "Name",
   "enabled": "Enabled"

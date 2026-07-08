@@ -7,6 +7,12 @@ from models.article import Article
 from models.export_context import ExportContext
 from models.news_analysis import NewsAnalysis
 
+IMPORTANCE_SECTIONS = [
+    ("High", "高"),
+    ("Medium", "中"),
+    ("Low", "低"),
+]
+
 
 def export_word(
     articles: list[Article],
@@ -23,17 +29,20 @@ def export_word(
     _setup_styles(document)
     document.add_heading(_report_title(context), level=0)
 
-    for index, article in enumerate(articles):
-        if index:
-            document.add_page_break()
+    for section, section_articles in _group_by_importance(
+        articles,
+        analyses or {},
+    ).items():
+        document.add_heading(section, level=1)
 
-        _add_article(
-            document,
-            article,
-            (ai_summaries or {}).get(article.news.url),
-            context,
-            (analyses or {}).get(article.news.url),
-        )
+        for article in section_articles:
+            _add_article(
+                document,
+                article,
+                (ai_summaries or {}).get(article.news.url),
+                context,
+                (analyses or {}).get(article.news.url),
+            )
 
     document.save(output_path)
 
@@ -79,7 +88,7 @@ def _add_article(
     news = article.news
 
     if context is None or context.include_title:
-        document.add_heading(news.title, level=1)
+        document.add_heading(news.title, level=2)
 
     if context is None or context.include_published:
         _add_label(document, "发布时间", news.published)
@@ -88,8 +97,10 @@ def _add_article(
         _add_label(document, "来源", news.source)
 
     if analysis is not None and (context is None or context.include_score):
-        _add_label(document, "新闻价值评分", f"{analysis.score} 分")
-        _add_label(document, "筛选原因", analysis.reason)
+        _add_label(document, "重要程度", _importance_label(_importance_level(analysis)))
+        _add_label(document, "原因", analysis.reason)
+
+    if analysis is not None and (context is None or context.include_categories):
         _add_label(document, "分类", "、".join(analysis.categories))
 
     if ai_summary is None:
@@ -98,8 +109,11 @@ def _add_article(
         _add_ai_summary(document, ai_summary, context)
 
     if context is None or context.include_body:
-        document.add_heading("正文", level=2)
-        document.add_paragraph(_body_text(article, context))
+        body_text = _body_text(article, context)
+
+        if body_text:
+            document.add_heading("正文", level=2)
+            document.add_paragraph(body_text)
 
     if context is None or context.include_link:
         paragraph = document.add_paragraph()
@@ -108,29 +122,27 @@ def _add_article(
 
 
 def _add_ai_summary(document, ai_summary: AISummary, context: ExportContext | None) -> None:
-    show_summary = context is None or context.show_summary
-    show_keywords = context is None or context.show_keywords
-    show_category = context is None or context.show_category
-    show_importance = context is None or context.show_importance
-
-    if show_summary:
+    if context is None or (context.show_summary and context.include_summary):
         paragraph = document.add_paragraph()
         paragraph.paragraph_format.space_after = 6
         run = paragraph.add_run(f"AI 摘要：{ai_summary.summary}")
         run.bold = True
 
-    if show_keywords:
+    if context is None or (context.show_keywords and context.include_keywords):
         _add_label(document, "关键词", "、".join(ai_summary.keywords))
 
-    if show_category:
+    if context is None or (context.show_category and context.include_categories):
         _add_label(document, "分类", ai_summary.category)
 
-    if show_importance:
-        _add_label(document, "重要程度", ai_summary.importance)
+    if context is None or (context.show_importance and context.include_score):
+        _add_label(document, "重要程度", _importance_label(ai_summary.importance))
 
 
 def _body_text(article: Article, context: ExportContext | None) -> str:
-    translation = (context.translations.get(article.news.url) if context else None)
+    translation = context.translations.get(article.news.url) if context else None
+
+    if context is not None and context.body_mode == "none":
+        return ""
 
     if context is not None and context.body_mode == "translated" and translation:
         return translation
@@ -185,3 +197,53 @@ def _add_hyperlink(paragraph, text: str, url: str) -> None:
     run.append(text_element)
     hyperlink.append(run)
     paragraph._element.append(hyperlink)
+
+
+def _group_by_importance(
+    articles: list[Article],
+    analyses: dict[str, NewsAnalysis],
+) -> dict[str, list[Article]]:
+    grouped = {label: [] for _, label in IMPORTANCE_SECTIONS}
+
+    for article in articles:
+        analysis = analyses.get(article.news.url)
+        label = _importance_label(_importance_level(analysis))
+        grouped.setdefault(label, []).append(article)
+
+    return {label: items for label, items in grouped.items() if items}
+
+
+def _importance_level(analysis: NewsAnalysis | None) -> str:
+    if analysis is None:
+        return "Medium"
+
+    text = (analysis.importance or "").strip().lower()
+    aliases = {
+        "high": "High",
+        "高": "High",
+        "medium": "Medium",
+        "中": "Medium",
+        "low": "Low",
+        "低": "Low",
+    }
+
+    if text in aliases:
+        return aliases[text]
+
+    if analysis.score >= 80:
+        return "High"
+
+    if analysis.score >= 50:
+        return "Medium"
+
+    return "Low"
+
+
+def _importance_label(level: str) -> str:
+    text = (level or "").strip()
+    aliases = {"High": "高", "Medium": "中", "Low": "低", "high": "高", "medium": "中", "low": "低"}
+
+    if text in aliases:
+        return aliases[text]
+
+    return text or "中"

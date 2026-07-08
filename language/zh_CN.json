@@ -1,5 +1,5 @@
 {
-  "app.title": "SpaceWeekly v1.5 AI 翻译版",
+  "app.title": "SpaceWeekly v2.1 AI Workflow Edition",
   "feed.sources": "RSS 新闻源",
   "add": "添加",
   "edit": "编辑",
@@ -23,9 +23,9 @@
   "body.translated": "中文译文",
   "date.filter": "时间筛选",
   "today": "今天",
-  "last3": "最近3天",
-  "last7": "最近7天",
-  "last30": "最近30天",
+  "last3": "最近 3 天",
+  "last7": "最近 7 天",
+  "last30": "最近 30 天",
   "custom": "自定义",
   "start.date": "开始日期",
   "end.date": "结束日期",
@@ -36,7 +36,7 @@
   "running": "运行中...",
   "finished": "已完成",
   "estimate": "预计文章：{articles}  预计 Token：{tokens}  预计耗时：约 {seconds} 秒",
-  "about.text": "SpaceWeekly v1.5 AI 翻译版\\n\\n航天新闻周报生成工具。",
+  "about.text": "SpaceWeekly v2.1 AI Workflow Edition\n\nAI 航天新闻工作台。",
   "feed.dialog.title": "RSS 新闻源",
   "name": "名称",
   "enabled": "启用"

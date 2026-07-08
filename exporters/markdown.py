@@ -8,6 +8,12 @@ from models.article import Article
 from models.export_context import ExportContext
 from models.news_analysis import NewsAnalysis
 
+IMPORTANCE_SECTIONS = [
+    ("High", "🔥 本周重点"),
+    ("Medium", "📰 推荐阅读"),
+    ("Low", "📌 简讯"),
+]
+
 
 def export_markdown(
     articles: list[Article],
@@ -48,8 +54,16 @@ def _build_markdown(
         *_stats_lines(sorted_articles, ai_summaries),
     ]
 
-    for category, category_articles in _group_by_category(sorted_articles, analyses).items():
-        lines.extend(_category_lines(category, category_articles, ai_summaries, context, analyses))
+    for category, category_articles in _group_by_importance(sorted_articles, analyses).items():
+        lines.extend(
+            _category_lines(
+                category,
+                category_articles,
+                ai_summaries,
+                context,
+                analyses,
+            )
+        )
 
     return "\n".join(lines)
 
@@ -119,6 +133,21 @@ def _group_by_category(
     return grouped
 
 
+def _group_by_importance(
+    articles: list[Article],
+    analyses: dict[str, NewsAnalysis],
+) -> dict[str, list[Article]]:
+    grouped = {label: [] for _, label in IMPORTANCE_SECTIONS}
+
+    for article in articles:
+        analysis = analyses.get(article.news.url)
+        level = _importance_level(analysis)
+        label = _importance_label(level)
+        grouped.setdefault(label, []).append(article)
+
+    return {label: items for label, items in grouped.items() if items}
+
+
 def _source_stats(articles: list[Article]) -> dict[str, int]:
     stats: dict[str, int] = {}
 
@@ -156,7 +185,8 @@ def _category_stats(
         if ai_summary is None or not ai_summary.category:
             continue
 
-        stats[ai_summary.category] = stats.get(ai_summary.category, 0) + 1
+        for category in ai_summary.category.split("、"):
+            stats[category] = stats.get(category, 0) + 1
 
     return stats
 
@@ -202,7 +232,13 @@ def _article_lines(
         lines.extend([f"发布时间：{news.published}", ""])
 
     if analysis is not None and (context is None or context.include_score):
-        lines.extend([f"新闻价值评分：{analysis.score} 分", f"筛选原因：{analysis.reason}", ""])
+        lines.extend(
+            [
+                f"重要程度：{_importance_level(analysis)}",
+                f"原因：{analysis.reason}",
+                "",
+            ]
+        )
 
     if context is None or context.include_link:
         lines.extend([f"链接：{news.url}", ""])
@@ -210,7 +246,7 @@ def _article_lines(
     if ai_summary is None:
         lines.extend([f"摘要：{news.summary}", ""])
     else:
-        lines.extend(_ai_summary_lines(ai_summary, context))
+        lines.extend(_ai_summary_lines(ai_summary, context, analysis is None))
 
     if context is None or context.include_body:
         lines.extend(_body_lines(article, context))
@@ -223,30 +259,30 @@ def _article_lines(
 def _ai_summary_lines(
     ai_summary: AISummary,
     context: ExportContext | None,
+    include_importance: bool,
 ) -> list[str]:
-    show_summary = context is None or context.show_summary
-    show_keywords = context is None or context.show_keywords
-    show_category = context is None or context.show_category
-    show_importance = context is None or context.show_importance
     lines: list[str] = []
 
-    if show_summary:
+    if context is None or (context.show_summary and context.include_summary):
         lines.extend([f"AI 摘要：{ai_summary.summary}", ""])
 
-    if show_keywords:
+    if context is None or (context.show_keywords and context.include_keywords):
         lines.extend([f"关键词：{'、'.join(ai_summary.keywords)}", ""])
 
-    if show_category:
+    if context is None or (context.show_category and context.include_categories):
         lines.extend([f"分类：{ai_summary.category}", ""])
 
-    if show_importance:
+    if include_importance and (context is None or (context.show_importance and context.include_score)):
         lines.extend([f"重要程度：{ai_summary.importance}", ""])
 
     return lines
 
 
 def _body_lines(article: Article, context: ExportContext | None) -> list[str]:
-    translation = (context.translations.get(article.news.url) if context else None)
+    translation = context.translations.get(article.news.url) if context else None
+
+    if context is not None and context.body_mode == "none":
+        return []
 
     if context is not None and context.body_mode == "translated" and translation:
         return ["正文：", "", translation, ""]
@@ -275,3 +311,37 @@ def _bilingual_body(original: str, translation: str) -> str:
         blocks.append("")
 
     return "\n".join(blocks).strip()
+
+
+def _importance_level(analysis: NewsAnalysis | None) -> str:
+    if analysis is None:
+        return "Medium"
+
+    text = (analysis.importance or "").strip().lower()
+    aliases = {
+        "high": "High",
+        "高": "High",
+        "medium": "Medium",
+        "中": "Medium",
+        "low": "Low",
+        "低": "Low",
+    }
+
+    if text in aliases:
+        return aliases[text]
+
+    if analysis.score >= 80:
+        return "High"
+
+    if analysis.score >= 50:
+        return "Medium"
+
+    return "Low"
+
+
+def _importance_label(level: str) -> str:
+    for value, label in IMPORTANCE_SECTIONS:
+        if value == level:
+            return label
+
+    return "📰 推荐阅读"

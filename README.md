@@ -1,6 +1,6 @@
 # SpaceWeekly
 
-SpaceWeekly v2.0 Intelligent Edition is an AI Aerospace News Workspace.
+SpaceWeekly v2.1 AI Workflow Edition is an AI Aerospace News Workspace.
 
 It collects aerospace RSS feeds, parses article pages, analyzes news value with
 AI, filters low-value items, classifies reports, and exports Word/Markdown
@@ -24,21 +24,33 @@ python app.py
 
 - RSS feed manager
 - Dedicated parsers plus Generic Parser fallback
+- AI Workflow with optional score, filter, category, keywords, summary, and translation
+- Prompt Studio for editing, testing, importing, and exporting prompt presets
+- Strict JSON AI output for stable parsing
 - AI news score from 0 to 100
 - AI keep/ignore decision with reason
-- Multiple categories per article
-- AI summary, keywords, category, importance, and translation
+- Fixed multi-category system
 - Original, bilingual, translated, or no-body export modes
 - Custom report title
 - Word and Markdown export
 - Token, cost, and time estimates
 - Daily token and API-call limits
 
-## Generic Parser
+## Prompt Studio
 
-Special parsers are used first for CNEOS, JPL, and NASA Science. Other websites
-fall back to the Generic Parser. If page parsing is weak, RSS Summary is used as
-the article body so the workflow continues.
+Prompt Studio manages prompt presets in `prompts/*.json`.
+
+Supported variables:
+
+- `{title}`
+- `{body}`
+- `{summary}`
+- `{source}`
+- `{published}`
+- `{url}`
+
+The tester renders prompts locally with a sample article, estimates tokens, and
+does not refetch RSS.
 
 ## AI Providers
 
@@ -51,12 +63,8 @@ The AI layer uses an OpenAI-compatible provider interface. The GUI supports:
 - OpenRouter
 - SiliconFlow
 
-Set API Key, Base URL, Model, Temperature, and Max Tokens in Settings.
-
-## User Settings
-
-User settings are stored in `config.json`. RSS feeds are stored in `feeds.json`.
-Both files are user editable and are not stored in SQLite.
+Set API Key, Base URL, Model, Temperature, Max Tokens, timeout, and retry count
+in Settings.
 
 ## Packaging
 
@@ -70,6 +78,7 @@ The spec includes:
 
 - `assets/`
 - `language/`
+- `prompts/`
 - `config.json`
 - `feeds.json`
 

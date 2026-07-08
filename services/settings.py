@@ -22,6 +22,7 @@ class AppSettings:
     output_dir: str
     export_markdown: bool
     export_word: bool
+    export_sqlite: bool
     ai_summary_enabled: bool
     ai_translation_enabled: bool
     ai_keywords_enabled: bool
@@ -36,6 +37,10 @@ class AppSettings:
     ai_limit_action: str
     rss_limit: int
     min_news_score: int
+    report_style: str
+    report_style_custom_high: bool
+    report_style_custom_medium: bool
+    report_style_custom_low: bool
     ai_auto_filter_enabled: bool
     report_title: str
     ai_provider: str
@@ -44,6 +49,17 @@ class AppSettings:
     category_prompt: str
     score_prompt: str
     filter_prompt: str
+    prompt_preset: str
+    pipeline_score_enabled: bool
+    pipeline_filter_enabled: bool
+    pipeline_category_enabled: bool
+    pipeline_keywords_enabled: bool
+    pipeline_summary_enabled: bool
+    pipeline_translation_enabled: bool
+    debug_ai_enabled: bool
+    connect_timeout: int
+    read_timeout: int
+    retry_count: int
     include_title: bool
     include_source: bool
     include_published: bool
@@ -75,6 +91,7 @@ def default_settings() -> AppSettings:
         output_dir=str(config.OUTPUT_DIR),
         export_markdown=True,
         export_word=False,
+        export_sqlite=True,
         ai_summary_enabled=True,
         ai_translation_enabled=False,
         ai_keywords_enabled=True,
@@ -89,6 +106,10 @@ def default_settings() -> AppSettings:
         ai_limit_action="skip",
         rss_limit=20,
         min_news_score=70,
+        report_style="standard",
+        report_style_custom_high=True,
+        report_style_custom_medium=True,
+        report_style_custom_low=False,
         ai_auto_filter_enabled=True,
         report_title="SpaceWeekly",
         ai_provider="DeepSeek",
@@ -97,6 +118,17 @@ def default_settings() -> AppSettings:
         category_prompt="",
         score_prompt="",
         filter_prompt="",
+        prompt_preset="Default",
+        pipeline_score_enabled=True,
+        pipeline_filter_enabled=True,
+        pipeline_category_enabled=True,
+        pipeline_keywords_enabled=True,
+        pipeline_summary_enabled=True,
+        pipeline_translation_enabled=False,
+        debug_ai_enabled=False,
+        connect_timeout=10,
+        read_timeout=60,
+        retry_count=3,
         include_title=True,
         include_source=True,
         include_published=True,
@@ -137,6 +169,7 @@ def load_settings() -> AppSettings:
         output_dir=str(data.get("output_dir") or defaults.output_dir),
         export_markdown=bool(data.get("export_markdown", defaults.export_markdown)),
         export_word=bool(data.get("export_word", defaults.export_word)),
+        export_sqlite=bool(data.get("export_sqlite", defaults.export_sqlite)),
         ai_summary_enabled=bool(data.get("ai_summary_enabled", defaults.ai_summary_enabled)),
         ai_translation_enabled=bool(data.get("ai_translation_enabled", defaults.ai_translation_enabled)),
         ai_keywords_enabled=bool(data.get("ai_keywords_enabled", defaults.ai_keywords_enabled)),
@@ -151,6 +184,16 @@ def load_settings() -> AppSettings:
         ai_limit_action=str(data.get("ai_limit_action") or defaults.ai_limit_action),
         rss_limit=int(data.get("rss_limit") or defaults.rss_limit),
         min_news_score=int(data.get("min_news_score") or defaults.min_news_score),
+        report_style=str(data.get("report_style") or defaults.report_style),
+        report_style_custom_high=bool(
+            data.get("report_style_custom_high", defaults.report_style_custom_high)
+        ),
+        report_style_custom_medium=bool(
+            data.get("report_style_custom_medium", defaults.report_style_custom_medium)
+        ),
+        report_style_custom_low=bool(
+            data.get("report_style_custom_low", defaults.report_style_custom_low)
+        ),
         ai_auto_filter_enabled=bool(data.get("ai_auto_filter_enabled", defaults.ai_auto_filter_enabled)),
         report_title=str(data.get("report_title") or defaults.report_title),
         ai_provider=str(data.get("ai_provider") or defaults.ai_provider),
@@ -159,6 +202,32 @@ def load_settings() -> AppSettings:
         category_prompt=str(data.get("category_prompt") or defaults.category_prompt),
         score_prompt=str(data.get("score_prompt") or defaults.score_prompt),
         filter_prompt=str(data.get("filter_prompt") or defaults.filter_prompt),
+        prompt_preset=str(data.get("prompt_preset") or defaults.prompt_preset),
+        pipeline_score_enabled=bool(
+            data.get("pipeline_score_enabled", defaults.pipeline_score_enabled)
+        ),
+        pipeline_filter_enabled=bool(
+            data.get("pipeline_filter_enabled", defaults.pipeline_filter_enabled)
+        ),
+        pipeline_category_enabled=bool(
+            data.get("pipeline_category_enabled", defaults.pipeline_category_enabled)
+        ),
+        pipeline_keywords_enabled=bool(
+            data.get("pipeline_keywords_enabled", defaults.pipeline_keywords_enabled)
+        ),
+        pipeline_summary_enabled=bool(
+            data.get("pipeline_summary_enabled", defaults.pipeline_summary_enabled)
+        ),
+        pipeline_translation_enabled=bool(
+            data.get(
+                "pipeline_translation_enabled",
+                defaults.pipeline_translation_enabled,
+            )
+        ),
+        debug_ai_enabled=bool(data.get("debug_ai_enabled", defaults.debug_ai_enabled)),
+        connect_timeout=int(data.get("connect_timeout") or defaults.connect_timeout),
+        read_timeout=int(data.get("read_timeout") or defaults.read_timeout),
+        retry_count=int(data.get("retry_count") or defaults.retry_count),
         include_title=bool(data.get("include_title", defaults.include_title)),
         include_source=bool(data.get("include_source", defaults.include_source)),
         include_published=bool(data.get("include_published", defaults.include_published)),
@@ -188,6 +257,7 @@ def save_settings(settings: AppSettings) -> None:
 def apply_settings(settings: AppSettings) -> None:
     """Apply user settings to already imported business modules."""
     import ai.deepseek as deepseek
+    import ai.providers as providers
     import database.sqlite as sqlite
     import downloader.client as client
     import exporters.markdown as markdown
@@ -198,8 +268,14 @@ def apply_settings(settings: AppSettings) -> None:
     deepseek.DEEPSEEK_MODEL = settings.deepseek_model
     deepseek.DEEPSEEK_TEMPERATURE = settings.temperature
     deepseek.DEEPSEEK_MAX_TOKENS = settings.max_tokens
+    providers.CONNECT_TIMEOUT = settings.connect_timeout
+    providers.READ_TIMEOUT = settings.read_timeout
+    providers.RETRY_COUNT = settings.retry_count
     sqlite.DATABASE_PATH = Path(settings.sqlite_path)
     markdown.OUTPUT_DIR = Path(settings.output_dir)
     word.OUTPUT_DIR = Path(settings.output_dir)
     client.headers["User-Agent"] = settings.user_agent
     client.REQUEST_TIMEOUT = settings.request_timeout
+    client.CONNECT_TIMEOUT = settings.connect_timeout
+    client.READ_TIMEOUT = settings.read_timeout
+    client.RETRY_COUNT = max(settings.retry_count, 3)

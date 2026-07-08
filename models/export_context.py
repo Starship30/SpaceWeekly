@@ -15,6 +15,10 @@ class ExportContext:
     include_published: bool
     include_link: bool
     include_score: bool
-    include_body: bool
-    include_original: bool
-    include_chinese: bool
+    include_summary: bool = True
+    include_translation: bool = True
+    include_categories: bool = True
+    include_keywords: bool = True
+    include_body: bool = True
+    include_original: bool = True
+    include_chinese: bool = True

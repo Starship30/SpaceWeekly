@@ -7,6 +7,8 @@ ROOT = Path.cwd()
 datas = [
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "language"), "language"),
+    (str(ROOT / "prompts"), "prompts"),
+    (str(ROOT / "ui" / "style.qss"), "ui"),
     (str(ROOT / "config.json"), "."),
     (str(ROOT / "feeds.json"), "."),
 ]
