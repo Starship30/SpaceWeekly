@@ -42,6 +42,7 @@ class AppSettings:
     report_style_custom_medium: bool
     report_style_custom_low: bool
     ai_auto_filter_enabled: bool
+    ai_category_options: list[str]
     report_title: str
     ai_provider: str
     summary_prompt: str
@@ -75,6 +76,8 @@ class AppSettings:
     daily_token_limit: int
     token_limit_action: str
     release_mode: bool
+    theme_mode: str
+    language: str
 
 
 def default_settings() -> AppSettings:
@@ -111,6 +114,7 @@ def default_settings() -> AppSettings:
         report_style_custom_medium=True,
         report_style_custom_low=False,
         ai_auto_filter_enabled=True,
+        ai_category_options=["astronomy", "spaceflight", "humanities"],
         report_title="SpaceWeekly",
         ai_provider="DeepSeek",
         summary_prompt="",
@@ -144,6 +148,8 @@ def default_settings() -> AppSettings:
         daily_token_limit=100000,
         token_limit_action="ask",
         release_mode=True,
+        theme_mode="system",
+        language="zh_CN",
     )
 
 
@@ -175,7 +181,7 @@ def load_settings() -> AppSettings:
         ai_keywords_enabled=bool(data.get("ai_keywords_enabled", defaults.ai_keywords_enabled)),
         ai_category_enabled=bool(data.get("ai_category_enabled", defaults.ai_category_enabled)),
         ai_importance_enabled=bool(data.get("ai_importance_enabled", defaults.ai_importance_enabled)),
-        body_mode=str(data.get("body_mode") or defaults.body_mode),
+        body_mode=_body_mode_setting(data.get("body_mode"), defaults.body_mode),
         date_mode=str(data.get("date_mode") or defaults.date_mode),
         start_date=str(data.get("start_date") or defaults.start_date),
         end_date=str(data.get("end_date") or defaults.end_date),
@@ -195,6 +201,10 @@ def load_settings() -> AppSettings:
             data.get("report_style_custom_low", defaults.report_style_custom_low)
         ),
         ai_auto_filter_enabled=bool(data.get("ai_auto_filter_enabled", defaults.ai_auto_filter_enabled)),
+        ai_category_options=_list_setting(
+            data.get("ai_category_options"),
+            defaults.ai_category_options,
+        ),
         report_title=str(data.get("report_title") or defaults.report_title),
         ai_provider=str(data.get("ai_provider") or defaults.ai_provider),
         summary_prompt=str(data.get("summary_prompt") or defaults.summary_prompt),
@@ -243,6 +253,8 @@ def load_settings() -> AppSettings:
         daily_token_limit=int(data.get("daily_token_limit") or defaults.daily_token_limit),
         token_limit_action=str(data.get("token_limit_action") or defaults.token_limit_action),
         release_mode=bool(data.get("release_mode", defaults.release_mode)),
+        theme_mode=str(data.get("theme_mode") or defaults.theme_mode),
+        language=str(data.get("language") or defaults.language),
     )
 
 
@@ -252,6 +264,26 @@ def save_settings(settings: AppSettings) -> None:
         json.dumps(asdict(settings), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _list_setting(value, fallback: list[str]) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+
+    if isinstance(value, str):
+        items = [item.strip() for item in value.replace("，", ",").split(",")]
+        return [item for item in items if item]
+
+    return list(fallback)
+
+
+def _body_mode_setting(value, fallback: str) -> str:
+    mode = str(value or fallback).strip()
+
+    if mode.lower() == "none":
+        return "none"
+
+    return mode
 
 
 def apply_settings(settings: AppSettings) -> None:

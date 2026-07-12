@@ -5,7 +5,7 @@ from resources import resource_path
 BASE_DIR = resource_path()
 DATABASE_PATH = resource_path("database", "spaceweekly.db")
 OUTPUT_DIR = resource_path("output")
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 APP_EDITION = "AI Workflow Edition"
 
 USER_AGENT = (

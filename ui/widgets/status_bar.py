@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QStatusBar
 
 from services.feed_manager import FeedSource
 from services.settings import AppSettings
+from i18n import tr
 
 
 class SpaceStatusBar(QStatusBar):
@@ -12,12 +13,12 @@ class SpaceStatusBar(QStatusBar):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.state_label = QLabel("Ready")
-        self.rss_label = QLabel("RSS 0")
-        self.provider_label = QLabel("Provider -")
-        self.sqlite_label = QLabel("SQLite -")
-        self.token_label = QLabel("Token 0")
-        self.export_label = QLabel("Export -")
+        self.state_label = QLabel(tr("ready"))
+        self.rss_label = QLabel(f"{tr('status.rss')} 0")
+        self.provider_label = QLabel(f"{tr('status.provider')} -")
+        self.sqlite_label = QLabel(f"{tr('status.sqlite')} -")
+        self.token_label = QLabel(f"{tr('status.token')} 0")
+        self.export_label = QLabel(f"{tr('status.export')} -")
 
         for label in [
             self.rss_label,
@@ -28,7 +29,7 @@ class SpaceStatusBar(QStatusBar):
         ]:
             self.addPermanentWidget(label)
 
-        self.show_state("Ready")
+        self.show_state(tr("ready"))
 
     def show_state(self, state: str) -> None:
         self.state_label.setText(state)
@@ -41,14 +42,14 @@ class SpaceStatusBar(QStatusBar):
         token_estimate: int = 0,
     ) -> None:
         enabled_count = len([feed for feed in feeds if feed.enabled])
-        self.rss_label.setText(f"RSS {enabled_count}/{len(feeds)}")
-        self.provider_label.setText(f"Provider {settings.ai_provider}")
+        self.rss_label.setText(f"{tr('status.rss')} {enabled_count}/{len(feeds)}")
+        self.provider_label.setText(f"{tr('status.provider')} {settings.ai_provider}")
         self.sqlite_label.setText(
-            "SQLite On" if settings.export_sqlite else "SQLite Off"
+            tr("status.sqlite.on") if settings.export_sqlite else tr("status.sqlite.off")
         )
         self.sqlite_label.setToolTip(str(Path(settings.sqlite_path)))
-        self.token_label.setText(f"Token {token_estimate:,}")
-        self.export_label.setText(f"Export {self._export_text(settings)}")
+        self.token_label.setText(f"{tr('status.token')} {token_estimate:,}")
+        self.export_label.setText(f"{tr('status.export')} {self._export_text(settings)}")
 
     def _export_text(self, settings: AppSettings) -> str:
         formats = []
@@ -62,4 +63,4 @@ class SpaceStatusBar(QStatusBar):
         if settings.export_sqlite:
             formats.append("SQLite")
 
-        return "+".join(formats) or "None"
+        return "+".join(formats) or tr("none")

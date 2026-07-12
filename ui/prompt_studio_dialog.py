@@ -28,14 +28,15 @@ from services.prompt_manager import load_presets
 from services.prompt_manager import render_prompt
 from services.prompt_manager import save_preset
 from services.settings import AppSettings
+from i18n import tr
 
 PROMPT_LABELS = {
-    "summary": "摘要 Prompt",
-    "translation": "翻译 Prompt",
-    "category": "分类 Prompt",
-    "score": "重要程度 Prompt",
-    "filter": "编辑策略 Prompt",
-    "custom": "自定义 Prompt",
+    "summary": "prompt.summary",
+    "translation": "prompt.translation",
+    "category": "prompt.category",
+    "score": "prompt.score",
+    "filter": "prompt.filter",
+    "custom": "prompt.custom",
 }
 
 
@@ -76,11 +77,11 @@ class PromptStudioDialog(QDialog):
 
         self.preset_combo.setCurrentText(self.original_settings.prompt_preset)
         self.preset_combo.currentTextChanged.connect(self._load_preset)
-        top.addWidget(QLabel("Prompt 模板"))
+        top.addWidget(QLabel(tr("prompt.template")))
         top.addWidget(self.preset_combo, 1)
-        top.addWidget(self._button("保存预设", self._save_preset))
-        top.addWidget(self._button("导入", self._import_preset))
-        top.addWidget(self._button("导出", self._export_preset))
+        top.addWidget(self._button(tr("save.preset"), self._save_preset))
+        top.addWidget(self._button(tr("import"), self._import_preset))
+        top.addWidget(self._button(tr("export.preset"), self._export_preset))
         layout.addLayout(top)
         layout.addWidget(self._splitter(), 1)
         footer = QHBoxLayout()
@@ -89,9 +90,9 @@ class PromptStudioDialog(QDialog):
         footer.addWidget(self.char_label)
         footer.addWidget(self.word_label)
         footer.addStretch()
-        footer.addWidget(self._button("测试 Prompt", self._test_prompt))
-        footer.addWidget(self._button("复制渲染结果", self._copy_rendered_prompt))
-        footer.addWidget(self._button("恢复默认", self._restore_default))
+        footer.addWidget(self._button(tr("test.prompt"), self._test_prompt))
+        footer.addWidget(self._button(tr("copy.rendered"), self._copy_rendered_prompt))
+        footer.addWidget(self._button(tr("restore.default"), self._restore_default))
         layout.addLayout(footer)
         self.type_list.setCurrentRow(0)
         buttons = QDialogButtonBox(
@@ -106,18 +107,18 @@ class PromptStudioDialog(QDialog):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         type_box = QWidget()
         type_layout = QVBoxLayout(type_box)
-        type_layout.addWidget(QLabel("Prompt 类型"))
+        type_layout.addWidget(QLabel(tr("prompt.type")))
         self.type_list = QListWidget()
 
         for prompt_type in PROMPT_TYPES:
-            self.type_list.addItem(PROMPT_LABELS.get(prompt_type, prompt_type))
+            self.type_list.addItem(tr(PROMPT_LABELS.get(prompt_type, prompt_type)))
 
         self.type_list.currentRowChanged.connect(self._change_prompt_type)
         type_layout.addWidget(self.type_list, 1)
         splitter.addWidget(type_box)
         editor_box = QWidget()
         editor_layout = QVBoxLayout(editor_box)
-        editor_layout.addWidget(QLabel("模板编辑"))
+        editor_layout.addWidget(QLabel(tr("template.editor")))
         self.editor = QPlainTextEdit()
         self.editor.setFont(QFont("Consolas", 10))
         self.editor.textChanged.connect(self._update_char_count)
@@ -125,7 +126,7 @@ class PromptStudioDialog(QDialog):
         splitter.addWidget(editor_box)
         variables_box = QWidget()
         variables_layout = QVBoxLayout(variables_box)
-        variables_layout.addWidget(QLabel("变量列表"))
+        variables_layout.addWidget(QLabel(tr("variables")))
         self.variables_list = QListWidget()
 
         for variable in VARIABLES:
@@ -194,12 +195,12 @@ class PromptStudioDialog(QDialog):
             custom="",
         )
         save_preset(preset)
-        QMessageBox.information(self, "Prompt Studio", "预设已保存。")
+        QMessageBox.information(self, "Prompt Studio", tr("preset.saved"))
 
     def _import_preset(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "导入 Prompt 预设",
+            tr("import.prompt.preset"),
             "",
             "JSON Files (*.json)",
         )
@@ -213,7 +214,7 @@ class PromptStudioDialog(QDialog):
             with open(path, "r", encoding="utf-8") as file:
                 data = json.load(file)
         except (OSError, json.JSONDecodeError) as exc:
-            QMessageBox.warning(self, "Prompt Studio", f"导入失败：{exc}")
+            QMessageBox.warning(self, "Prompt Studio", tr("import.failed", error=exc))
             return
 
         name = str(data.get("name", "Imported"))
@@ -231,13 +232,13 @@ class PromptStudioDialog(QDialog):
         self.presets = load_presets()
         self.preset_combo.addItem(name)
         self.preset_combo.setCurrentText(name)
-        QMessageBox.information(self, "Prompt Studio", "Prompt 模板已导入。")
+        QMessageBox.information(self, "Prompt Studio", tr("prompt.imported"))
 
     def _export_preset(self) -> None:
         self._save_current_prompt()
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "导出 Prompt 预设",
+            tr("export.prompt.preset"),
             "prompt.json",
             "JSON Files (*.json)",
         )
@@ -259,7 +260,7 @@ class PromptStudioDialog(QDialog):
         import shutil
 
         shutil.copyfile(saved_path, path)
-        QMessageBox.information(self, "Prompt Studio", "Prompt 模板已导出。")
+        QMessageBox.information(self, "Prompt Studio", tr("prompt.exported"))
 
     def _restore_default(self) -> None:
         preset = default_preset()
@@ -272,7 +273,7 @@ class PromptStudioDialog(QDialog):
             filter_prompt=preset.filter,
         )
         self._load_current_prompt()
-        QMessageBox.information(self, "Prompt Studio", "已恢复默认模板。")
+        QMessageBox.information(self, "Prompt Studio", tr("default.restored"))
 
     def _test_prompt(self) -> None:
         started_at = time.perf_counter()
@@ -281,8 +282,8 @@ class PromptStudioDialog(QDialog):
         tokens = max(len(rendered) // 4, 1)
         QMessageBox.information(
             self,
-            "Prompt 测试",
-            f"渲染成功\n\n预计 Token：{tokens}\n耗时：{elapsed} 秒\n\n{rendered[:1200]}",
+            tr("prompt.test"),
+            tr("prompt.rendered", tokens=tokens, elapsed=elapsed, rendered=rendered[:1200]),
         )
 
     def _copy_rendered_prompt(self) -> None:
@@ -308,5 +309,5 @@ class PromptStudioDialog(QDialog):
     def _update_char_count(self) -> None:
         text = self.editor.toPlainText()
         words = len([part for part in text.replace("\n", " ").split(" ") if part])
-        self.char_label.setText(f"字符数：{len(text)}")
-        self.word_label.setText(f"字数：{words}")
+        self.char_label.setText(tr("char.count", count=len(text)))
+        self.word_label.setText(tr("word.count", count=words))

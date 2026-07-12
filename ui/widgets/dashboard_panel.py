@@ -14,14 +14,15 @@ from PySide6.QtWidgets import QSpinBox
 from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
 
+from i18n import tr
 from services.settings import AppSettings
 
 
 REPORT_STYLES = [
-    ("complete", "完整模式（全部新闻）"),
-    ("standard", "标准模式（重点 + 推荐）"),
-    ("curated", "精选模式（仅重点）"),
-    ("custom", "自定义"),
+    ("complete", "complete.style"),
+    ("standard", "standard.style"),
+    ("curated", "curated.style"),
+    ("custom", "custom.style"),
 ]
 
 
@@ -67,17 +68,17 @@ class DashboardPanel(QWidget):
     def set_estimate(self, articles: int, tokens: int, seconds: int) -> None:
         self.article_value.setText(str(articles))
         self.token_value.setText(f"{tokens:,}")
-        self.time_value.setText(f"约 {seconds} 秒")
+        self.time_value.setText(tr("about.seconds", seconds=seconds))
 
     def set_running(self, running: bool) -> None:
         self.start_button.setEnabled(not running)
-        self.start_button.setText("生成中..." if running else "开始生成")
+        self.start_button.setText(tr("generating") if running else tr("start"))
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(16)
-        title = QLabel("Dashboard")
+        title = QLabel(tr("dashboard"))
         title.setObjectName("PanelTitle")
         layout.addWidget(title)
         form = QFormLayout()
@@ -94,15 +95,15 @@ class DashboardPanel(QWidget):
         self.report_title_line.textChanged.connect(
             lambda _text: self.settings_changed.emit()
         )
-        form.addRow("周报标题", self.report_title_line)
-        form.addRow("RSS 最大读取数量", self.rss_limit_spin)
+        form.addRow(tr("report.title"), self.report_title_line)
+        form.addRow(tr("rss.limit"), self.rss_limit_spin)
         layout.addLayout(form)
         layout.addWidget(self._style_box())
         layout.addWidget(self._estimate_box())
         layout.addStretch(1)
         action_row = QHBoxLayout()
         action_row.addStretch(1)
-        self.start_button = QPushButton("开始生成")
+        self.start_button = QPushButton(tr("start"))
         self.start_button.setObjectName("PrimaryButton")
         self.start_button.setMinimumHeight(42)
         self.start_button.clicked.connect(self.start_requested.emit)
@@ -115,13 +116,13 @@ class DashboardPanel(QWidget):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(8)
-        label = QLabel("周报风格")
+        label = QLabel(tr("report.style"))
         label.setObjectName("SectionTitle")
         layout.addWidget(label)
         self.report_style_group = QButtonGroup(self)
 
         for value, text in REPORT_STYLES:
-            button = QRadioButton(text)
+            button = QRadioButton(tr(text))
             button.setProperty("style", value)
             button.toggled.connect(lambda _checked: self.settings_changed.emit())
             self.report_style_group.addButton(button)
@@ -135,7 +136,7 @@ class DashboardPanel(QWidget):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
-        label = QLabel("预计")
+        label = QLabel(tr("estimate.title"))
         label.setObjectName("SectionTitle")
         layout.addWidget(label)
         grid = QGridLayout()
@@ -147,9 +148,9 @@ class DashboardPanel(QWidget):
 
         for column, (name, value) in enumerate(
             [
-                ("文章数量", self.article_value),
+                (tr("article.count"), self.article_value),
                 ("Token", self.token_value),
-                ("耗时", self.time_value),
+                (tr("time.cost"), self.time_value),
             ]
         ):
             metric_name = QLabel(name)

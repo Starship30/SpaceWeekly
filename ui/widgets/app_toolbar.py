@@ -4,6 +4,8 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QStyle
 from PySide6.QtWidgets import QToolBar
 
+from i18n import tr
+
 
 class AppToolBar(QToolBar):
     """Application toolbar with primary workspace actions."""
@@ -28,7 +30,7 @@ class AppToolBar(QToolBar):
 
     def _build_actions(self) -> None:
         self.start_action = self._action(
-            "开始生成",
+            tr("start"),
             QStyle.StandardPixmap.SP_MediaPlay,
             self.start_requested.emit,
         )
@@ -36,28 +38,28 @@ class AppToolBar(QToolBar):
         self.addSeparator()
         self.addAction(
             self._action(
-                "设置",
+                tr("settings"),
                 QStyle.StandardPixmap.SP_FileDialogDetailedView,
                 self.settings_requested.emit,
             )
         )
         self.addAction(
             self._action(
-                "Prompt Studio",
+                tr("prompt.studio"),
                 QStyle.StandardPixmap.SP_FileDialogContentsView,
                 self.prompt_studio_requested.emit,
             )
         )
         self.addAction(
             self._action(
-                "打开输出目录",
+                tr("open.output"),
                 QStyle.StandardPixmap.SP_DirOpenIcon,
                 self.output_requested.emit,
             )
         )
         self.addAction(
             self._action(
-                "刷新 RSS",
+                tr("refresh.rss"),
                 QStyle.StandardPixmap.SP_BrowserReload,
                 self.refresh_requested.emit,
             )
@@ -65,7 +67,7 @@ class AppToolBar(QToolBar):
         self.addSeparator()
         self.addAction(
             self._action(
-                "关于",
+                tr("about"),
                 QStyle.StandardPixmap.SP_MessageBoxInformation,
                 self.about_requested.emit,
             )

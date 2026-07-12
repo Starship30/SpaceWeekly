@@ -275,7 +275,7 @@ def _analyze_article(
                 preset,
                 "translation",
             ),
-            category_prompt=prompt_value(settings.category_prompt, preset, "category"),
+            category_prompt=_category_prompt(settings, preset),
             score_prompt=prompt_value(settings.score_prompt, preset, "score"),
             filter_prompt=prompt_value(settings.filter_prompt, preset, "filter"),
         )
@@ -290,6 +290,32 @@ def _analyze_article(
 
     ai_summaries[article.news.url] = _analysis_to_summary(analysis, settings)
     logger.info("AI 分析完成，重要程度：%s", _importance_level(analysis))
+
+
+def _category_prompt(settings: AppSettings, preset) -> str:
+    prompt = prompt_value(settings.category_prompt, preset, "category")
+    labels = {
+        "astronomy": "天文",
+        "spaceflight": "航天",
+        "humanities": "人文",
+    }
+    options = [
+        labels.get(option, option)
+        for option in settings.ai_category_options
+        if option
+    ]
+
+    if not options:
+        return prompt
+
+    category_rule = "AI 分类方向仅从以下选项中选择，可多选：{}".format(
+        "、".join(options)
+    )
+
+    if prompt:
+        return f"{prompt}\n{category_rule}"
+
+    return category_rule
 
 
 def _analysis_to_summary(analysis: NewsAnalysis, settings: AppSettings) -> AISummary:

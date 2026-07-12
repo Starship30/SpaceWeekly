@@ -7,10 +7,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import qVersion
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QMainWindow
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import QSplitter
 
+from i18n import set_language
 from i18n import tr
 from resources import resource_path
 from services.feed_manager import load_feeds
@@ -22,6 +24,7 @@ from ui.log_handler import SUCCESS_LEVEL
 from ui.log_handler import QtLogHandler
 from ui.prompt_studio_dialog import PromptStudioDialog
 from ui.settings_dialog import SettingsDialog
+from ui.theme import ThemeManager
 from ui.widgets.app_toolbar import AppToolBar
 from ui.widgets.dashboard_panel import DashboardPanel
 from ui.widgets.feed_panel import FeedPanel
@@ -38,17 +41,24 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.feeds = load_feeds()
         self.settings = load_settings()
+        set_language(self.settings.language)
         self.worker: ReportWorker | None = None
         self.log_handler = QtLogHandler()
+        app = QApplication.instance()
+
+        if app is None:
+            raise RuntimeError("ThemeManager requires an active QApplication")
+
+        self.theme_manager = ThemeManager(app)
         self._setup_window()
         self._build_ui()
         self._connect_ui()
         self._connect_logging()
         self._update_estimate()
-        self.status_bar.show_state("Ready")
+        self.status_bar.show_state(tr("ready"))
 
     def _setup_window(self) -> None:
-        self.setWindowTitle("SpaceWeekly v2.1 Professional Edition")
+        self.setWindowTitle(tr("app.title"))
         self.resize(1280, 760)
         self.setMinimumSize(1080, 650)
         icon_path = resource_path("assets", "sspo.ico")
@@ -66,6 +76,10 @@ class MainWindow(QMainWindow):
         self.feed_panel = FeedPanel(self.feeds, self)
         self.dashboard_panel = DashboardPanel(self.settings, self)
         self.log_panel = LogPanel(self)
+        self.log_panel.apply_theme(self.theme_manager)
+        self.theme_manager.theme_changed.connect(
+            lambda _theme: self.log_panel.apply_theme(self.theme_manager)
+        )
         splitter.addWidget(self.feed_panel)
         splitter.addWidget(self.dashboard_panel)
         splitter.addWidget(self.log_panel)
@@ -78,10 +92,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
 
     def _apply_style(self) -> None:
-        style_path = resource_path("ui", "style.qss")
-
-        if style_path.exists():
-            self.setStyleSheet(style_path.read_text(encoding="utf-8"))
+        self.theme_manager.apply(self.settings.theme_mode)
 
     def _connect_ui(self) -> None:
         self.toolbar.start_requested.connect(self._start_report)
@@ -109,10 +120,40 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(load_settings(), self)
 
         if dialog.exec():
+            previous_language = self.settings.language
             save_settings(dialog.settings())
             self.settings = load_settings()
-            self.dashboard_panel.apply_settings(self.settings)
+            set_language(self.settings.language)
+            self.setWindowTitle(tr("app.title"))
+            if previous_language != self.settings.language:
+                self._rebuild_translated_ui()
+            else:
+                self._apply_style()
+                self.log_panel.apply_theme(self.theme_manager)
+                self.dashboard_panel.apply_settings(self.settings)
             self._update_estimate()
+
+    def _rebuild_translated_ui(self) -> None:
+        self.removeToolBar(self.toolbar)
+        self.toolbar.deleteLater()
+        central = self.takeCentralWidget()
+
+        if central is not None:
+            central.deleteLater()
+
+        old_status_bar = self.statusBar()
+
+        if old_status_bar is not None:
+            old_status_bar.deleteLater()
+
+        try:
+            self.log_handler.emitter.message.disconnect()
+        except TypeError:
+            pass
+
+        self._build_ui()
+        self._connect_ui()
+        self.log_handler.emitter.message.connect(self.log_panel.append_html)
 
     def _open_prompt_studio(self) -> None:
         dialog = PromptStudioDialog(load_settings(), self)
@@ -123,19 +164,30 @@ class MainWindow(QMainWindow):
 
     def _show_about(self) -> None:
         QMessageBox.about(
-            self,
+           self,
             tr("about"),
-            "\n".join(
-                [
-                    "SpaceWeekly v2.1 Professional Edition",
-                    "",
-                    "Version: v2.1",
-                    "GitHub: https://github.com/",
-                    "License: See project license",
-                    f"Python Version: {sys.version.split()[0]}",
-                    f"Qt Version: {qVersion()}",
-                    "作者: SpaceWeekly contributors",
-                ]
+            """
+            <h3>{title}</h3>
+            <p>
+            {version}: v2.2<br>
+            {github}:
+            <a href="https://github.com/Starship30/SpaceWeekly">
+            https://github.com/Starship30/SpaceWeekly
+            </a>
+            <br>
+            {python_version}: {python}<br>
+            {qt_version}: {qt}<br>
+            {author}: RMS-TITANIC
+            </p>
+            """.format(
+                title=tr("app.title"),
+                version=tr("version"),
+                github=tr("github.link"),
+                python_version=tr("python.version"),
+                python=sys.version.split()[0],
+                qt_version=tr("qt.version"),
+                qt=qVersion(),
+                author=tr("author"),
             ),
         )
 
@@ -175,8 +227,8 @@ class MainWindow(QMainWindow):
 
         result = QMessageBox.question(
             self,
-            "AI 成本控制",
-            "预计 API 调用次数超过每日上限，是否继续？",
+            tr("api.cost.control"),
+            tr("api.limit.confirm"),
         )
 
         return result == QMessageBox.StandardButton.Yes
@@ -184,17 +236,17 @@ class MainWindow(QMainWindow):
     def _set_running(self, running: bool) -> None:
         self.dashboard_panel.set_running(running)
         self.toolbar.set_running(running)
-        self.status_bar.show_state("Running..." if running else "Ready")
+        self.status_bar.show_state(tr("running") if running else tr("ready"))
 
     def _report_finished(self) -> None:
         self._set_running(False)
-        self.status_bar.show_state("Finished")
-        logging.getLogger().log(SUCCESS_LEVEL, "周报生成完成")
-        QMessageBox.information(self, "SpaceWeekly", "周报生成完成")
+        self.status_bar.show_state(tr("finished"))
+        logging.getLogger().log(SUCCESS_LEVEL, tr("report.finished"))
+        QMessageBox.information(self, "SpaceWeekly", tr("report.finished"))
 
     def _report_failed(self, message: str) -> None:
         self._set_running(False)
-        self.status_bar.show_state("Ready")
+        self.status_bar.show_state(tr("ready"))
         QMessageBox.warning(self, "SpaceWeekly", message)
 
     def _open_output_dir(self) -> None:

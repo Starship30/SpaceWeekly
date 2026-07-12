@@ -30,6 +30,16 @@ from i18n import tr
 from resources import resource_path
 from services.settings import AppSettings
 from ui.prompt_studio_dialog import PromptStudioDialog
+from ui.theme import THEME_DARK
+from ui.theme import THEME_LIGHT
+from ui.theme import THEME_SYSTEM
+
+
+AI_CATEGORY_OPTIONS = [
+    ("astronomy", "category.astronomy", "天文"),
+    ("spaceflight", "category.spaceflight", "航天"),
+    ("humanities", "category.humanities", "人文"),
+]
 
 
 class SettingsDialog(QDialog):
@@ -87,6 +97,7 @@ class SettingsDialog(QDialog):
             ai_category_enabled=self.ai_category_check.isChecked(),
             ai_importance_enabled=True,
             ai_auto_filter_enabled=self.auto_filter_check.isChecked(),
+            ai_category_options=self._selected_category_options(),
             pipeline_score_enabled=True,
             pipeline_filter_enabled=self.pipeline_filter_check.isChecked(),
             pipeline_category_enabled=self.ai_category_check.isChecked(),
@@ -98,6 +109,8 @@ class SettingsDialog(QDialog):
             ai_limit_action=str(self.limit_action_combo.currentData()),
             daily_token_limit=self.daily_token_limit_spin.value(),
             token_limit_action=str(self.token_action_combo.currentData()),
+            theme_mode=str(self.theme_mode_combo.currentData()),
+            language=str(self.language_combo.currentData()),
             date_mode=str(self.date_mode_combo.currentData()),
             start_date=self.start_date_edit.date().toString("yyyy-MM-dd"),
             end_date=self.end_date_edit.date().toString("yyyy-MM-dd"),
@@ -135,44 +148,55 @@ class SettingsDialog(QDialog):
         self.connect_timeout_spin = self._spin(1, 120, settings.connect_timeout)
         self.read_timeout_spin = self._spin(1, 300, settings.read_timeout)
         self.retry_count_spin = self._spin(0, 10, max(settings.retry_count, 3))
-        self.debug_ai_check = self._check("显示 AI 调试信息", settings.debug_ai_enabled)
-        self.release_mode_check = self._check("普通用户模式", settings.release_mode)
+        self.debug_ai_check = self._check(tr("show.ai.debug"), settings.debug_ai_enabled)
+        self.release_mode_check = self._check(tr("release.mode"), settings.release_mode)
         self.user_agent_edit = QLineEdit(settings.user_agent)
         self.sqlite_edit = QLineEdit(settings.sqlite_path)
         self.output_edit = QLineEdit(settings.output_dir)
         self.sqlite_check = self._check("", settings.export_sqlite)
         self.markdown_check = self._check("", settings.export_markdown)
         self.word_check = self._check("", settings.export_word)
-        self.include_title_check = self._check("标题", settings.include_title)
-        self.include_source_check = self._check("来源", settings.include_source)
-        self.include_published_check = self._check("发布时间", settings.include_published)
-        self.include_link_check = self._check("链接", settings.include_link)
-        self.include_importance_check = self._check("重要程度与原因", settings.include_score)
-        self.include_summary_check = self._check("摘要", settings.include_summary)
-        self.include_translation_check = self._check("翻译", settings.include_translation)
-        self.include_categories_check = self._check("分类", settings.include_categories)
-        self.include_keywords_check = self._check("关键词", settings.include_keywords)
-        self.include_body_check = self._check("正文", settings.include_body)
-        self.include_original_check = self._check("原文", settings.include_original)
-        self.include_chinese_check = self._check("中文", settings.include_chinese)
-        self.ai_summary_check = self._check("摘要", settings.pipeline_summary_enabled)
-        self.ai_translation_check = self._check("翻译", settings.pipeline_translation_enabled)
-        self.ai_keywords_check = self._check("关键词", settings.pipeline_keywords_enabled)
-        self.ai_category_check = self._check("分类", settings.pipeline_category_enabled)
-        self.pipeline_filter_check = self._check("编辑策略", settings.pipeline_filter_enabled)
-        self.auto_filter_check = self._check("自动筛选", settings.ai_auto_filter_enabled)
+        self.include_title_check = self._check(tr("include.title"), settings.include_title)
+        self.include_source_check = self._check(tr("include.source"), settings.include_source)
+        self.include_published_check = self._check(tr("include.published"), settings.include_published)
+        self.include_link_check = self._check(tr("include.link"), settings.include_link)
+        self.include_importance_check = self._check(tr("include.score"), settings.include_score)
+        self.include_summary_check = self._check(tr("include.summary"), settings.include_summary)
+        self.include_translation_check = self._check(tr("include.translation"), settings.include_translation)
+        self.include_categories_check = self._check(tr("include.categories"), settings.include_categories)
+        self.include_keywords_check = self._check(tr("include.keywords"), settings.include_keywords)
+        self.include_body_check = self._check(tr("include.body"), settings.include_body)
+        self.include_original_check = self._check(tr("include.original"), settings.include_original)
+        self.include_chinese_check = self._check(tr("include.chinese"), settings.include_chinese)
+        self.ai_summary_check = self._check(tr("ai.summary.generate"), settings.pipeline_summary_enabled)
+        self.ai_translation_check = self._check(tr("ai.translation.generate"), settings.pipeline_translation_enabled)
+        self.ai_keywords_check = self._check(tr("ai.keywords.extract"), settings.pipeline_keywords_enabled)
+        self.ai_category_check = self._check(tr("ai.category.generate"), settings.pipeline_category_enabled)
+        self.pipeline_filter_check = self._check(tr("ai.filter.editor"), settings.pipeline_filter_enabled)
+        self.auto_filter_check = self._check(tr("ai.auto.filter"), settings.ai_auto_filter_enabled)
+        self.category_option_checks = [
+            self._category_option_check(value, key, legacy, settings.ai_category_options)
+            for value, key, legacy in AI_CATEGORY_OPTIONS
+        ]
+
+        if not any(check.isChecked() for check in self.category_option_checks):
+            for check in self.category_option_checks:
+                check.setChecked(True)
+
         self.max_article_tokens_spin = self._spin(500, 100000, settings.max_article_tokens)
         self.max_daily_calls_spin = self._spin(1, 10000, settings.max_daily_api_calls)
         self.daily_token_limit_spin = self._spin(1000, 10000000, settings.daily_token_limit)
         self.min_score_spin = self._spin(0, 100, settings.min_news_score)
+        self.theme_mode_combo = self._theme_mode_combo(settings.theme_mode)
+        self.language_combo = self._language_combo(settings.language)
         self.limit_action_combo = self._action_combo(settings.ai_limit_action)
         self.token_action_combo = self._action_combo(settings.token_limit_action)
         self.date_mode_combo = self._date_mode_combo(settings.date_mode)
         self.start_date_edit = self._date_edit(settings.start_date, -6)
         self.end_date_edit = self._date_edit(settings.end_date, 0)
-        self.custom_high_check = self._check("High", settings.report_style_custom_high)
-        self.custom_medium_check = self._check("Medium", settings.report_style_custom_medium)
-        self.custom_low_check = self._check("Low", settings.report_style_custom_low)
+        self.custom_high_check = self._check(tr("high"), settings.report_style_custom_high)
+        self.custom_medium_check = self._check(tr("medium"), settings.report_style_custom_medium)
+        self.custom_low_check = self._check(tr("low"), settings.report_style_custom_low)
         self.body_mode_group = QButtonGroup(self)
 
     def _build_layout(self) -> None:
@@ -183,13 +207,14 @@ class SettingsDialog(QDialog):
         self.stack = QStackedWidget()
 
         for title, page in [
-            ("AI", self._ai_page()),
-            ("Prompt", self._prompt_page()),
-            ("导出", self._export_page()),
-            ("网络", self._network_page()),
-            ("成本控制", self._cost_page()),
-            ("高级", self._advanced_page()),
-            ("关于", self._about_page()),
+            (tr("appearance"), self._appearance_page()),
+            (tr("ai"), self._ai_page()),
+            (tr("prompt"), self._prompt_page()),
+            (tr("export"), self._export_page()),
+            (tr("network"), self._network_page()),
+            (tr("cost.control"), self._cost_page()),
+            (tr("advanced"), self._advanced_page()),
+            (tr("about"), self._about_page()),
         ]:
             self.nav.addItem(title)
             self.stack.addWidget(page)
@@ -207,36 +232,45 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         main.addWidget(buttons)
 
+    def _appearance_page(self) -> QWidget:
+        page, layout = self._form_page(tr("appearance"))
+        layout.addRow(tr("theme"), self.theme_mode_combo)
+        layout.addRow(tr("language"), self.language_combo)
+
+        return page
+
     def _ai_page(self) -> QWidget:
-        page, layout = self._form_page("AI")
-        layout.addRow("Provider", self.provider_combo)
+        page, layout = self._form_page(tr("ai"))
+        layout.addRow(tr("provider"), self.provider_combo)
         layout.addRow("API Key", self.api_key_edit)
         layout.addRow("Base URL", self.base_url_edit)
-        layout.addRow("Model", self.model_edit)
-        test_button = QPushButton("测试连接")
+        layout.addRow(tr("model"), self.model_edit)
+        layout.addRow(tr("category.direction"), self._checks_grid(self.category_option_checks))
+        test_button = QPushButton(tr("test.connection"))
         test_button.clicked.connect(self._test_connection)
         layout.addRow(test_button)
 
         return page
 
     def _prompt_page(self) -> QWidget:
-        page, layout = self._form_page("Prompt")
-        layout.addRow("当前模板", QLabel(self.original_settings.prompt_preset))
-        open_button = QPushButton("打开 Prompt Studio")
+        page, layout = self._form_page(tr("prompt"))
+        layout.addRow(tr("current.template"), QLabel(self.original_settings.prompt_preset))
+        open_button = QPushButton(tr("open.prompt.studio"))
         open_button.clicked.connect(self._open_prompt_studio)
         layout.addRow(open_button)
 
         return page
 
     def _export_page(self) -> QWidget:
-        page, layout = self._form_page("导出")
+        page, layout = self._form_page(tr("export"))
         layout.addRow("SQLite", self.sqlite_check)
         layout.addRow("Markdown", self.markdown_check)
         layout.addRow("Word", self.word_check)
-        layout.addRow("SQLite 路径", self._path_row(self.sqlite_edit, False))
-        layout.addRow("导出目录", self._path_row(self.output_edit, True))
-        layout.addRow("正文模式", self._body_mode_row())
-        layout.addRow("导出字段", self._checks_grid(
+        layout.addRow(tr("field.note"), QLabel(tr("field.note.text")))
+        layout.addRow(tr("sqlite.path"), self._path_row(self.sqlite_edit, False))
+        layout.addRow(tr("output.dir"), self._path_row(self.output_edit, True))
+        layout.addRow(tr("body.mode"), self._body_mode_row())
+        layout.addRow(tr("export.fields"), self._checks_grid(
             [
                 self.include_title_check,
                 self.include_source_check,
@@ -256,49 +290,54 @@ class SettingsDialog(QDialog):
         return page
 
     def _network_page(self) -> QWidget:
-        page, layout = self._form_page("网络")
+        page, layout = self._form_page(tr("network"))
         layout.addRow("User-Agent", self.user_agent_edit)
-        layout.addRow("请求超时", self.timeout_spin)
-        layout.addRow("连接超时", self.connect_timeout_spin)
-        layout.addRow("读取超时", self.read_timeout_spin)
-        layout.addRow("重试次数", self.retry_count_spin)
+        layout.addRow(tr("request.timeout"), self.timeout_spin)
+        layout.addRow(tr("connect.timeout"), self.connect_timeout_spin)
+        layout.addRow(tr("read.timeout"), self.read_timeout_spin)
+        layout.addRow(tr("retry.count"), self.retry_count_spin)
 
         return page
 
     def _cost_page(self) -> QWidget:
-        page, layout = self._form_page("成本控制")
-        layout.addRow("每篇新闻最大 Token", self.max_article_tokens_spin)
-        layout.addRow("每天最大 API 调用次数", self.max_daily_calls_spin)
-        layout.addRow("每日 Token 限额", self.daily_token_limit_spin)
-        layout.addRow("调用超限处理", self.limit_action_combo)
-        layout.addRow("Token 超限处理", self.token_action_combo)
+        page, layout = self._form_page(tr("cost.control"))
+        layout.addRow(tr("token.note"), QLabel(tr("token.note.text")))
+        layout.addRow(tr("article.input.tokens"), self.max_article_tokens_spin)
+        layout.addRow(tr("daily.api.calls"), self.max_daily_calls_spin)
+        layout.addRow(tr("daily.token.budget"), self.daily_token_limit_spin)
+        layout.addRow(tr("api.limit.action"), self.limit_action_combo)
+        layout.addRow(tr("token.limit.action"), self.token_action_combo)
 
         return page
 
     def _advanced_page(self) -> QWidget:
-        page, layout = self._form_page("高级")
-        layout.addRow("高级参数", self._advanced_ai_row())
-        layout.addRow("AI Workflow", self._workflow_row())
-        layout.addRow("时间筛选", self.date_mode_combo)
-        layout.addRow("开始日期", self.start_date_edit)
-        layout.addRow("结束日期", self.end_date_edit)
-        layout.addRow("自定义周报风格", self._checks_grid(
+        page, layout = self._form_page(tr("advanced"))
+        layout.addRow(tr("advanced.params"), self._advanced_ai_row())
+        layout.addRow(tr("ai.workflow"), self._workflow_row())
+        layout.addRow(tr("date.filter"), self.date_mode_combo)
+        layout.addRow(tr("start.date"), self.start_date_edit)
+        layout.addRow(tr("end.date"), self.end_date_edit)
+        layout.addRow(tr("custom.report.style"), self._checks_grid(
             [self.custom_high_check, self.custom_medium_check, self.custom_low_check]
         ))
-        layout.addRow("兼容评分阈值", self.min_score_spin)
+        layout.addRow(tr("score.threshold"), self.min_score_spin)
         layout.addRow(self.release_mode_check)
         layout.addRow(self.debug_ai_check)
 
         return page
 
     def _about_page(self) -> QWidget:
-        page, layout = self._form_page("关于")
-        layout.addRow("Version", QLabel("v2.1 Professional Edition"))
-        layout.addRow("GitHub", QLabel("https://github.com/"))
-        layout.addRow("License", QLabel("See project license"))
-        layout.addRow("Python Version", QLabel(sys.version.split()[0]))
-        layout.addRow("Qt Version", QLabel(qVersion()))
-        layout.addRow("作者", QLabel("SpaceWeekly contributors"))
+        page, layout = self._form_page(tr("about"))
+        layout.addRow(tr("version"), QLabel("v2.2 Professional Edition"))
+        github_label = QLabel(
+        '<a href="https://github.com/Starship30/SpaceWeekly/">https://github.com/Starship30/SpaceWeekly/</a>'
+        )
+        github_label.setOpenExternalLinks(True)
+
+        layout.addRow(tr("github.link"), github_label)
+        layout.addRow(tr("python.version"), QLabel(sys.version.split()[0]))
+        layout.addRow(tr("qt.version"), QLabel(qVersion()))
+        layout.addRow(tr("author"), QLabel("RMS-TITANIC"))
 
         return page
 
@@ -323,7 +362,7 @@ class SettingsDialog(QDialog):
 
         for label, control in [
             ("Temperature", self.temperature_spin),
-            ("Max Tokens", self.max_tokens_spin),
+            (tr("ai.output.tokens"), self.max_tokens_spin),
         ]:
             layout.addWidget(QLabel(label))
             layout.addWidget(control)
@@ -335,7 +374,7 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(QLabel("RSS → Parser → 重要程度 → 编辑策略 → 分类 → 摘要 → 翻译 → 导出"))
+        layout.addWidget(QLabel(tr("workflow.note")))
         layout.addWidget(self._checks_grid(
             [
                 self.pipeline_filter_check,
@@ -358,7 +397,7 @@ class SettingsDialog(QDialog):
             (tr("body.original"), "original"),
             (tr("body.bilingual"), "bilingual"),
             (tr("body.translated"), "translated"),
-            ("不导出正文", "none"),
+            (tr("body.none"), "none"),
         ]:
             button = QRadioButton(label)
             button.setProperty("mode", mode)
@@ -370,6 +409,28 @@ class SettingsDialog(QDialog):
             self.body_mode_group.buttons()[0].setChecked(True)
 
         return widget
+
+    def _selected_category_options(self) -> list[str]:
+        selected = [
+            str(check.property("value"))
+            for check in self.category_option_checks
+            if check.isChecked()
+        ]
+
+        return selected or [value for value, _key, _legacy in AI_CATEGORY_OPTIONS]
+
+    def _category_option_check(
+        self,
+        value: str,
+        label_key: str,
+        legacy_value: str,
+        selected_values: list[str],
+    ) -> QCheckBox:
+        selected = value in selected_values or legacy_value in selected_values
+        check = self._check(tr(label_key), selected)
+        check.setProperty("value", value)
+
+        return check
 
     def _checks_grid(self, checks: list[QCheckBox]) -> QWidget:
         widget = QWidget()
@@ -385,7 +446,7 @@ class SettingsDialog(QDialog):
 
     def _path_row(self, edit: QLineEdit, directory: bool) -> QWidget:
         widget = QWidget()
-        button = QPushButton("选择")
+        button = QPushButton(tr("select"))
         button.clicked.connect(lambda: self._select_path(edit, directory))
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -396,9 +457,9 @@ class SettingsDialog(QDialog):
 
     def _action_combo(self, current: str) -> QComboBox:
         combo = QComboBox()
-        combo.addItem("自动停止", "stop")
-        combo.addItem("跳过", "skip")
-        combo.addItem("询问用户", "ask")
+        combo.addItem(tr("auto.stop"), "stop")
+        combo.addItem(tr("skip"), "skip")
+        combo.addItem(tr("ask.user"), "ask")
         combo.setCurrentIndex(max(combo.findData(current), 0))
 
         return combo
@@ -415,6 +476,23 @@ class SettingsDialog(QDialog):
         ]:
             combo.addItem(label, mode)
 
+        combo.setCurrentIndex(max(combo.findData(current), 0))
+
+        return combo
+
+    def _theme_mode_combo(self, current: str) -> QComboBox:
+        combo = QComboBox()
+        combo.addItem(tr("follow.system"), THEME_SYSTEM)
+        combo.addItem(tr("light.mode"), THEME_LIGHT)
+        combo.addItem(tr("dark.mode"), THEME_DARK)
+        combo.setCurrentIndex(max(combo.findData(current), 0))
+
+        return combo
+
+    def _language_combo(self, current: str) -> QComboBox:
+        combo = QComboBox()
+        combo.addItem(tr("chinese"), "zh_CN")
+        combo.addItem(tr("english"), "en_US")
         combo.setCurrentIndex(max(combo.findData(current), 0))
 
         return combo
@@ -442,9 +520,9 @@ class SettingsDialog(QDialog):
 
     def _select_path(self, edit: QLineEdit, directory: bool) -> None:
         if directory:
-            path = QFileDialog.getExistingDirectory(self, "选择目录")
+            path = QFileDialog.getExistingDirectory(self, tr("select.folder"))
         else:
-            path, _ = QFileDialog.getSaveFileName(self, "选择 SQLite 文件")
+            path, _ = QFileDialog.getSaveFileName(self, tr("select.sqlite"))
 
         if path:
             edit.setText(path)
@@ -457,11 +535,11 @@ class SettingsDialog(QDialog):
 
     def _test_connection(self) -> None:
         if not self.api_key_edit.text().strip():
-            QMessageBox.warning(self, "测试连接", "请先填写 API Key。")
+            QMessageBox.warning(self, tr("test.connection"), tr("missing.api.key"))
             return
 
         if not self.base_url_edit.text().strip() or not self.model_edit.text().strip():
-            QMessageBox.warning(self, "测试连接", "请填写 Base URL 和 Model。")
+            QMessageBox.warning(self, tr("test.connection"), tr("missing.model.config"))
             return
 
-        QMessageBox.information(self, "测试连接", "配置已填写，可用于生成时连接。")
+        QMessageBox.information(self, tr("test.connection"), tr("connection.ready"))
