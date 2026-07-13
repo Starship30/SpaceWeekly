@@ -1,5 +1,7 @@
 # SpaceWeekly
 
+[Download](https://github.com/Starship30/SpaceWeekly/releases/tag/v2.2.1)
+
 SpaceWeekly v2.2 AI Workflow Edition is an AI Aerospace News Workspace.
 
 It collects aerospace RSS feeds, parses article pages, analyzes news value with
