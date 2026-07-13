@@ -16,9 +16,11 @@ def main() -> None:
 
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QDialog
 
     from resources import resource_path
-    from ui.main_window import MainWindow
+    from services.workspace import needs_first_run_wizard
+    from ui.first_run_wizard import FirstRunWizard
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     app = QApplication(sys.argv)
@@ -28,6 +30,14 @@ def main() -> None:
         app.setWindowIcon(QIcon(str(icon_path)))
     else:
         logging.getLogger(__name__).warning("Icon not found %s", icon_path)
+
+    if needs_first_run_wizard():
+        wizard = FirstRunWizard()
+
+        if wizard.exec() != QDialog.DialogCode.Accepted:
+            return
+
+    from ui.main_window import MainWindow
 
     window = MainWindow()
     window.show()

@@ -130,6 +130,8 @@ class MainWindow(QMainWindow):
             else:
                 self._apply_style()
                 self.log_panel.apply_theme(self.theme_manager)
+                self.feeds = load_feeds()
+                self.feed_panel.set_feeds(self.feeds)
                 self.dashboard_panel.apply_settings(self.settings)
             self._update_estimate()
 

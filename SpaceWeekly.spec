@@ -36,8 +36,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    [],
-    exclude_binaries=True,
+    a.binaries,
+    a.datas,
     name="SpaceWeekly",
     debug=False,
     bootloader_ignore_signals=False,
@@ -45,13 +45,4 @@ exe = EXE(
     upx=True,
     console=False,
     icon=str(ROOT / "assets" / "sspo.ico"),
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="SpaceWeekly",
 )

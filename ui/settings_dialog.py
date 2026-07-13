@@ -29,6 +29,8 @@ from PySide6.QtWidgets import QWidget
 from i18n import tr
 from resources import resource_path
 from services.settings import AppSettings
+from services.settings import load_settings
+from ui.first_run_wizard import FirstRunWizard
 from ui.prompt_studio_dialog import PromptStudioDialog
 from ui.theme import THEME_DARK
 from ui.theme import THEME_LIGHT
@@ -236,6 +238,9 @@ class SettingsDialog(QDialog):
         page, layout = self._form_page(tr("appearance"))
         layout.addRow(tr("theme"), self.theme_mode_combo)
         layout.addRow(tr("language"), self.language_combo)
+        reset_button = QPushButton(tr("reset.workspace"))
+        reset_button.clicked.connect(self._reset_workspace)
+        layout.addRow(reset_button)
 
         return page
 
@@ -532,6 +537,15 @@ class SettingsDialog(QDialog):
 
         if dialog.exec():
             self.original_settings = dialog.settings()
+
+    def _reset_workspace(self) -> None:
+        dialog = FirstRunWizard(self)
+
+        if dialog.exec():
+            self.original_settings = load_settings()
+            self.sqlite_edit.setText(self.original_settings.sqlite_path)
+            self.output_edit.setText(self.original_settings.output_dir)
+            QMessageBox.information(self, "SpaceWeekly", tr("workspace.updated"))
 
     def _test_connection(self) -> None:
         if not self.api_key_edit.text().strip():
