@@ -1,6 +1,6 @@
 # SpaceWeekly
 
-SpaceWeekly v2.1 AI Workflow Edition is an AI Aerospace News Workspace.
+SpaceWeekly v2.2 AI Workflow Edition is an AI Aerospace News Workspace.
 
 It collects aerospace RSS feeds, parses article pages, analyzes news value with
 AI, filters low-value items, classifies reports, and exports Word/Markdown
