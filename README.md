@@ -1,6 +1,6 @@
 # SpaceWeekly
 
-[Download](https://github.com/Starship30/SpaceWeekly/releases/tag/v2.2.1)
+[Download](https://github.com/Starship30/SpaceWeekly/releases/download/v2.2.1/SpaceWeekly.exe)
 
 SpaceWeekly v2.2 AI Workflow Edition is an AI Aerospace News Workspace.
 
