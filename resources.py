@@ -12,6 +12,8 @@ WRITABLE_ROOTS = {
     "cache",
     "logs",
     "prompts",
+    "config",
+    "translator",
 }
 _WORKSPACE_PATH: Path | None = None
 

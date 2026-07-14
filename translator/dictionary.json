@@ -1,0 +1,38 @@
+{
+  "Starlink Group": {
+    "translation": "Starlink批次",
+    "type": "mission"
+  },
+  "SpaceX": {
+    "translation": "SpaceX",
+    "type": "organization"
+  },
+  "Falcon 9": {
+    "translation": "猎鹰9号",
+    "type": "rocket"
+  },
+  "Starship": {
+    "translation": "星舰",
+    "type": "rocket"
+  },
+  "Soyuz": {
+    "translation": "联盟号",
+    "type": "rocket"
+  },
+  "Low Earth Orbit": {
+    "translation": "近地轨道",
+    "type": "orbit"
+  },
+  "Sun-Synchronous Orbit": {
+    "translation": "太阳同步轨道",
+    "type": "orbit"
+  },
+  "Geostationary Transfer Orbit": {
+    "translation": "地球同步转移轨道",
+    "type": "orbit"
+  },
+  "Launch Successful": {
+    "translation": "发射成功",
+    "type": "status"
+  }
+}

@@ -69,5 +69,8 @@
   "token_limit_action": "ask",
   "release_mode": true,
   "theme_mode": "system",
-  "language": "zh_CN"
+  "language": "zh_CN",
+  "launch_range": "next_week",
+  "aerospace_translation_enabled": true,
+  "aerospace_translation_mode": "hybrid"
 }

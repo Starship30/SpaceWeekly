@@ -15,6 +15,7 @@ class AppToolBar(QToolBar):
     prompt_studio_requested = Signal()
     output_requested = Signal()
     refresh_requested = Signal()
+    launch_test_requested = Signal()
     about_requested = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -62,6 +63,13 @@ class AppToolBar(QToolBar):
                 tr("refresh.rss"),
                 QStyle.StandardPixmap.SP_BrowserReload,
                 self.refresh_requested.emit,
+            )
+        )
+        self.addAction(
+            self._action(
+                tr("launch_test_title"),
+                QStyle.StandardPixmap.SP_DialogApplyButton,
+                self.launch_test_requested.emit,
             )
         )
         self.addSeparator()

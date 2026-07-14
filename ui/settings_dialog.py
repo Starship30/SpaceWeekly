@@ -26,12 +26,14 @@ from PySide6.QtWidgets import QStackedWidget
 from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
 
+from config import APP_VERSION
 from i18n import tr
 from resources import resource_path
 from services.settings import AppSettings
 from services.settings import load_settings
 from ui.first_run_wizard import FirstRunWizard
 from ui.prompt_studio_dialog import PromptStudioDialog
+from ui.term_editor_dialog import TermEditorDialog
 from ui.theme import THEME_DARK
 from ui.theme import THEME_LIGHT
 from ui.theme import THEME_SYSTEM
@@ -121,6 +123,9 @@ class SettingsDialog(QDialog):
             report_style_custom_medium=self.custom_medium_check.isChecked(),
             report_style_custom_low=self.custom_low_check.isChecked(),
             release_mode=self.release_mode_check.isChecked(),
+            launch_range=str(self.launch_range_combo.currentData()),
+            aerospace_translation_enabled=self.aerospace_translation_check.isChecked(),
+            aerospace_translation_mode=str(self.aerospace_translation_mode_combo.currentData()),
         )
 
     def _set_icon(self) -> None:
@@ -200,6 +205,20 @@ class SettingsDialog(QDialog):
         self.custom_medium_check = self._check(tr("medium"), settings.report_style_custom_medium)
         self.custom_low_check = self._check(tr("low"), settings.report_style_custom_low)
         self.body_mode_group = QButtonGroup(self)
+        self.launch_range_combo = self._launch_range_combo(settings.launch_range)
+        self.aerospace_translation_check = self._check(
+            tr("aerospace.translation.enabled"),
+            settings.aerospace_translation_enabled,
+        )
+        self.aerospace_translation_mode_combo = self._aerospace_translation_mode_combo(
+            settings.aerospace_translation_mode
+        )
+        self.aerospace_translation_mode_combo.setEnabled(
+            settings.aerospace_translation_enabled
+        )
+        self.aerospace_translation_check.toggled.connect(
+            self.aerospace_translation_mode_combo.setEnabled
+        )
 
     def _build_layout(self) -> None:
         main = QVBoxLayout(self)
@@ -213,6 +232,7 @@ class SettingsDialog(QDialog):
             (tr("ai"), self._ai_page()),
             (tr("prompt"), self._prompt_page()),
             (tr("export"), self._export_page()),
+            (tr("launch.settings"), self._launch_page()),
             (tr("network"), self._network_page()),
             (tr("cost.control"), self._cost_page()),
             (tr("advanced"), self._advanced_page()),
@@ -304,6 +324,20 @@ class SettingsDialog(QDialog):
 
         return page
 
+    def _launch_page(self) -> QWidget:
+        page, layout = self._form_page(tr("launch.settings"))
+        layout.addRow(tr("launch.range"), self.launch_range_combo)
+        layout.addRow(self.aerospace_translation_check)
+        layout.addRow(
+            tr("aerospace.translation.mode"),
+            self.aerospace_translation_mode_combo,
+        )
+        edit_button = QPushButton(tr("terms.edit"))
+        edit_button.clicked.connect(self._open_term_editor)
+        layout.addRow(edit_button)
+
+        return page
+
     def _cost_page(self) -> QWidget:
         page, layout = self._form_page(tr("cost.control"))
         layout.addRow(tr("token.note"), QLabel(tr("token.note.text")))
@@ -333,7 +367,10 @@ class SettingsDialog(QDialog):
 
     def _about_page(self) -> QWidget:
         page, layout = self._form_page(tr("about"))
-        layout.addRow(tr("version"), QLabel("v2.2 Professional Edition"))
+        layout.addRow(
+            tr("version"),
+            QLabel(f"v{APP_VERSION} Professional Edition"),
+        )
         github_label = QLabel(
         '<a href="https://github.com/Starship30/SpaceWeekly/">https://github.com/Starship30/SpaceWeekly/</a>'
         )
@@ -502,6 +539,24 @@ class SettingsDialog(QDialog):
 
         return combo
 
+    def _launch_range_combo(self, current: str) -> QComboBox:
+        combo = QComboBox()
+        combo.addItem(tr("launch.range.past"), "past_week")
+        combo.addItem(tr("launch.range.next"), "next_week")
+        combo.addItem(tr("disabled"), "disabled")
+        combo.setCurrentIndex(max(combo.findData(current), 0))
+
+        return combo
+
+    def _aerospace_translation_mode_combo(self, current: str) -> QComboBox:
+        combo = QComboBox()
+        combo.addItem(tr("translation.mode.dictionary"), "dictionary")
+        combo.addItem(tr("translation.mode.ai"), "ai")
+        combo.addItem(tr("translation.mode.hybrid"), "hybrid")
+        combo.setCurrentIndex(max(combo.findData(current), 0))
+
+        return combo
+
     def _date_edit(self, value: str, fallback_days: int) -> QDateEdit:
         edit = QDateEdit()
         edit.setCalendarPopup(True)
@@ -537,6 +592,9 @@ class SettingsDialog(QDialog):
 
         if dialog.exec():
             self.original_settings = dialog.settings()
+
+    def _open_term_editor(self) -> None:
+        TermEditorDialog(self.settings(), self).exec()
 
     def _reset_workspace(self) -> None:
         dialog = FirstRunWizard(self)

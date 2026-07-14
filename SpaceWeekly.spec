@@ -8,6 +8,8 @@ datas = [
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "language"), "language"),
     (str(ROOT / "prompts"), "prompts"),
+    (str(ROOT / "translator" / "dictionary.json"), "translator"),
+    (str(ROOT / "translator" / "pending_terms.json"), "translator"),
     (str(ROOT / "ui" / "style.qss"), "ui"),
     (str(ROOT / "config.json"), "."),
     (str(ROOT / "feeds.json"), "."),

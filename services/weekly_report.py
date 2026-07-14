@@ -12,6 +12,9 @@ from database.sqlite import save_article
 from downloader.client import download
 from exporters.markdown import export_markdown
 from exporters.word import export_word
+from feeds.launches import SOURCE as LAUNCH_SOURCE
+from feeds.launches import get_launches
+from i18n import set_language
 from logging_config import setup_logging
 from models.ai_summary import AISummary
 from models.article import Article
@@ -25,6 +28,7 @@ from services.prompt_manager import prompt_value
 from services.settings import AppSettings
 from services.settings import apply_settings
 from services.settings import load_settings
+from translator.translator import Translator
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,8 @@ def generate_weekly(
     """Generate the weekly report from configured RSS feeds."""
     setup_logging()
     settings = load_settings()
+    set_language(settings.language)
+    logger.setLevel(logging.DEBUG if not settings.release_mode else logging.NOTSET)
     apply_settings(settings)
     selected_feeds = feeds if feeds is not None else enabled_feeds()
     markdown_enabled = _enabled(export_markdown_enabled, settings.export_markdown)
@@ -52,37 +58,37 @@ def generate_weekly(
     if export_sqlite:
         initialize_database()
 
-    logger.info("抓取 RSS")
-    news_list = _filter_news(_fetch_news(selected_feeds, settings.rss_limit), date_range)
-    logger.info("预计文章数量：%s", len(news_list))
-    logger.info("预计 Token：%s", _estimate_tokens(news_list, settings))
-    logger.info("预计耗时：约 %s 秒", _estimate_seconds(news_list, settings))
+    rss_news, launch_articles = get_news(
+        selected_feeds,
+        settings.rss_limit,
+        settings.launch_range,
+    )
+    news_list = _filter_news(rss_news, date_range)
+    estimated_items = len(news_list)
+    logger.info("预计文章数量：%s", estimated_items)
+    logger.info("预计 Token：%s", estimated_items * settings.max_article_tokens)
+    logger.info(
+        "预计耗时：约 %s 秒",
+        estimated_items * max(int(_pipeline_ai_enabled(settings)), 1) * 8,
+    )
 
     for index, news in enumerate(news_list, start=1):
-        logger.info("正在处理：%s %s / %s", news.source, index, len(news_list))
+        logger.info("正在处理：%s %s / %s", news.source, index, estimated_items)
         article = _parse_article(news)
 
         if article is None:
             continue
 
-        article_for_ai = _limit_article_tokens(article, settings.max_article_tokens)
-        api_calls = _run_ai(
-            article_for_ai,
+        api_calls = _process_article(
+            article,
             settings,
             ai_summaries,
             translations,
             analyses,
+            articles,
             api_calls,
+            export_sqlite,
         )
-
-        if _should_ignore(article, settings, analyses):
-            continue
-
-        articles.append(article)
-
-        if export_sqlite:
-            save_status = "SAVE" if save_article(article) else "SKIP"
-            logger.info("保存 SQLite %s", save_status)
 
     export_articles = _export_articles(export_sqlite, articles, date_range)
     context = _export_context(settings, translations)
@@ -91,6 +97,8 @@ def generate_weekly(
         ai_summaries,
         analyses,
         context,
+        launch_articles,
+        settings,
         markdown_enabled,
         word_enabled,
     )
@@ -111,6 +119,22 @@ def estimate_generation(feeds: list[FeedSource], settings: AppSettings) -> tuple
 
 def _enabled(value: bool | None, fallback: bool) -> bool:
     return fallback if value is None else value
+
+
+def get_news(
+    feeds: list[FeedSource],
+    rss_limit: int = 0,
+    launch_range: str = "next_week",
+) -> tuple[list[News], list[Article]]:
+    """Fetch RSS news and Launch Library 2 launch articles."""
+    logger.info("抓取 RSS")
+    rss_news = _fetch_news(feeds, rss_limit)
+    launch_articles = _fetch_launch_articles(launch_range)
+
+    for article in launch_articles:
+        _debug_ll2_article("get_news() return", article)
+
+    return rss_news, launch_articles
 
 
 def _fetch_news(feeds: list[FeedSource], rss_limit: int = 0) -> list[News]:
@@ -134,6 +158,19 @@ def _fetch_news(feeds: list[FeedSource], rss_limit: int = 0) -> list[News]:
             news_list.append(_news_from_feed_item(feed, item, url))
 
     return news_list
+
+
+def _fetch_launch_articles(launch_range: str) -> list[Article]:
+    if launch_range == "disabled":
+        return []
+
+    logger.info("抓取 Launch Library 2")
+
+    try:
+        return get_launches(launch_range=launch_range)
+    except Exception as exc:
+        logger.warning("Launch Library 2 获取失败：%s", exc)
+        return []
 
 
 def _news_from_feed_item(feed: FeedSource, item, url: str) -> News:
@@ -204,6 +241,55 @@ def _rss_summary_article(news: News) -> Article:
     body = news.summary.strip() or news.title
 
     return Article(news=news, body=body, parser="RSS Summary")
+
+
+def _process_article(
+    article: Article,
+    settings: AppSettings,
+    ai_summaries: dict[str, AISummary],
+    translations: dict[str, str],
+    analyses: dict[str, NewsAnalysis],
+    articles: list[Article],
+    api_calls: int,
+    export_sqlite: bool,
+) -> int:
+    article_for_ai = _limit_article_tokens(article, settings.max_article_tokens)
+    api_calls = _run_ai(
+        article_for_ai,
+        settings,
+        ai_summaries,
+        translations,
+        analyses,
+        api_calls,
+    )
+
+    if _should_ignore(article, settings, analyses):
+        return api_calls
+
+    articles.append(article)
+
+    if export_sqlite:
+        save_status = "SAVE" if save_article(article) else "SKIP"
+        logger.info("保存 SQLite %s", save_status)
+
+    return api_calls
+
+
+def _debug_ll2_article(stage: str, article: Article) -> None:
+    if (
+        not logger.isEnabledFor(logging.DEBUG)
+        or article.news.source != "Launch Library 2"
+    ):
+        return
+
+    logger.debug(
+        "Launch Library 2 Article at %s:\n"
+        "title=%r\nsummary=%r\nbody=%r",
+        stage,
+        article.news.title,
+        article.news.summary,
+        article.body,
+    )
 
 
 def _run_ai(
@@ -415,9 +501,15 @@ def _export_articles(
         return articles
 
     if date_range is not None:
-        return get_articles_by_date(date_range[0], date_range[1])
+        stored_articles = get_articles_by_date(date_range[0], date_range[1])
+    else:
+        stored_articles = get_articles()
 
-    return get_articles()
+    return [
+        article
+        for article in stored_articles
+        if article.news.source != LAUNCH_SOURCE
+    ]
 
 
 def _export_context(
@@ -452,6 +544,8 @@ def _export_reports(
     ai_summaries: dict[str, AISummary],
     analyses: dict[str, NewsAnalysis],
     context: ExportContext,
+    launch_articles: list[Article],
+    settings: AppSettings,
     markdown_enabled: bool,
     word_enabled: bool,
 ) -> None:
@@ -460,8 +554,29 @@ def _export_reports(
         logger.info("导出 Markdown")
 
     if word_enabled:
-        export_word(articles, ai_summaries, context, analyses)
+        export_word(
+            articles,
+            ai_summaries,
+            context,
+            analyses,
+            launches=launch_articles,
+            launch_range=settings.launch_range,
+            launch_term_translator=_launch_term_translator(settings),
+        )
         logger.info("导出 Word")
+
+
+def _launch_term_translator(settings: AppSettings):
+    if (
+        not settings.aerospace_translation_enabled
+        or settings.language != "zh_CN"
+    ):
+        return None
+
+    return Translator(
+        settings=settings,
+        mode=settings.aerospace_translation_mode,
+    )
 
 
 def _date_range(settings: AppSettings) -> tuple[str, str] | None:

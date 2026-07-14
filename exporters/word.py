@@ -2,16 +2,13 @@ from datetime import datetime
 from pathlib import Path
 
 from config import OUTPUT_DIR
+from i18n import tr
 from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
 from models.news_analysis import NewsAnalysis
 
-IMPORTANCE_SECTIONS = [
-    ("High", "高"),
-    ("Medium", "中"),
-    ("Low", "低"),
-]
+IMPORTANCE_LEVELS = ["High", "Medium", "Low"]
 
 
 def export_word(
@@ -19,6 +16,9 @@ def export_word(
     ai_summaries: dict[str, AISummary] | None = None,
     context: ExportContext | None = None,
     analyses: dict[str, NewsAnalysis] | None = None,
+    launches: list[Article] | None = None,
+    launch_range: str = "next_week",
+    launch_term_translator=None,
 ) -> Path:
     """Export articles to a styled Word document."""
     from docx import Document
@@ -29,11 +29,22 @@ def export_word(
     _setup_styles(document)
     document.add_heading(_report_title(context), level=0)
 
+    if launch_range != "disabled":
+        document.add_heading(_launch_section_title(launch_range), level=1)
+
+        if launches:
+            for launch in launches:
+                _add_launch(document, launch, launch_term_translator)
+        else:
+            document.add_paragraph(tr("launch_none"))
+
+    document.add_heading(tr("weekly_space_news"), level=1)
+
     for section, section_articles in _group_by_importance(
         articles,
         analyses or {},
     ).items():
-        document.add_heading(section, level=1)
+        document.add_heading(section, level=2)
 
         for article in section_articles:
             _add_article(
@@ -47,6 +58,134 @@ def export_word(
     document.save(output_path)
 
     return output_path
+
+
+def _add_launch(
+    document,
+    launch: Article,
+    term_translator,
+) -> None:
+    fields = _launch_fields(launch)
+    fields["name"] = _translated_term(fields["name"], "mission", term_translator)
+    fields["rocket"] = _translated_term(fields["rocket"], "rocket", term_translator)
+    fields["provider"] = _translated_term(
+        fields["provider"],
+        "organization",
+        term_translator,
+    )
+    fields["pad"] = _translated_term(fields["pad"], "location", term_translator)
+    fields["mission_name"] = _translated_term(
+        fields["mission_name"],
+        "mission",
+        term_translator,
+    )
+    fields["orbit"] = _translated_term(fields["orbit"], "orbit", term_translator)
+    fields["status"] = _translated_term(fields["status"], "status", term_translator)
+    fields["mission_description"] = _translated_description(
+        fields["mission_description"],
+        term_translator,
+    )
+    title = fields["mission_name"]
+
+    if title == tr("not_available"):
+        title = fields["name"]
+
+    document.add_heading(f"🚀 {title}", level=2)
+    _add_label(document, tr("launch_time"), fields["time"])
+    _add_label(document, tr("rocket"), fields["rocket"])
+    _add_label(document, tr("launch_operator"), fields["provider"])
+    _add_label(document, tr("launch_site"), fields["pad"])
+    _add_label(document, tr("orbit"), fields["orbit"])
+    _add_label(document, tr("status"), fields["status"])
+    _add_label(document, tr("mission_description"), fields["mission_description"])
+
+
+def _launch_section_title(launch_range: str) -> str:
+    if launch_range == "past_week":
+        return tr("launch_section_past")
+
+    return tr("launch_section_next")
+
+
+def _translated_term(
+    value: str,
+    term_type: str,
+    translator,
+) -> str:
+    if translator is None or value in {"Not available", tr("not_available")}:
+        return value
+
+    return translator.translate_term(value, term_type, allow_ai=False) or value
+
+
+def _translated_description(value: str, translator) -> str:
+    if (
+        translator is None
+        or value in {"Not available", tr("not_available")}
+        or value == "No mission description available."
+    ):
+        return value
+
+    return translator.translate_description(value) or value
+
+
+def _launch_fields(launch: Article) -> dict[str, str]:
+    fields = {
+        "name": launch.news.title,
+        "time": launch.news.published,
+        "rocket": "",
+        "provider": "",
+        "pad": "",
+        "mission_name": "",
+        "mission_description": "",
+        "orbit": "",
+        "status": "",
+    }
+    labels = {
+        "Launch name:": "name",
+        "Launch time:": "time",
+        "Rocket:": "rocket",
+        "Launch service provider:": "provider",
+        "Launch pad:": "pad",
+        "Mission name:": "mission_name",
+        "Mission description:": "mission_description",
+        "Orbit:": "orbit",
+        "Status:": "status",
+        "Official or video link:": None,
+    }
+    multiline_field: str | None = None
+
+    for raw_line in launch.body.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        matched = False
+
+        for label, key in labels.items():
+            if not line.startswith(label):
+                continue
+
+            matched = True
+            multiline_field = key if key == "mission_description" else None
+
+            if key is not None:
+                value = line[len(label):].strip()
+
+                if value:
+                    fields[key] = value
+
+            break
+
+        if matched:
+            continue
+
+        if multiline_field:
+            existing = fields[multiline_field]
+            fields[multiline_field] = f"{existing}\n{line}".strip()
+
+    return {key: value or tr("not_available") for key, value in fields.items()}
 
 
 def _output_path() -> Path:
@@ -91,20 +230,20 @@ def _add_article(
         document.add_heading(news.title, level=2)
 
     if context is None or context.include_published:
-        _add_label(document, "发布时间", news.published)
+        _add_label(document, tr("report_published"), news.published)
 
     if context is None or context.include_source:
-        _add_label(document, "来源", news.source)
+        _add_label(document, tr("report_source"), news.source)
 
     if analysis is not None and (context is None or context.include_score):
-        _add_label(document, "重要程度", _importance_label(_importance_level(analysis)))
-        _add_label(document, "原因", analysis.reason)
+        _add_label(document, tr("report_importance"), _importance_label(_importance_level(analysis)))
+        _add_label(document, tr("report_reason"), analysis.reason)
 
     if analysis is not None and (context is None or context.include_categories):
-        _add_label(document, "分类", "、".join(analysis.categories))
+        _add_label(document, tr("report_category"), _join_values(analysis.categories))
 
     if ai_summary is None:
-        _add_label(document, "摘要", news.summary)
+        _add_label(document, tr("report_summary"), news.summary)
     else:
         _add_ai_summary(document, ai_summary, context)
 
@@ -112,12 +251,14 @@ def _add_article(
         body_text = _body_text(article, context)
 
         if body_text:
-            document.add_heading("正文", level=2)
+            document.add_heading(tr("report_body"), level=2)
             document.add_paragraph(body_text)
 
     if context is None or context.include_link:
         paragraph = document.add_paragraph()
-        paragraph.add_run("链接：").bold = True
+        paragraph.add_run(
+            f"{tr('report_link')}{tr('label_separator')}"
+        ).bold = True
         _add_hyperlink(paragraph, news.url, news.url)
 
 
@@ -125,17 +266,19 @@ def _add_ai_summary(document, ai_summary: AISummary, context: ExportContext | No
     if context is None or (context.show_summary and context.include_summary):
         paragraph = document.add_paragraph()
         paragraph.paragraph_format.space_after = 6
-        run = paragraph.add_run(f"AI 摘要：{ai_summary.summary}")
+        run = paragraph.add_run(
+            f"{tr('report_ai_summary')}{tr('label_separator')}{ai_summary.summary}"
+        )
         run.bold = True
 
     if context is None or (context.show_keywords and context.include_keywords):
-        _add_label(document, "关键词", "、".join(ai_summary.keywords))
+        _add_label(document, tr("report_keywords"), _join_values(ai_summary.keywords))
 
     if context is None or (context.show_category and context.include_categories):
-        _add_label(document, "分类", ai_summary.category)
+        _add_label(document, tr("report_category"), ai_summary.category)
 
     if context is None or (context.show_importance and context.include_score):
-        _add_label(document, "重要程度", _importance_label(ai_summary.importance))
+        _add_label(document, tr("report_importance"), _importance_label(ai_summary.importance))
 
 
 def _body_text(article: Article, context: ExportContext | None) -> str:
@@ -174,7 +317,7 @@ def _bilingual_body(original: str, translation: str) -> str:
 
 def _add_label(document, label: str, value: str) -> None:
     paragraph = document.add_paragraph()
-    run = paragraph.add_run(f"{label}：")
+    run = paragraph.add_run(f"{label}{tr('label_separator')}")
     run.bold = True
     paragraph.add_run(value)
 
@@ -203,7 +346,7 @@ def _group_by_importance(
     articles: list[Article],
     analyses: dict[str, NewsAnalysis],
 ) -> dict[str, list[Article]]:
-    grouped = {label: [] for _, label in IMPORTANCE_SECTIONS}
+    grouped = {_importance_label(level): [] for level in IMPORTANCE_LEVELS}
 
     for article in articles:
         analysis = analyses.get(article.news.url)
@@ -241,9 +384,20 @@ def _importance_level(analysis: NewsAnalysis | None) -> str:
 
 def _importance_label(level: str) -> str:
     text = (level or "").strip()
-    aliases = {"High": "高", "Medium": "中", "Low": "低", "high": "高", "medium": "中", "low": "低"}
+    aliases = {
+        "High": tr("importance_high"),
+        "Medium": tr("importance_medium"),
+        "Low": tr("importance_low"),
+        "high": tr("importance_high"),
+        "medium": tr("importance_medium"),
+        "low": tr("importance_low"),
+    }
 
     if text in aliases:
         return aliases[text]
 
-    return text or "中"
+    return text or tr("importance_medium")
+
+
+def _join_values(values: list[str]) -> str:
+    return tr("list_separator").join(values)

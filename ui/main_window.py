@@ -12,6 +12,9 @@ from PySide6.QtWidgets import QMainWindow
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import QSplitter
 
+from config import APP_VERSION
+from feeds.launches import get_launches
+from feeds.launches import last_error as launch_last_error
 from i18n import set_language
 from i18n import tr
 from resources import resource_path
@@ -31,6 +34,7 @@ from ui.widgets.feed_panel import FeedPanel
 from ui.widgets.log_panel import LogPanel
 from ui.widgets.report_worker import ReportWorker
 from ui.widgets.status_bar import SpaceStatusBar
+from translator.translator import Translator
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +104,7 @@ class MainWindow(QMainWindow):
         self.toolbar.prompt_studio_requested.connect(self._open_prompt_studio)
         self.toolbar.output_requested.connect(self._open_output_dir)
         self.toolbar.refresh_requested.connect(self._refresh_feeds)
+        self.toolbar.launch_test_requested.connect(self._test_launch_data)
         self.toolbar.about_requested.connect(self._show_about)
         self.feed_panel.feeds_changed.connect(self._update_estimate)
         self.dashboard_panel.settings_changed.connect(self._update_estimate)
@@ -115,6 +120,54 @@ class MainWindow(QMainWindow):
         self.feed_panel.set_feeds(self.feeds)
         self._update_estimate()
         logger.info("RSS 列表已刷新")
+
+    def _test_launch_data(self) -> None:
+        settings = load_settings()
+        launches = get_launches(limit=5, launch_range=settings.launch_range)
+        error = launch_last_error()
+        translator = (
+            Translator(settings=settings, mode="dictionary")
+            if settings.aerospace_translation_enabled and settings.language == "zh_CN"
+            else None
+        )
+
+        if error:
+            QMessageBox.warning(
+                self,
+                tr("launch_test_title"),
+                tr("launch_test_failed", error=error),
+            )
+            return
+
+        lines = [tr("launch_test_count", count=len(launches))]
+        separator = tr("label_separator")
+
+        for launch in launches[:5]:
+            rocket = _launch_field(launch.body, "Rocket") or tr("not_available")
+            provider = (
+                _launch_field(launch.body, "Launch service provider")
+                or tr("not_available")
+            )
+
+            if translator is not None:
+                rocket = translator.translate_term(rocket, "rocket", allow_ai=False)
+                provider = translator.translate_term(
+                    provider,
+                    "organization",
+                    allow_ai=False,
+                )
+
+            lines.extend(
+                [
+                    "",
+                    f"{tr('launch_name')}{separator}{launch.news.title}",
+                    f"{tr('launch_time')}{separator}{launch.news.published or '-'}",
+                    f"{tr('rocket')}{separator}{rocket}",
+                    f"{tr('launch_service_provider')}{separator}{provider}",
+                ]
+            )
+
+        QMessageBox.information(self, tr("launch_test_title"), "\n".join(lines))
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(load_settings(), self)
@@ -171,7 +224,7 @@ class MainWindow(QMainWindow):
             """
             <h3>{title}</h3>
             <p>
-            {version}: v2.2<br>
+            {version}: v{app_version}<br>
             {github}:
             <a href="https://github.com/Starship30/SpaceWeekly">
             https://github.com/Starship30/SpaceWeekly
@@ -184,6 +237,7 @@ class MainWindow(QMainWindow):
             """.format(
                 title=tr("app.title"),
                 version=tr("version"),
+                app_version=APP_VERSION,
                 github=tr("github.link"),
                 python_version=tr("python.version"),
                 python=sys.version.split()[0],
@@ -278,3 +332,13 @@ class MainWindow(QMainWindow):
                 settings.ai_translation_enabled,
             ]
         )
+
+
+def _launch_field(body: str, label: str) -> str:
+    prefix = f"{label}:"
+
+    for line in body.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
+
+    return ""

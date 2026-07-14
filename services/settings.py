@@ -78,6 +78,9 @@ class AppSettings:
     release_mode: bool
     theme_mode: str
     language: str
+    launch_range: str
+    aerospace_translation_enabled: bool
+    aerospace_translation_mode: str
 
 
 def default_settings() -> AppSettings:
@@ -150,6 +153,9 @@ def default_settings() -> AppSettings:
         release_mode=True,
         theme_mode="system",
         language="zh_CN",
+        launch_range="next_week",
+        aerospace_translation_enabled=True,
+        aerospace_translation_mode=config.TRANSLATION_MODE,
     )
 
 
@@ -255,6 +261,21 @@ def load_settings() -> AppSettings:
         release_mode=bool(data.get("release_mode", defaults.release_mode)),
         theme_mode=str(data.get("theme_mode") or defaults.theme_mode),
         language=str(data.get("language") or defaults.language),
+        launch_range=_choice_setting(
+            data.get("launch_range"),
+            defaults.launch_range,
+            {"past_week", "next_week", "disabled"},
+        ),
+        aerospace_translation_enabled=bool(
+            data.get(
+                "aerospace_translation_enabled",
+                defaults.aerospace_translation_enabled,
+            )
+        ),
+        aerospace_translation_mode=_translation_mode_setting(
+            data.get("aerospace_translation_mode"),
+            defaults.aerospace_translation_mode,
+        ),
     )
 
 
@@ -284,6 +305,21 @@ def _body_mode_setting(value, fallback: str) -> str:
         return "none"
 
     return mode
+
+
+def _choice_setting(value, fallback: str, choices: set[str]) -> str:
+    selected = str(value or fallback)
+
+    return selected if selected in choices else fallback
+
+
+def _translation_mode_setting(value, fallback: str) -> str:
+    selected = str(value or fallback)
+
+    if selected == "ai_confirm":
+        return "hybrid"
+
+    return selected if selected in {"dictionary", "ai", "hybrid"} else fallback
 
 
 def apply_settings(settings: AppSettings) -> None:
