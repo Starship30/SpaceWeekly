@@ -7,6 +7,7 @@ from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
 from models.news_analysis import NewsAnalysis
+from utils.time import format_beijing_time
 
 IMPORTANCE_LEVELS = ["High", "Medium", "Low"]
 
@@ -66,6 +67,7 @@ def _add_launch(
     term_translator,
 ) -> None:
     fields = _launch_fields(launch)
+    fields["time"] = format_beijing_time(fields["time"])
     fields["name"] = _translated_term(fields["name"], "mission", term_translator)
     fields["rocket"] = _translated_term(fields["rocket"], "rocket", term_translator)
     fields["provider"] = _translated_term(

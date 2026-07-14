@@ -35,6 +35,7 @@ from ui.widgets.log_panel import LogPanel
 from ui.widgets.report_worker import ReportWorker
 from ui.widgets.status_bar import SpaceStatusBar
 from translator.translator import Translator
+from utils.time import format_beijing_time
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,10 @@ class MainWindow(QMainWindow):
                 [
                     "",
                     f"{tr('launch_name')}{separator}{launch.news.title}",
-                    f"{tr('launch_time')}{separator}{launch.news.published or '-'}",
+                    (
+                        f"{tr('launch_time')}{separator}"
+                        f"{format_beijing_time(launch.news.published) or '-'}"
+                    ),
                     f"{tr('rocket')}{separator}{rocket}",
                     f"{tr('launch_service_provider')}{separator}{provider}",
                 ]
