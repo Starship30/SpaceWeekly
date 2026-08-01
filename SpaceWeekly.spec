@@ -12,6 +12,7 @@ datas = [
     (str(ROOT / "translator" / "pending_terms.json"), "translator"),
     (str(ROOT / "ui" / "style.qss"), "ui"),
     (str(ROOT / "config.json"), "."),
+    (str(ROOT / "categories.json"), "."),
     (str(ROOT / "feeds.json"), "."),
 ]
 

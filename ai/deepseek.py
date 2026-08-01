@@ -1,129 +1,216 @@
-import json
+from __future__ import annotations
 
-from ai.prompts import build_analysis_prompt
-from ai.prompts import build_summary_prompt
-from ai.prompts import build_translation_prompt
-from ai.providers import ProviderConfig
-from ai import providers
-from ai.providers import complete
-from config import DEEPSEEK_API_KEY
-from config import DEEPSEEK_BASE_URL
-from config import DEEPSEEK_MODEL
-from config import REQUEST_TIMEOUT
+import logging
+import re
+
+from ai.configuration import provider_config_from_settings
+from ai.json_utils import AIResponseParseError
+from ai.json_utils import request_json
+from ai.prompts import build_content_prompt
+from ai.prompts import build_importance_prompt
+from ai.prompts import build_title_translation_prompt
+from ai.prompts import language_instruction
 from models.ai_summary import AISummary
 from models.article import Article
-from models.news_analysis import NewsAnalysis
+from models.news_assessment import NewsAssessment
+from services.news_categories import category_labels
+from services.news_categories import category_limit
+from services.news_categories import normalize_categories
+from utils.text import clean_ai_text
+from utils.text import clean_keywords
 
-DEEPSEEK_TEMPERATURE = 0.2
-DEEPSEEK_MAX_TOKENS = 2000
-
-
-def summarize(article: Article) -> AISummary:
-    """Summarize an article with the configured AI provider."""
-    _validate_config()
-    content = complete(build_summary_prompt(article), _provider_config("DeepSeek"))
-
-    return _parse_summary(content)
+logger = logging.getLogger(__name__)
 
 
-def translate(article: Article) -> str:
-    """Translate an article body into Simplified Chinese."""
-    _validate_config()
-
-    return complete(build_translation_prompt(article), _provider_config("DeepSeek"))
-
-
-def analyze(
+def assess_importance(
     article: Article,
-    provider: str = "DeepSeek",
-    summary_prompt: str = "",
-    translation_prompt: str = "",
-    category_prompt: str = "",
-    score_prompt: str = "",
-    filter_prompt: str = "",
-) -> NewsAnalysis:
-    """Analyze an article with the configured OpenAI-compatible provider."""
-    _validate_config()
-    prompt = build_analysis_prompt(
+    settings,
+    *,
+    custom_prompt: str = "",
+    cancel_token=None,
+) -> NewsAssessment:
+    """Stage one: return only importance and reason."""
+
+    provider = provider_config_from_settings(settings)
+    prompt = build_importance_prompt(
         article,
-        summary_prompt=summary_prompt,
-        translation_prompt=translation_prompt,
-        category_prompt=category_prompt,
-        score_prompt=score_prompt,
-        filter_prompt=filter_prompt,
+        settings.language,
+        custom_prompt,
     )
-    content = complete(prompt, _provider_config(provider))
-
-    return _parse_analysis(content)
-
-
-def _provider_config(provider: str) -> ProviderConfig:
-    return ProviderConfig(
-        provider=provider,
-        api_key=DEEPSEEK_API_KEY,
-        base_url=DEEPSEEK_BASE_URL,
-        model=DEEPSEEK_MODEL,
-        temperature=DEEPSEEK_TEMPERATURE,
-        max_tokens=DEEPSEEK_MAX_TOKENS,
-        timeout=REQUEST_TIMEOUT,
-        connect_timeout=providers.CONNECT_TIMEOUT,
-        read_timeout=providers.READ_TIMEOUT,
-        retry_count=providers.RETRY_COUNT,
+    data = request_json(
+        prompt,
+        provider,
+        module_name="importance",
+        cancel_token=cancel_token,
+        validator=_validate_assessment,
     )
+    assessment = _assessment_from_data(data)
+
+    if _language_mismatch(assessment.reason, settings.language):
+        logger.warning("AI 筛选原因语言不匹配，正在重新请求")
+        data = request_json(
+            prompt + "\n\n" + language_instruction(settings.language),
+            provider,
+            module_name="importance_language_retry",
+            cancel_token=cancel_token,
+            validator=_validate_assessment,
+        )
+        assessment = _assessment_from_data(data)
+
+        if _language_mismatch(assessment.reason, settings.language):
+            raise AIResponseParseError("筛选原因在语言重试后仍与程序设置不一致")
+
+    return assessment
 
 
-def _validate_config() -> None:
-    if not DEEPSEEK_API_KEY:
-        raise ValueError("DEEPSEEK_API_KEY is not configured.")
+def generate_content(
+    article: Article,
+    settings,
+    *,
+    custom_prompt: str = "",
+    cancel_token=None,
+) -> AISummary:
+    """Stage two: return summary, keywords, and controlled categories."""
 
-    if not DEEPSEEK_BASE_URL:
-        raise ValueError("DEEPSEEK_BASE_URL is not configured.")
-
-    if not DEEPSEEK_MODEL:
-        raise ValueError("DEEPSEEK_MODEL is not configured.")
-
-
-def _parse_summary(content: str) -> AISummary:
-    data = json.loads(_strip_json_block(content))
-    keywords = data.get("keywords", [])
-
-    if not isinstance(keywords, list):
-        keywords = []
-
-    return AISummary(
-        summary=str(data.get("summary", "")),
-        keywords=[str(keyword) for keyword in keywords],
-        category=str(data.get("category", "")),
-        importance=str(data.get("importance", "")),
+    provider = provider_config_from_settings(settings)
+    prompt = build_content_prompt(
+        article,
+        settings.language,
+        custom_prompt,
     )
-
-
-def _parse_analysis(content: str) -> NewsAnalysis:
-    data = json.loads(_strip_json_block(content))
-    keywords = data.get("keywords", [])
-    categories = data.get("categories", [])
-    importance = _safe_importance(data.get("importance"))
-
-    if not isinstance(keywords, list):
-        keywords = []
-
-    if not isinstance(categories, list):
-        categories = []
-
-    return NewsAnalysis(
-        summary=str(data.get("summary", "")),
-        translation=str(data.get("translation", "")),
-        keywords=[str(keyword) for keyword in keywords],
-        categories=[str(category) for category in categories],
-        importance=importance,
-        score=_safe_score(data.get("score"), importance),
-        keep=bool(data.get("keep", True)),
-        reason=str(data.get("reason", "")),
+    data = request_json(
+        prompt,
+        provider,
+        module_name="content",
+        cancel_token=cancel_token,
+        validator=lambda value: _validate_content(value, settings.language),
+    )
+    summary = _summary_from_data(data, settings.language)
+    language_sample = " ".join(
+        [summary.summary, *summary.keywords, *summary.categories]
     )
 
+    if _language_mismatch(language_sample, settings.language):
+        logger.warning("AI 摘要语言不匹配，正在重新请求")
+        data = request_json(
+            prompt + "\n\n" + language_instruction(settings.language),
+            provider,
+            module_name="content_language_retry",
+            cancel_token=cancel_token,
+            validator=lambda value: _validate_content(value, settings.language),
+        )
+        summary = _summary_from_data(data, settings.language)
 
-def _safe_importance(value: object) -> str:
-    text = str(value or "").strip().lower()
+        if _language_mismatch(
+            " ".join(
+                [summary.summary, *summary.keywords, *summary.categories]
+            ),
+            settings.language,
+        ):
+            raise AIResponseParseError("摘要在语言重试后仍与程序设置不一致")
+
+    return summary
+
+
+def translate_titles(
+    titles: dict[str, str],
+    settings,
+    *,
+    cancel_token=None,
+) -> dict[str, str]:
+    """Translate existing RSS titles in one batch for the selected language."""
+
+    if not titles:
+        return {}
+
+    provider = provider_config_from_settings(settings)
+    prompt = build_title_translation_prompt(titles, settings.language)
+
+    def validate(data: dict[str, object]) -> None:
+        if set(data) != set(titles):
+            raise AIResponseParseError("标题翻译返回的 ID 与输入不一致")
+
+        if not all(isinstance(value, str) and value.strip() for value in data.values()):
+            raise AIResponseParseError("标题翻译包含空值或非字符串")
+
+        if any(_language_mismatch(str(value), settings.language) for value in data.values()):
+            raise AIResponseParseError("标题翻译语言与程序设置不一致")
+
+    data = request_json(
+        prompt,
+        provider,
+        module_name="title_translation",
+        cancel_token=cancel_token,
+        validator=validate,
+    )
+    return {
+        key: clean_ai_text(value)
+        for key, value in data.items()
+        if key in titles
+    }
+
+
+def _validate_assessment(data: dict[str, object]) -> None:
+    if set(data) != {"importance", "reason"}:
+        raise AIResponseParseError(
+            "筛选 JSON 必须且只能包含 importance、reason"
+        )
+
+    if str(data.get("importance", "")).strip().lower() not in {
+        "high",
+        "medium",
+        "low",
+        "高",
+        "中",
+        "低",
+    }:
+        raise AIResponseParseError("importance 不是 High、Medium 或 Low")
+
+    if not clean_ai_text(data.get("reason")):
+        raise AIResponseParseError("reason 为空")
+
+
+def _validate_content(data: dict[str, object], language: str) -> None:
+    if set(data) != {"summary", "keywords", "category"}:
+        raise AIResponseParseError(
+            "内容 JSON 必须且只能包含 summary、keywords、category"
+        )
+
+    if not clean_ai_text(data.get("summary")):
+        raise AIResponseParseError("summary 为空")
+
+    if not isinstance(data.get("keywords"), list):
+        raise AIResponseParseError("keywords 不是数组")
+
+    keyword_count = len(clean_keywords(data.get("keywords")))
+
+    if keyword_count < 3 or keyword_count > 8:
+        raise AIResponseParseError("keywords 必须包含 3 到 8 个有效关键词")
+
+    raw_categories = data.get("category")
+
+    if not isinstance(raw_categories, list):
+        raise AIResponseParseError("category 不是数组")
+
+    if len(raw_categories) > category_limit():
+        raise AIResponseParseError(
+            f"category 最多只能包含 {category_limit()} 项"
+        )
+
+    if not all(isinstance(item, str) and item.strip() for item in raw_categories):
+        raise AIResponseParseError("category 包含空值或非字符串")
+
+    allowed = set(category_labels(language))
+    selected = [str(item).strip() for item in raw_categories]
+
+    if any(item not in allowed for item in selected):
+        raise AIResponseParseError("category 包含统一分类列表以外的名称")
+
+    if len(set(selected)) != len(selected):
+        raise AIResponseParseError("category 包含重复分类")
+
+
+def _assessment_from_data(data: dict[str, object]) -> NewsAssessment:
     aliases = {
         "high": "High",
         "高": "High",
@@ -132,32 +219,27 @@ def _safe_importance(value: object) -> str:
         "low": "Low",
         "低": "Low",
     }
-
-    return aliases.get(text, "Medium")
-
-
-def _safe_score(value: object, importance: str = "Medium") -> int:
-    if value is None:
-        return {"High": 90, "Medium": 70, "Low": 30}.get(importance, 70)
-
-    try:
-        score = int(value or 0)
-    except (TypeError, ValueError):
-        return {"High": 90, "Medium": 70, "Low": 30}.get(importance, 70)
-
-    return max(0, min(100, score))
+    importance = aliases[str(data["importance"]).strip().lower()]
+    return NewsAssessment(
+        importance=importance,
+        reason=clean_ai_text(data["reason"]),
+    )
 
 
-def _strip_json_block(content: str) -> str:
-    text = content.strip()
+def _summary_from_data(data: dict[str, object], language: str) -> AISummary:
+    return AISummary(
+        summary=clean_ai_text(data["summary"]),
+        keywords=clean_keywords(data["keywords"]),
+        categories=normalize_categories(data.get("category", []), language),
+    )
 
-    if text.startswith("```json"):
-        text = text.removeprefix("```json").strip()
 
-    if text.startswith("```"):
-        text = text.removeprefix("```").strip()
+def _language_mismatch(text: str, language: str) -> bool:
+    letters = re.findall(r"[A-Za-z\u4e00-\u9fff]", str(text or ""))
 
-    if text.endswith("```"):
-        text = text.removesuffix("```").strip()
+    if len(letters) < 20:
+        return False
 
-    return text
+    chinese = len(re.findall(r"[\u4e00-\u9fff]", str(text or "")))
+    ratio = chinese / len(letters)
+    return ratio < 0.18 if language == "zh_CN" else ratio > 0.35

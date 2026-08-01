@@ -1,18 +1,21 @@
 import logging
+import re
 from dataclasses import replace
 from datetime import date
 from datetime import timedelta
 from email.utils import parsedate_to_datetime
 
-from ai.deepseek import analyze
-from database.sqlite import get_articles
-from database.sqlite import get_articles_by_date
+from ai.configuration import provider_config_from_settings
+from ai.deepseek import assess_importance
+from ai.deepseek import generate_content
+from ai.deepseek import translate_titles
+from ai.providers import test_connection
+from config import APP_VERSION
 from database.sqlite import initialize_database
 from database.sqlite import save_article
 from downloader.client import download
 from exporters.markdown import export_markdown
 from exporters.word import export_word
-from feeds.launches import SOURCE as LAUNCH_SOURCE
 from feeds.launches import get_launches
 from i18n import set_language
 from logging_config import setup_logging
@@ -20,7 +23,9 @@ from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
 from models.news import News
-from models.news_analysis import NewsAnalysis
+from models.news_assessment import NewsAssessment
+from services.cancellation import CancellationToken
+from services.cancellation import TaskCancelledError
 from services.feed_manager import FeedSource
 from services.feed_manager import enabled_feeds
 from services.prompt_manager import find_preset
@@ -29,6 +34,7 @@ from services.settings import AppSettings
 from services.settings import apply_settings
 from services.settings import load_settings
 from translator.translator import Translator
+from utils.text import clean_ai_text
 
 logger = logging.getLogger(__name__)
 
@@ -38,118 +44,139 @@ def generate_weekly(
     export_sqlite: bool = True,
     export_markdown_enabled: bool | None = None,
     export_word_enabled: bool | None = None,
+    cancel_token: CancellationToken | None = None,
 ) -> list[Article]:
-    """Generate the weekly report from configured RSS feeds."""
+    """Generate a report with separate AI screening and content stages."""
+
     setup_logging()
     settings = load_settings()
+    token = cancel_token or CancellationToken()
+    token.check()
     set_language(settings.language)
     logger.setLevel(logging.DEBUG if not settings.release_mode else logging.NOTSET)
     apply_settings(settings)
+    logger.info("SpaceWeekly v%s", APP_VERSION)
+    logger.info("AI Model: %s", settings.deepseek_model or "-")
+
+    if _ai_configured(settings):
+        settings = _resolve_runtime_model(settings, token)
+
+    if export_sqlite:
+        token.check()
+        initialize_database()
+
     selected_feeds = feeds if feeds is not None else enabled_feeds()
     markdown_enabled = _enabled(export_markdown_enabled, settings.export_markdown)
     word_enabled = _enabled(export_word_enabled, settings.export_word)
     date_range = _date_range(settings)
-    ai_summaries: dict[str, AISummary] = {}
-    analyses: dict[str, NewsAnalysis] = {}
-    translations: dict[str, str] = {}
-    articles: list[Article] = []
-    api_calls = 0
-
-    if export_sqlite:
-        initialize_database()
-
     rss_news, launch_articles = get_news(
         selected_feeds,
         settings.rss_limit,
         settings.launch_range,
+        token,
     )
     news_list = _filter_news(rss_news, date_range)
-    estimated_items = len(news_list)
-    logger.info("预计文章数量：%s", estimated_items)
-    logger.info("预计 Token：%s", estimated_items * settings.max_article_tokens)
+    logger.info("基础解析文章数量：%s", len(news_list))
+    parsed_articles = _parse_articles(news_list, token)
+    logger.info("基础解析完成：%s 篇", len(parsed_articles))
+
+    preset = find_preset(settings.prompt_preset)
+    assessments: dict[str, NewsAssessment] = {}
+    ai_summaries: dict[str, AISummary] = {}
+    api_calls = 0
+
+    selected_articles, api_calls = _screen_articles(
+        parsed_articles,
+        settings,
+        prompt_value(settings.filter_prompt, preset, "filter"),
+        assessments,
+        api_calls,
+        token,
+    )
     logger.info(
-        "预计耗时：约 %s 秒",
-        estimated_items * max(int(_pipeline_ai_enabled(settings)), 1) * 8,
+        "筛选完成：%s / %s 篇入选（等级：%s）",
+        len(selected_articles),
+        len(parsed_articles),
+        settings.news_filter_level,
     )
 
-    for index, news in enumerate(news_list, start=1):
-        logger.info("正在处理：%s %s / %s", news.source, index, estimated_items)
-        article = _parse_article(news)
+    if export_sqlite:
+        for article in selected_articles:
+            token.check()
+            save_status = "SAVE" if save_article(article) else "SKIP"
+            logger.info("保存 SQLite %s", save_status)
 
-        if article is None:
-            continue
-
-        api_calls = _process_article(
-            article,
-            settings,
-            ai_summaries,
-            translations,
-            analyses,
-            articles,
-            api_calls,
-            export_sqlite,
-        )
-
-    export_articles = _export_articles(export_sqlite, articles, date_range)
-    context = _export_context(settings, translations)
-    _export_reports(
-        export_articles,
+    api_calls = _generate_selected_content(
+        selected_articles,
+        settings,
+        prompt_value(settings.summary_prompt, preset, "summary"),
         ai_summaries,
-        analyses,
+        api_calls,
+        token,
+    )
+    localized_titles, api_calls = _localize_selected_titles(
+        selected_articles,
+        settings,
+        api_calls,
+        token,
+    )
+    logger.info(
+        "AI 工作流完成：筛选 %s 篇，内容生成 %s 篇，API 调用 %s 次",
+        len(parsed_articles),
+        len(ai_summaries),
+        api_calls,
+    )
+
+    context = _export_context(settings, localized_titles)
+    _export_reports(
+        selected_articles,
+        ai_summaries,
+        assessments,
         context,
         launch_articles,
         settings,
         markdown_enabled,
         word_enabled,
+        token,
     )
-
-    return articles
-
-
-def estimate_generation(feeds: list[FeedSource], settings: AppSettings) -> tuple[int, int, int]:
-    """Return rough article, token, and seconds estimates for the GUI."""
-    per_feed = settings.rss_limit if settings.rss_limit > 0 else 100
-    article_count = max(len([feed for feed in feeds if feed.enabled]) * per_feed, 0)
-    token_count = article_count * settings.max_article_tokens
-    api_factor = int(_pipeline_ai_enabled(settings))
-    seconds = article_count * max(api_factor, 1) * 8
-
-    return article_count, token_count, seconds
-
-
-def _enabled(value: bool | None, fallback: bool) -> bool:
-    return fallback if value is None else value
+    return selected_articles
 
 
 def get_news(
     feeds: list[FeedSource],
     rss_limit: int = 0,
     launch_range: str = "next_week",
+    cancel_token: CancellationToken | None = None,
 ) -> tuple[list[News], list[Article]]:
     """Fetch RSS news and Launch Library 2 launch articles."""
+
     logger.info("抓取 RSS")
-    rss_news = _fetch_news(feeds, rss_limit)
-    launch_articles = _fetch_launch_articles(launch_range)
-
-    for article in launch_articles:
-        _debug_ll2_article("get_news() return", article)
-
+    token = cancel_token or CancellationToken()
+    token.check()
+    rss_news = _fetch_news(feeds, rss_limit, token)
+    token.check()
+    launch_articles = _fetch_launch_articles(launch_range, token)
+    token.check()
     return rss_news, launch_articles
 
 
-def _fetch_news(feeds: list[FeedSource], rss_limit: int = 0) -> list[News]:
+def _fetch_news(
+    feeds: list[FeedSource],
+    rss_limit: int,
+    cancel_token: CancellationToken,
+) -> list[News]:
     import feedparser
 
     news_list: list[News] = []
 
     for feed in feeds:
+        cancel_token.check()
         parsed_feed = feedparser.parse(feed.rss)
-        entries = parsed_feed.entries
-
-        if rss_limit > 0:
-            entries = entries[:rss_limit]
+        cancel_token.check()
+        entries = parsed_feed.entries[:rss_limit] if rss_limit > 0 else parsed_feed.entries
 
         for item in entries:
+            cancel_token.check()
             url = str(getattr(item, "link", ""))
 
             if not url or url.endswith(".js"):
@@ -160,14 +187,22 @@ def _fetch_news(feeds: list[FeedSource], rss_limit: int = 0) -> list[News]:
     return news_list
 
 
-def _fetch_launch_articles(launch_range: str) -> list[Article]:
+def _fetch_launch_articles(
+    launch_range: str,
+    cancel_token: CancellationToken,
+) -> list[Article]:
     if launch_range == "disabled":
         return []
 
     logger.info("抓取 Launch Library 2")
+    cancel_token.check()
 
     try:
-        return get_launches(launch_range=launch_range)
+        launches = get_launches(launch_range=launch_range)
+        cancel_token.check()
+        return launches
+    except TaskCancelledError:
+        raise
     except Exception as exc:
         logger.warning("Launch Library 2 获取失败：%s", exc)
         return []
@@ -180,7 +215,6 @@ def _news_from_feed_item(feed: FeedSource, item, url: str) -> News:
         str(getattr(item, "summary", "")),
         "html.parser",
     ).get_text(" ", strip=True)
-
     return News(
         source=feed.name,
         title=str(getattr(item, "title", "")),
@@ -198,375 +232,310 @@ def _filter_news(
         return news_list
 
     start_date, end_date = date_range
-    filtered = []
-
-    for news in news_list:
-        published_date = _published_date(news.published)
-
-        if published_date is None:
-            continue
-
-        if start_date <= published_date.isoformat() <= end_date:
-            filtered.append(news)
-
-    return filtered
+    return [
+        news
+        for news in news_list
+        if (
+            (published_date := _published_date(news.published)) is not None
+            and start_date <= published_date.isoformat() <= end_date
+        )
+    ]
 
 
-def _parse_article(news: News) -> Article | None:
+def _parse_articles(
+    news_list: list[News],
+    cancel_token: CancellationToken,
+) -> list[Article]:
+    articles = []
+
+    for index, news in enumerate(news_list, start=1):
+        cancel_token.check()
+        logger.info("基础解析：%s %s / %s", news.source, index, len(news_list))
+        article = _parse_article(news, cancel_token)
+
+        if article is not None:
+            articles.append(article)
+
+    return articles
+
+
+def _parse_article(
+    news: News,
+    cancel_token: CancellationToken,
+) -> Article | None:
     from parsers.registry import get_parser
 
     parser = get_parser(news.url)
+    cancel_token.check()
 
     try:
         html = download(news.url)
+        cancel_token.check()
+    except TaskCancelledError:
+        raise
     except Exception as exc:
         logger.warning("HTML 获取失败 %s %s，使用 RSS Summary 回退", news.url, exc)
         return _rss_summary_article(news)
 
     try:
         article = parser(news, html)
+        cancel_token.check()
+    except TaskCancelledError:
+        raise
     except Exception as exc:
         logger.warning("Parser 异常 %s %s，使用 RSS Summary 回退", news.url, exc)
         return _rss_summary_article(news)
 
-    if article.parser == "Generic":
-        logger.info("Using Generic Parser")
-    else:
-        logger.info("解析 %s", article.parser)
-
+    logger.info("解析 %s", article.parser)
     return article
 
 
 def _rss_summary_article(news: News) -> Article:
-    body = news.summary.strip() or news.title
+    return Article(
+        news=news,
+        body=news.summary.strip() or news.title,
+        parser="RSS Summary",
+    )
 
-    return Article(news=news, body=body, parser="RSS Summary")
 
-
-def _process_article(
-    article: Article,
-    settings: AppSettings,
-    ai_summaries: dict[str, AISummary],
-    translations: dict[str, str],
-    analyses: dict[str, NewsAnalysis],
+def _screen_articles(
     articles: list[Article],
-    api_calls: int,
-    export_sqlite: bool,
-) -> int:
-    article_for_ai = _limit_article_tokens(article, settings.max_article_tokens)
-    api_calls = _run_ai(
-        article_for_ai,
-        settings,
-        ai_summaries,
-        translations,
-        analyses,
-        api_calls,
-    )
-
-    if _should_ignore(article, settings, analyses):
-        return api_calls
-
-    articles.append(article)
-
-    if export_sqlite:
-        save_status = "SAVE" if save_article(article) else "SKIP"
-        logger.info("保存 SQLite %s", save_status)
-
-    return api_calls
-
-
-def _debug_ll2_article(stage: str, article: Article) -> None:
-    if (
-        not logger.isEnabledFor(logging.DEBUG)
-        or article.news.source != "Launch Library 2"
-    ):
-        return
-
-    logger.debug(
-        "Launch Library 2 Article at %s:\n"
-        "title=%r\nsummary=%r\nbody=%r",
-        stage,
-        article.news.title,
-        article.news.summary,
-        article.body,
-    )
-
-
-def _run_ai(
-    article: Article,
     settings: AppSettings,
-    ai_summaries: dict[str, AISummary],
-    translations: dict[str, str],
-    analyses: dict[str, NewsAnalysis],
+    custom_prompt: str,
+    assessments: dict[str, NewsAssessment],
     api_calls: int,
-) -> int:
-    if not _pipeline_ai_enabled(settings):
-        return api_calls
+    cancel_token: CancellationToken,
+) -> tuple[list[Article], int]:
+    selected = []
 
-    if _ai_limit_reached(settings, api_calls):
-        _handle_ai_limit(settings)
-        return api_calls
+    for index, article in enumerate(articles, start=1):
+        cancel_token.check()
+        logger.info("AI 重要程度筛选：%s / %s", index, len(articles))
 
-    api_calls += 1
-    _analyze_article(article, settings, ai_summaries, translations, analyses)
+        if not _ai_configured(settings):
+            assessment = _fallback_assessment(settings.language)
+        else:
+            api_calls += 1
 
-    return api_calls
+            try:
+                assessment = assess_importance(
+                    article,
+                    settings,
+                    custom_prompt=custom_prompt,
+                    cancel_token=cancel_token,
+                )
+            except TaskCancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "新闻筛选失败，按 Medium 回退：%s",
+                    exc,
+                    exc_info=True,
+                    extra={"model": settings.deepseek_model},
+                )
+                assessment = _fallback_assessment(settings.language)
 
-
-def _pipeline_ai_enabled(settings: AppSettings) -> bool:
-    return any(
-        [
-            settings.pipeline_score_enabled,
-            settings.pipeline_filter_enabled,
-            settings.pipeline_category_enabled,
-            settings.pipeline_keywords_enabled,
-            settings.pipeline_summary_enabled,
-            settings.pipeline_translation_enabled,
-            settings.ai_summary_enabled,
-            settings.ai_translation_enabled,
-            settings.ai_auto_filter_enabled,
-        ]
-    )
-
-
-def _ai_limit_reached(settings: AppSettings, api_calls: int) -> bool:
-    return api_calls >= settings.max_daily_api_calls
-
-
-def _handle_ai_limit(settings: AppSettings) -> None:
-    message = "已达到每日 API 调用上限"
-
-    if settings.ai_limit_action == "stop":
-        raise RuntimeError(message)
-
-    logger.warning("%s，跳过后续 AI 调用", message)
-
-
-def _analyze_article(
-    article: Article,
-    settings: AppSettings,
-    ai_summaries: dict[str, AISummary],
-    translations: dict[str, str],
-    analyses: dict[str, NewsAnalysis],
-) -> None:
-    preset = find_preset(settings.prompt_preset)
-
-    try:
-        analysis = analyze(
-            article,
-            provider=settings.ai_provider,
-            summary_prompt=prompt_value(settings.summary_prompt, preset, "summary"),
-            translation_prompt=prompt_value(
-                settings.translation_prompt,
-                preset,
-                "translation",
-            ),
-            category_prompt=_category_prompt(settings, preset),
-            score_prompt=prompt_value(settings.score_prompt, preset, "score"),
-            filter_prompt=prompt_value(settings.filter_prompt, preset, "filter"),
+        assessments[article.news.url] = assessment
+        logger.info(
+            "筛选结果：%s；%s",
+            assessment.importance,
+            assessment.reason,
         )
-    except Exception as exc:
-        logger.warning("AI 分析失败 %s", exc)
-        return
 
-    analyses[article.news.url] = analysis
+        if _importance_allowed(assessment.importance, settings.news_filter_level):
+            selected.append(article)
 
-    if settings.pipeline_translation_enabled:
-        translations[article.news.url] = analysis.translation
-
-    ai_summaries[article.news.url] = _analysis_to_summary(analysis, settings)
-    logger.info("AI 分析完成，重要程度：%s", _importance_level(analysis))
+    return selected, api_calls
 
 
-def _category_prompt(settings: AppSettings, preset) -> str:
-    prompt = prompt_value(settings.category_prompt, preset, "category")
-    labels = {
-        "astronomy": "天文",
-        "spaceflight": "航天",
-        "humanities": "人文",
+def _generate_selected_content(
+    articles: list[Article],
+    settings: AppSettings,
+    custom_prompt: str,
+    summaries: dict[str, AISummary],
+    api_calls: int,
+    cancel_token: CancellationToken,
+) -> int:
+    if not _ai_configured(settings):
+        logger.warning("AI 配置不完整，跳过入选新闻摘要生成")
+        return api_calls
+
+    for index, article in enumerate(articles, start=1):
+        cancel_token.check()
+
+        logger.info("生成入选新闻内容：%s / %s", index, len(articles))
+        api_calls += 1
+
+        try:
+            summaries[article.news.url] = generate_content(
+                article,
+                settings,
+                custom_prompt=custom_prompt,
+                cancel_token=cancel_token,
+            )
+        except TaskCancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "入选新闻内容生成失败，继续处理其他文章：%s",
+                exc,
+                exc_info=True,
+                extra={"model": settings.deepseek_model},
+            )
+
+    return api_calls
+
+
+def _localize_selected_titles(
+    articles: list[Article],
+    settings: AppSettings,
+    api_calls: int,
+    cancel_token: CancellationToken,
+) -> tuple[dict[str, str], int]:
+    localized = {
+        article.news.url: clean_ai_text(article.news.title)
+        for article in articles
     }
-    options = [
-        labels.get(option, option)
-        for option in settings.ai_category_options
-        if option
+
+    if not _ai_configured(settings):
+        return localized, api_calls
+
+    targets = [
+        article
+        for article in articles
+        if _title_language_mismatch(article.news.title, settings.language)
     ]
 
-    if not options:
-        return prompt
+    for start in range(0, len(targets), 30):
+        cancel_token.check()
+        batch = targets[start:start + 30]
+        ids = {f"item_{index:03d}": article.news.title for index, article in enumerate(batch)}
+        urls = {f"item_{index:03d}": article.news.url for index, article in enumerate(batch)}
+        api_calls += 1
 
-    category_rule = "AI 分类方向仅从以下选项中选择，可多选：{}".format(
-        "、".join(options)
+        try:
+            translated = translate_titles(ids, settings, cancel_token=cancel_token)
+        except TaskCancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "RSS 标题批量翻译失败，保留原始标题：%s",
+                exc,
+                exc_info=True,
+                extra={"model": settings.deepseek_model},
+            )
+            continue
+
+        for item_id, title in translated.items():
+            localized[urls[item_id]] = title
+
+    return localized, api_calls
+
+
+def _importance_allowed(importance: str, configured_level: str) -> bool:
+    if configured_level == "High_only":
+        return importance == "High"
+
+    if configured_level == "All":
+        return importance in {"High", "Medium", "Low"}
+
+    return importance in {"High", "Medium"}
+
+
+def _fallback_assessment(language: str) -> NewsAssessment:
+    reason = (
+        "AI unavailable; retained as Medium for compatibility."
+        if language == "en_US"
+        else "AI 不可用，按 Medium 保留以兼容非 AI 工作流。"
+    )
+    return NewsAssessment("Medium", reason)
+
+
+def _ai_configured(settings: AppSettings) -> bool:
+    return bool(
+        settings.deepseek_api_key
+        and settings.deepseek_base_url
+        and (settings.deepseek_model or settings.model_candidates)
     )
 
-    if prompt:
-        return f"{prompt}\n{category_rule}"
 
-    return category_rule
+def _title_language_mismatch(title: str, language: str) -> bool:
+    text = str(title or "")
+    chinese = len(re.findall(r"[\u4e00-\u9fff]", text))
+    letters = len(re.findall(r"[A-Za-z\u4e00-\u9fff]", text))
 
-
-def _analysis_to_summary(analysis: NewsAnalysis, settings: AppSettings) -> AISummary:
-    return AISummary(
-        summary=analysis.summary if settings.pipeline_summary_enabled else "",
-        keywords=analysis.keywords if settings.pipeline_keywords_enabled else [],
-        category="、".join(analysis.categories)
-        if settings.pipeline_category_enabled
-        else "",
-        importance=_importance_level(analysis) if settings.ai_importance_enabled else "",
-    )
-
-
-def _should_ignore(
-    article: Article,
-    settings: AppSettings,
-    analyses: dict[str, NewsAnalysis],
-) -> bool:
-    analysis = analyses.get(article.news.url)
-
-    if analysis is None:
+    if letters < 2:
         return False
 
-    if settings.pipeline_score_enabled and not _importance_allowed(analysis, settings):
-        logger.info(
-            "忽略非目标重要程度新闻：%s，%s",
-            _importance_level(analysis),
-            analysis.reason,
-        )
-        return True
-
-    if (
-        settings.pipeline_filter_enabled
-        and settings.ai_auto_filter_enabled
-        and not analysis.keep
-    ):
-        logger.info("AI 智能筛选忽略：%s", analysis.reason)
-        return True
-
-    return False
-
-
-def _importance_allowed(analysis: NewsAnalysis, settings: AppSettings) -> bool:
-    level = _importance_level(analysis)
-    style = settings.report_style or "standard"
-
-    if style == "complete":
-        return True
-
-    if style == "curated":
-        return level == "High"
-
-    if style == "custom":
-        return (
-            (level == "High" and settings.report_style_custom_high)
-            or (level == "Medium" and settings.report_style_custom_medium)
-            or (level == "Low" and settings.report_style_custom_low)
-        )
-
-    return level in {"High", "Medium"}
-
-
-def _importance_level(analysis: NewsAnalysis) -> str:
-    text = (analysis.importance or "").strip().lower()
-    aliases = {
-        "high": "High",
-        "高": "High",
-        "重点": "High",
-        "本周重点": "High",
-        "medium": "Medium",
-        "中": "Medium",
-        "推荐": "Medium",
-        "推荐阅读": "Medium",
-        "low": "Low",
-        "低": "Low",
-        "简讯": "Low",
-    }
-
-    if text in aliases:
-        return aliases[text]
-
-    if analysis.score >= 80:
-        return "High"
-
-    if analysis.score >= 50:
-        return "Medium"
-
-    return "Low"
-
-
-def _export_articles(
-    export_sqlite: bool,
-    articles: list[Article],
-    date_range: tuple[str, str] | None,
-) -> list[Article]:
-    if not export_sqlite:
-        return articles
-
-    if date_range is not None:
-        stored_articles = get_articles_by_date(date_range[0], date_range[1])
-    else:
-        stored_articles = get_articles()
-
-    return [
-        article
-        for article in stored_articles
-        if article.news.source != LAUNCH_SOURCE
-    ]
+    ratio = chinese / letters
+    return ratio < 0.15 if language == "zh_CN" else ratio > 0.2
 
 
 def _export_context(
     settings: AppSettings,
-    translations: dict[str, str],
+    localized_titles: dict[str, str],
 ) -> ExportContext:
     return ExportContext(
         report_title=settings.report_title,
-        show_summary=settings.pipeline_summary_enabled,
-        show_keywords=settings.pipeline_keywords_enabled,
-        show_category=settings.pipeline_category_enabled,
-        show_importance=settings.ai_importance_enabled,
+        show_summary=True,
+        show_keywords=True,
         body_mode=settings.body_mode,
-        translations=translations,
+        localized_titles=localized_titles,
         include_title=settings.include_title,
         include_source=settings.include_source,
         include_published=settings.include_published,
         include_link=settings.include_link,
         include_score=settings.include_score,
         include_summary=settings.include_summary,
-        include_translation=settings.include_translation,
-        include_categories=settings.include_categories,
         include_keywords=settings.include_keywords,
         include_body=settings.include_body,
         include_original=settings.include_original,
-        include_chinese=settings.include_chinese,
     )
 
 
 def _export_reports(
     articles: list[Article],
-    ai_summaries: dict[str, AISummary],
-    analyses: dict[str, NewsAnalysis],
+    summaries: dict[str, AISummary],
+    assessments: dict[str, NewsAssessment],
     context: ExportContext,
     launch_articles: list[Article],
     settings: AppSettings,
     markdown_enabled: bool,
     word_enabled: bool,
+    cancel_token: CancellationToken,
 ) -> None:
+    cancel_token.check()
+
     if markdown_enabled:
-        export_markdown(articles, ai_summaries, context, analyses)
+        export_markdown(
+            articles,
+            summaries,
+            context,
+            assessments,
+            cancel_check=cancel_token.check,
+        )
         logger.info("导出 Markdown")
 
     if word_enabled:
+        cancel_token.check()
         export_word(
             articles,
-            ai_summaries,
+            summaries,
             context,
-            analyses,
+            assessments,
             launches=launch_articles,
             launch_range=settings.launch_range,
-            launch_term_translator=_launch_term_translator(settings),
+            launch_timezone=settings.display_timezone,
+            launch_term_translator=_launch_term_translator(settings, cancel_token),
+            cancel_check=cancel_token.check,
         )
         logger.info("导出 Word")
 
 
-def _launch_term_translator(settings: AppSettings):
+def _launch_term_translator(
+    settings: AppSettings,
+    cancel_token: CancellationToken,
+):
     if (
         not settings.aerospace_translation_enabled
         or settings.language != "zh_CN"
@@ -576,7 +545,31 @@ def _launch_term_translator(settings: AppSettings):
     return Translator(
         settings=settings,
         mode=settings.aerospace_translation_mode,
+        cancel_token=cancel_token,
     )
+
+
+def _resolve_runtime_model(
+    settings: AppSettings,
+    cancel_token: CancellationToken,
+) -> AppSettings:
+    provider = provider_config_from_settings(settings)
+    result = test_connection(
+        provider,
+        settings.model_candidates,
+        cancel_token=cancel_token,
+    )
+    selected = result.model
+
+    if selected != settings.deepseek_model:
+        logger.warning("配置模型不可用，已自动选择模型：%s", selected)
+
+    logger.info("AI Model: %s", selected)
+    return replace(settings, deepseek_model=selected)
+
+
+def _enabled(value: bool | None, fallback: bool) -> bool:
+    return fallback if value is None else value
 
 
 def _date_range(settings: AppSettings) -> tuple[str, str] | None:
@@ -605,20 +598,3 @@ def _published_date(published: str) -> date | None:
         return parsedate_to_datetime(published).date()
     except (TypeError, ValueError):
         return None
-
-
-def _estimate_tokens(news_list: list[News], settings: AppSettings) -> int:
-    return len(news_list) * settings.max_article_tokens
-
-
-def _estimate_seconds(news_list: list[News], settings: AppSettings) -> int:
-    return len(news_list) * max(int(_pipeline_ai_enabled(settings)), 1) * 8
-
-
-def _limit_article_tokens(article: Article, max_tokens: int) -> Article:
-    max_chars = max_tokens * 4
-
-    if len(article.body) <= max_chars:
-        return article
-
-    return replace(article, body=article.body[:max_chars])

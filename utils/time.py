@@ -6,6 +6,8 @@ from zoneinfo import ZoneInfo
 from zoneinfo import ZoneInfoNotFoundError
 
 BEIJING_TIMEZONE = "Asia/Shanghai"
+SYSTEM_TIMEZONE = "system"
+UTC_TIMEZONE = "UTC"
 DEFAULT_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -55,6 +57,9 @@ def format_beijing_time(value: str | datetime) -> str:
 
 
 def _timezone(name: str):
+    if name == SYSTEM_TIMEZONE:
+        return datetime.now().astimezone().tzinfo or timezone.utc
+
     if name == BEIJING_TIMEZONE:
         return timezone(timedelta(hours=8), name=BEIJING_TIMEZONE)
 

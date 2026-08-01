@@ -5,6 +5,7 @@ import sys
 from PySide6.QtCore import QUrl
 from PySide6.QtCore import Qt
 from PySide6.QtCore import qVersion
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
@@ -22,7 +23,6 @@ from services.feed_manager import load_feeds
 from services.settings import AppSettings
 from services.settings import load_settings
 from services.settings import save_settings
-from services.weekly_report import estimate_generation
 from ui.log_handler import SUCCESS_LEVEL
 from ui.log_handler import QtLogHandler
 from ui.prompt_studio_dialog import PromptStudioDialog
@@ -34,8 +34,9 @@ from ui.widgets.feed_panel import FeedPanel
 from ui.widgets.log_panel import LogPanel
 from ui.widgets.report_worker import ReportWorker
 from ui.widgets.status_bar import SpaceStatusBar
+from ui.widgets.startup_worker import StartupCheckWorker
 from translator.translator import Translator
-from utils.time import format_beijing_time
+from utils.time import format_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         set_language(self.settings.language)
         self.worker: ReportWorker | None = None
+        self.startup_worker: StartupCheckWorker | None = None
+        self._close_after_cancel = False
         self.log_handler = QtLogHandler()
         app = QApplication.instance()
 
@@ -59,8 +62,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_ui()
         self._connect_logging()
-        self._update_estimate()
+        logger.info("SpaceWeekly v%s", APP_VERSION)
+        logger.info("AI Model: %s", self.settings.deepseek_model or "-")
+        self._update_context()
         self.status_bar.show_state(tr("ready"))
+        QTimer.singleShot(0, self._start_startup_checks)
 
     def _setup_window(self) -> None:
         self.setWindowTitle(tr("app.title"))
@@ -101,14 +107,15 @@ class MainWindow(QMainWindow):
 
     def _connect_ui(self) -> None:
         self.toolbar.start_requested.connect(self._start_report)
+        self.toolbar.stop_requested.connect(self._cancel_report)
         self.toolbar.settings_requested.connect(self._open_settings)
         self.toolbar.prompt_studio_requested.connect(self._open_prompt_studio)
         self.toolbar.output_requested.connect(self._open_output_dir)
         self.toolbar.refresh_requested.connect(self._refresh_feeds)
         self.toolbar.launch_test_requested.connect(self._test_launch_data)
         self.toolbar.about_requested.connect(self._show_about)
-        self.feed_panel.feeds_changed.connect(self._update_estimate)
-        self.dashboard_panel.settings_changed.connect(self._update_estimate)
+        self.feed_panel.feeds_changed.connect(self._update_context)
+        self.dashboard_panel.settings_changed.connect(self._update_context)
         self.dashboard_panel.start_requested.connect(self._start_report)
 
     def _connect_logging(self) -> None:
@@ -119,7 +126,7 @@ class MainWindow(QMainWindow):
     def _refresh_feeds(self) -> None:
         self.feeds = load_feeds()
         self.feed_panel.set_feeds(self.feeds)
-        self._update_estimate()
+        self._update_context()
         logger.info("RSS 列表已刷新")
 
     def _test_launch_data(self) -> None:
@@ -164,7 +171,7 @@ class MainWindow(QMainWindow):
                     f"{tr('launch_name')}{separator}{launch.news.title}",
                     (
                         f"{tr('launch_time')}{separator}"
-                        f"{format_beijing_time(launch.news.published) or '-'}"
+                        f"{format_datetime(launch.news.published, settings.display_timezone) or '-'}"
                     ),
                     f"{tr('rocket')}{separator}{rocket}",
                     f"{tr('launch_service_provider')}{separator}{provider}",
@@ -190,7 +197,7 @@ class MainWindow(QMainWindow):
                 self.feeds = load_feeds()
                 self.feed_panel.set_feeds(self.feeds)
                 self.dashboard_panel.apply_settings(self.settings)
-            self._update_estimate()
+            self._update_context()
 
     def _rebuild_translated_ui(self) -> None:
         self.removeToolBar(self.toolbar)
@@ -252,10 +259,10 @@ class MainWindow(QMainWindow):
         )
 
     def _start_report(self) -> None:
-        self._save_runtime_settings()
-
-        if not self._confirm_ai_limit():
+        if self.worker is not None and self.worker.isRunning():
             return
+
+        self._save_runtime_settings()
 
         self._set_running(True)
         self.worker = ReportWorker(
@@ -266,32 +273,23 @@ class MainWindow(QMainWindow):
         )
         self.worker.finished_ok.connect(self._report_finished)
         self.worker.failed.connect(self._report_failed)
+        self.worker.cancelled.connect(self._report_cancelled)
         self.worker.start()
+
+    def _cancel_report(self) -> None:
+        if self.worker is None or not self.worker.isRunning():
+            return
+
+        self.toolbar.stop_action.setEnabled(False)
+        self.status_bar.show_state(tr("cancelling"))
+        self.worker.cancel()
 
     def _save_runtime_settings(self) -> None:
         self.feed_panel.save_state()
         self.feeds = self.feed_panel.feeds
         self.settings = self.dashboard_panel.settings_snapshot(load_settings())
         save_settings(self.settings)
-        self._update_estimate()
-
-    def _confirm_ai_limit(self) -> bool:
-        if self.settings.ai_limit_action != "ask":
-            return True
-
-        article_count, _, _ = estimate_generation(self.feeds, self.settings)
-        estimated_calls = article_count if self._ai_enabled(self.settings) else 0
-
-        if estimated_calls <= self.settings.max_daily_api_calls:
-            return True
-
-        result = QMessageBox.question(
-            self,
-            tr("api.cost.control"),
-            tr("api.limit.confirm"),
-        )
-
-        return result == QMessageBox.StandardButton.Yes
+        self._update_context()
 
     def _set_running(self, running: bool) -> None:
         self.dashboard_panel.set_running(running)
@@ -302,12 +300,54 @@ class MainWindow(QMainWindow):
         self._set_running(False)
         self.status_bar.show_state(tr("finished"))
         logging.getLogger().log(SUCCESS_LEVEL, tr("report.finished"))
-        QMessageBox.information(self, "SpaceWeekly", tr("report.finished"))
+        if not self._close_after_cancel:
+            QMessageBox.information(self, "SpaceWeekly", tr("report.finished"))
+        self.worker = None
+        self._finish_pending_close()
 
     def _report_failed(self, message: str) -> None:
         self._set_running(False)
         self.status_bar.show_state(tr("ready"))
-        QMessageBox.warning(self, "SpaceWeekly", message)
+        if not self._close_after_cancel:
+            QMessageBox.warning(self, "SpaceWeekly", message)
+        self.worker = None
+        self._finish_pending_close()
+
+    def _start_startup_checks(self) -> None:
+        self.startup_worker = StartupCheckWorker(self.settings, self)
+        self.startup_worker.check_ready.connect(self._show_startup_check)
+        self.startup_worker.finished.connect(self._startup_checks_finished)
+        self.startup_worker.start()
+
+    def _show_startup_check(self, name: str, ok: bool, detail: str) -> None:
+        marker = "✓" if ok else "✗"
+        log = logger.info if ok else logger.warning
+        log("启动检查 %s %s：%s", marker, name, detail)
+
+    def _startup_checks_finished(self) -> None:
+        self.startup_worker = None
+
+    def _report_cancelled(self) -> None:
+        self._set_running(False)
+        self.status_bar.show_state(tr("cancelled"))
+        if not self._close_after_cancel:
+            QMessageBox.information(self, "SpaceWeekly", tr("report.cancelled"))
+        self.worker = None
+        self._finish_pending_close()
+
+    def closeEvent(self, event) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            self._close_after_cancel = True
+            self._cancel_report()
+            event.ignore()
+            return
+
+        event.accept()
+
+    def _finish_pending_close(self) -> None:
+        if self._close_after_cancel:
+            self._close_after_cancel = False
+            QTimer.singleShot(0, self.close)
 
     def _open_output_dir(self) -> None:
         path = load_settings().output_dir
@@ -316,26 +356,10 @@ class MainWindow(QMainWindow):
             os.makedirs(path, exist_ok=True)
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
-    def _update_estimate(self) -> None:
+    def _update_context(self) -> None:
         self.feeds = self.feed_panel.feeds
         settings = self.dashboard_panel.settings_snapshot(load_settings())
-        articles, tokens, seconds = estimate_generation(self.feeds, settings)
-        self.dashboard_panel.set_estimate(articles, tokens, seconds)
-        self.status_bar.update_context(self.feeds, settings, tokens)
-
-    def _ai_enabled(self, settings: AppSettings) -> bool:
-        return any(
-            [
-                settings.pipeline_score_enabled,
-                settings.pipeline_filter_enabled,
-                settings.pipeline_category_enabled,
-                settings.pipeline_keywords_enabled,
-                settings.pipeline_summary_enabled,
-                settings.pipeline_translation_enabled,
-                settings.ai_summary_enabled,
-                settings.ai_translation_enabled,
-            ]
-        )
+        self.status_bar.update_context(self.feeds, settings)
 
 
 def _launch_field(body: str, label: str) -> str:

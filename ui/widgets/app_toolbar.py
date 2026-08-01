@@ -11,6 +11,7 @@ class AppToolBar(QToolBar):
     """Application toolbar with primary workspace actions."""
 
     start_requested = Signal()
+    stop_requested = Signal()
     settings_requested = Signal()
     prompt_studio_requested = Signal()
     output_requested = Signal()
@@ -27,7 +28,10 @@ class AppToolBar(QToolBar):
         self._build_actions()
 
     def set_running(self, running: bool) -> None:
-        self.start_action.setEnabled(not running)
+        for action in self.actions():
+            action.setEnabled(not running)
+
+        self.stop_action.setEnabled(running)
 
     def _build_actions(self) -> None:
         self.start_action = self._action(
@@ -36,6 +40,13 @@ class AppToolBar(QToolBar):
             self.start_requested.emit,
         )
         self.addAction(self.start_action)
+        self.stop_action = self._action(
+            tr("stop"),
+            QStyle.StandardPixmap.SP_MediaStop,
+            self.stop_requested.emit,
+        )
+        self.stop_action.setEnabled(False)
+        self.addAction(self.stop_action)
         self.addSeparator()
         self.addAction(
             self._action(

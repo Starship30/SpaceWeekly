@@ -11,6 +11,7 @@ WRITABLE_ROOTS = {
     "database",
     "cache",
     "logs",
+    "errors",
     "prompts",
     "config",
     "translator",

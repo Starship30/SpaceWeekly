@@ -4,6 +4,7 @@ import sys
 
 from dependency_check import dependency_message
 from dependency_check import missing_dependencies
+from logging_config import setup_logging
 
 
 def main() -> None:
@@ -22,7 +23,6 @@ def main() -> None:
     from services.workspace import needs_first_run_wizard
     from ui.first_run_wizard import FirstRunWizard
 
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     app = QApplication(sys.argv)
     icon_path = resource_path("assets", "sspo.ico")
 
@@ -37,6 +37,7 @@ def main() -> None:
         if wizard.exec() != QDialog.DialogCode.Accepted:
             return
 
+    setup_logging()
     from ui.main_window import MainWindow
 
     window = MainWindow()

@@ -1,106 +1,154 @@
+import json
+
 from models.article import Article
-
-FIXED_CATEGORIES = [
-    "火箭与发射",
-    "卫星",
-    "月球",
-    "火星",
-    "太阳",
-    "行星科学",
-    "小行星",
-    "深空探测",
-    "宇宙学",
-    "天文学",
-    "空间站",
-    "载人航天",
-    "探测器",
-    "地球观测",
-    "空间科学",
-    "商业航天",
-    "航天政策",
-    "科普",
-    "娱乐",
-    "其它",
-]
+from services.news_categories import category_labels
+from services.news_categories import category_limit
 
 
-def build_summary_prompt(article: Article) -> str:
-    """Build the Chinese AI summary prompt."""
-    return f"""
-请阅读下面的航天新闻，并只返回严格 JSON。
-除 NASA、ESA、JPL、SpaceX、Falcon 9、Artemis 等专有名词外，全部使用简体中文。
-
-JSON 字段：
-- summary：中文摘要，150 到 250 字
-- keywords：中文关键词数组，3 到 8 个
-- category：中文分类，必须从固定分类表选择
-- importance：重要程度，只能是 高、中、低
-
-固定分类表：
-{", ".join(FIXED_CATEGORIES)}
-
-新闻标题：{article.news.title}
-RSS 摘要：{article.news.summary}
-正文：{article.body}
-""".strip()
-
-
-def build_translation_prompt(article: Article) -> str:
-    """Build the Chinese full-text translation prompt."""
-    return f"""
-请将下面的英文航天新闻正文翻译为简体中文。
-要求：
-- 保留 NASA、ESA、JPL、SpaceX、Falcon 9、Artemis 等专有名词
-- 不要添加原文没有的信息
-- 按原文段落换行
-- 只输出中文译文
-
-标题：{article.news.title}
-正文：{article.body}
-""".strip()
-
-
-def build_analysis_prompt(
+def build_importance_prompt(
     article: Article,
-    summary_prompt: str = "",
-    translation_prompt: str = "",
-    category_prompt: str = "",
-    score_prompt: str = "",
-    filter_prompt: str = "",
+    language: str = "zh_CN",
+    custom_prompt: str = "",
 ) -> str:
-    """Build a strict JSON intelligent analysis prompt."""
+    """Build the deliberately small stage-one screening prompt."""
+
+    article_excerpt = article.body[:3000]
+
+    if language == "en_US":
+        return f"""
+Assess the importance of this space-news article.
+Return exactly one strict JSON object with only these two fields:
+{{"importance": "High", "reason": "Brief reason in English"}}
+
+Rules:
+- importance must be exactly High, Medium, or Low.
+- High: major mission, discovery, first, policy, accident, or important paper.
+- Medium: useful mission update, research progress, organization news, or explainer.
+- Low: routine update, imagery, daily sky event, entertainment, advertisement, or duplicate.
+- reason must be concise English.
+- Do not return summary, title, date, source, URL, category, keywords, translation,
+  score, keep, or any other field.
+
+Custom screening rule: {custom_prompt}
+
+RSS title: {article.news.title}
+RSS summary: {article.news.summary}
+Article excerpt: {article_excerpt}
+""".strip()
+
     return f"""
-请分析下面的航天新闻，并只返回严格 JSON。
-除 NASA、ESA、JPL、SpaceX、Falcon 9、Artemis 等专有名词外，全部使用简体中文。
+判断下面航天新闻的重要程度。
+只返回一个严格 JSON 对象，并且只能包含以下两个字段：
+{{"importance": "High", "reason": "简短中文原因"}}
 
-必须返回以下 JSON 字段：
-- summary：中文摘要
-- translation：正文中文译文
-- keywords：中文关键词数组
-- categories：分类数组，可多选，但必须完全来自固定分类表
-- importance：只能是 High、Medium、Low
-- keep：true 或 false，是否值得进入周报
-- reason：保留或忽略的原因
+规则：
+- importance 只能是 High、Medium 或 Low。
+- High：重大任务、重大发现、首次事件、重大政策、事故或重要论文。
+- Medium：有价值的任务更新、研究进展、机构动态或科普内容。
+- Low：日常更新、图片、每日天象、娱乐、广告或重复报道。
+- reason 必须使用简体中文并保持简洁。
+- 禁止返回摘要、标题、日期、来源、链接、分类、关键词、翻译、score、
+  keep 或任何其他字段。
 
-固定分类表：
-{", ".join(FIXED_CATEGORIES)}
+自定义筛选规则：{custom_prompt}
 
-重要程度标准：
-High：重大航天任务、重大科学发现、首次事件、重大政策、重大事故、重要论文。
-Medium：普通但有阅读价值的任务更新、研究进展、机构动态、科普素材。
-Low：日常更新、摄影作品、每日天象、娱乐内容、广告、重复报道。
+RSS 标题：{article.news.title}
+RSS 摘要：{article.news.summary}
+正文节选：{article_excerpt}
+""".strip()
 
-如果自定义 Prompt 非空，优先遵循对应规则：
-摘要 Prompt：{summary_prompt}
-翻译 Prompt：{translation_prompt}
-分类 Prompt：{category_prompt}
-重要程度 Prompt：{score_prompt}
-筛选 Prompt：{filter_prompt}
 
-新闻标题：{article.news.title}
-新闻来源：{article.news.source}
-发布时间：{article.news.published}
-链接：{article.news.url}
+def build_content_prompt(
+    article: Article,
+    language: str = "zh_CN",
+    custom_prompt: str = "",
+) -> str:
+    """Build the stage-two content prompt for retained news only."""
+
+    allowed_categories = json.dumps(
+        category_labels(language),
+        ensure_ascii=False,
+    )
+    maximum_categories = category_limit()
+
+    if language == "en_US":
+        return f"""
+Create report content for this retained space-news article.
+Return exactly one strict JSON object with only these fields:
+{{"summary": "English summary", "keywords": ["keyword 1", "keyword 2"], "category": ["Launch Missions"]}}
+
+Rules:
+- summary, keywords, and category labels must be in English.
+- Use 3 to 8 concise keywords.
+- category must be a JSON array containing zero to {maximum_categories} items.
+- Select category values only from this exact list: {allowed_categories}
+- Put the primary category first, followed by supporting categories.
+- Do not invent, combine, rename, or paraphrase category labels.
+- Preserve facts, numbers, organizations, and proper nouns.
+- Do not return title, date, source, URL, importance, reason, translation,
+  score, keep, or any other field.
+
+Custom summary rule: {custom_prompt}
+
+RSS title: {article.news.title}
+RSS summary: {article.news.summary}
+Body: {article.body}
+""".strip()
+
+    return f"""
+为这篇已入选的航天新闻生成周报内容。
+只返回一个严格 JSON 对象，并且只能包含以下字段：
+{{"summary": "中文摘要", "keywords": ["关键词1", "关键词2"], "category": ["发射任务"]}}
+
+规则：
+- summary、keywords 和 category 必须使用简体中文。
+- 返回 3 到 8 个简洁关键词。
+- category 必须是 JSON 数组，允许为空，最多 {maximum_categories} 项。
+- category 只能逐字选择以下统一分类：{allowed_categories}
+- 主要分类排在第一位，辅助分类随后。
+- 禁止创造、组合、改写或近义替换分类名称。
+- 保留事实、数字、机构和专有名词。
+- 禁止返回标题、日期、来源、链接、重要程度、原因、翻译、score、
+  keep 或任何其他字段。
+
+自定义摘要规则：{custom_prompt}
+
+RSS 标题：{article.news.title}
 RSS 摘要：{article.news.summary}
 正文：{article.body}
 """.strip()
+
+
+def build_title_translation_prompt(
+    titles: dict[str, str],
+    language: str,
+) -> str:
+    """Translate existing RSS titles in one batch without generating new titles."""
+
+    payload = json.dumps(titles, ensure_ascii=False)
+
+    if language == "en_US":
+        instruction = (
+            "Translate each existing RSS title into concise, natural English."
+        )
+    else:
+        instruction = (
+            "将每个现有 RSS 标题准确翻译为简洁自然的简体中文。"
+            "保留 NASA、ESA、JPL、SpaceX、型号、数字和其他专有名词。"
+        )
+
+    return f"""
+{instruction}
+Return one strict JSON object. Keep every input ID unchanged and use the
+translated title as its value. Do not add or remove IDs. Do not invent titles.
+
+Input JSON:
+{payload}
+""".strip()
+
+
+def language_instruction(language: str) -> str:
+    if language == "en_US":
+        return "All generated text must be in English."
+
+    return "所有生成文本必须使用简体中文。"

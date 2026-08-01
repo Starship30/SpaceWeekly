@@ -27,6 +27,8 @@ from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
 
 from config import APP_VERSION
+from ai.configuration import provider_config_from_settings
+from ai.providers import test_connection
 from i18n import tr
 from resources import resource_path
 from services.settings import AppSettings
@@ -37,13 +39,6 @@ from ui.term_editor_dialog import TermEditorDialog
 from ui.theme import THEME_DARK
 from ui.theme import THEME_LIGHT
 from ui.theme import THEME_SYSTEM
-
-
-AI_CATEGORY_OPTIONS = [
-    ("astronomy", "category.astronomy", "天文"),
-    ("spaceflight", "category.spaceflight", "航天"),
-    ("humanities", "category.humanities", "人文"),
-]
 
 
 class SettingsDialog(QDialog):
@@ -68,9 +63,16 @@ class SettingsDialog(QDialog):
             deepseek_api_key=self.api_key_edit.text().strip(),
             deepseek_base_url=self.base_url_edit.text().strip(),
             deepseek_model=self.model_edit.text().strip(),
+            model_candidates=list(
+                dict.fromkeys(
+                    [
+                        self.model_edit.text().strip(),
+                        *self.original_settings.model_candidates,
+                    ]
+                )
+            ),
             ai_provider=self.provider_combo.currentText(),
             temperature=self.temperature_spin.value(),
-            max_tokens=self.max_tokens_spin.value(),
             user_agent=self.user_agent_edit.text().strip(),
             request_timeout=self.timeout_spin.value(),
             connect_timeout=self.connect_timeout_spin.value(),
@@ -88,44 +90,20 @@ class SettingsDialog(QDialog):
             include_link=self.include_link_check.isChecked(),
             include_score=self.include_importance_check.isChecked(),
             include_summary=self.include_summary_check.isChecked(),
-            include_translation=self.include_translation_check.isChecked(),
-            include_categories=self.include_categories_check.isChecked(),
             include_keywords=self.include_keywords_check.isChecked(),
             include_body=self.include_body_check.isChecked(),
             include_original=self.include_original_check.isChecked(),
-            include_chinese=self.include_chinese_check.isChecked(),
             body_mode=str(body_mode),
-            ai_summary_enabled=self.ai_summary_check.isChecked(),
-            ai_translation_enabled=self.ai_translation_check.isChecked(),
-            ai_keywords_enabled=self.ai_keywords_check.isChecked(),
-            ai_category_enabled=self.ai_category_check.isChecked(),
-            ai_importance_enabled=True,
-            ai_auto_filter_enabled=self.auto_filter_check.isChecked(),
-            ai_category_options=self._selected_category_options(),
-            pipeline_score_enabled=True,
-            pipeline_filter_enabled=self.pipeline_filter_check.isChecked(),
-            pipeline_category_enabled=self.ai_category_check.isChecked(),
-            pipeline_keywords_enabled=self.ai_keywords_check.isChecked(),
-            pipeline_summary_enabled=self.ai_summary_check.isChecked(),
-            pipeline_translation_enabled=self.ai_translation_check.isChecked(),
-            max_article_tokens=self.max_article_tokens_spin.value(),
-            max_daily_api_calls=self.max_daily_calls_spin.value(),
-            ai_limit_action=str(self.limit_action_combo.currentData()),
-            daily_token_limit=self.daily_token_limit_spin.value(),
-            token_limit_action=str(self.token_action_combo.currentData()),
             theme_mode=str(self.theme_mode_combo.currentData()),
             language=str(self.language_combo.currentData()),
             date_mode=str(self.date_mode_combo.currentData()),
             start_date=self.start_date_edit.date().toString("yyyy-MM-dd"),
             end_date=self.end_date_edit.date().toString("yyyy-MM-dd"),
-            min_news_score=self.min_score_spin.value(),
-            report_style_custom_high=self.custom_high_check.isChecked(),
-            report_style_custom_medium=self.custom_medium_check.isChecked(),
-            report_style_custom_low=self.custom_low_check.isChecked(),
             release_mode=self.release_mode_check.isChecked(),
             launch_range=str(self.launch_range_combo.currentData()),
             aerospace_translation_enabled=self.aerospace_translation_check.isChecked(),
             aerospace_translation_mode=str(self.aerospace_translation_mode_combo.currentData()),
+            display_timezone=str(self.display_timezone_combo.currentData()),
         )
 
     def _set_icon(self) -> None:
@@ -148,9 +126,6 @@ class SettingsDialog(QDialog):
         self.temperature_spin.setRange(0, 2)
         self.temperature_spin.setSingleStep(0.1)
         self.temperature_spin.setValue(settings.temperature)
-        self.max_tokens_spin = QSpinBox()
-        self.max_tokens_spin.setRange(256, 128000)
-        self.max_tokens_spin.setValue(settings.max_tokens)
         self.timeout_spin = self._spin(1, 300, settings.request_timeout)
         self.connect_timeout_spin = self._spin(1, 120, settings.connect_timeout)
         self.read_timeout_spin = self._spin(1, 300, settings.read_timeout)
@@ -169,43 +144,19 @@ class SettingsDialog(QDialog):
         self.include_link_check = self._check(tr("include.link"), settings.include_link)
         self.include_importance_check = self._check(tr("include.score"), settings.include_score)
         self.include_summary_check = self._check(tr("include.summary"), settings.include_summary)
-        self.include_translation_check = self._check(tr("include.translation"), settings.include_translation)
-        self.include_categories_check = self._check(tr("include.categories"), settings.include_categories)
         self.include_keywords_check = self._check(tr("include.keywords"), settings.include_keywords)
         self.include_body_check = self._check(tr("include.body"), settings.include_body)
         self.include_original_check = self._check(tr("include.original"), settings.include_original)
-        self.include_chinese_check = self._check(tr("include.chinese"), settings.include_chinese)
-        self.ai_summary_check = self._check(tr("ai.summary.generate"), settings.pipeline_summary_enabled)
-        self.ai_translation_check = self._check(tr("ai.translation.generate"), settings.pipeline_translation_enabled)
-        self.ai_keywords_check = self._check(tr("ai.keywords.extract"), settings.pipeline_keywords_enabled)
-        self.ai_category_check = self._check(tr("ai.category.generate"), settings.pipeline_category_enabled)
-        self.pipeline_filter_check = self._check(tr("ai.filter.editor"), settings.pipeline_filter_enabled)
-        self.auto_filter_check = self._check(tr("ai.auto.filter"), settings.ai_auto_filter_enabled)
-        self.category_option_checks = [
-            self._category_option_check(value, key, legacy, settings.ai_category_options)
-            for value, key, legacy in AI_CATEGORY_OPTIONS
-        ]
-
-        if not any(check.isChecked() for check in self.category_option_checks):
-            for check in self.category_option_checks:
-                check.setChecked(True)
-
-        self.max_article_tokens_spin = self._spin(500, 100000, settings.max_article_tokens)
-        self.max_daily_calls_spin = self._spin(1, 10000, settings.max_daily_api_calls)
-        self.daily_token_limit_spin = self._spin(1000, 10000000, settings.daily_token_limit)
-        self.min_score_spin = self._spin(0, 100, settings.min_news_score)
         self.theme_mode_combo = self._theme_mode_combo(settings.theme_mode)
         self.language_combo = self._language_combo(settings.language)
-        self.limit_action_combo = self._action_combo(settings.ai_limit_action)
-        self.token_action_combo = self._action_combo(settings.token_limit_action)
         self.date_mode_combo = self._date_mode_combo(settings.date_mode)
         self.start_date_edit = self._date_edit(settings.start_date, -6)
         self.end_date_edit = self._date_edit(settings.end_date, 0)
-        self.custom_high_check = self._check(tr("high"), settings.report_style_custom_high)
-        self.custom_medium_check = self._check(tr("medium"), settings.report_style_custom_medium)
-        self.custom_low_check = self._check(tr("low"), settings.report_style_custom_low)
         self.body_mode_group = QButtonGroup(self)
         self.launch_range_combo = self._launch_range_combo(settings.launch_range)
+        self.display_timezone_combo = self._display_timezone_combo(
+            settings.display_timezone
+        )
         self.aerospace_translation_check = self._check(
             tr("aerospace.translation.enabled"),
             settings.aerospace_translation_enabled,
@@ -234,7 +185,6 @@ class SettingsDialog(QDialog):
             (tr("export"), self._export_page()),
             (tr("launch.settings"), self._launch_page()),
             (tr("network"), self._network_page()),
-            (tr("cost.control"), self._cost_page()),
             (tr("advanced"), self._advanced_page()),
             (tr("about"), self._about_page()),
         ]:
@@ -270,7 +220,6 @@ class SettingsDialog(QDialog):
         layout.addRow("API Key", self.api_key_edit)
         layout.addRow("Base URL", self.base_url_edit)
         layout.addRow(tr("model"), self.model_edit)
-        layout.addRow(tr("category.direction"), self._checks_grid(self.category_option_checks))
         test_button = QPushButton(tr("test.connection"))
         test_button.clicked.connect(self._test_connection)
         layout.addRow(test_button)
@@ -302,13 +251,10 @@ class SettingsDialog(QDialog):
                 self.include_published_check,
                 self.include_link_check,
                 self.include_importance_check,
-                self.include_categories_check,
                 self.include_keywords_check,
                 self.include_summary_check,
-                self.include_translation_check,
                 self.include_body_check,
                 self.include_original_check,
-                self.include_chinese_check,
             ]
         ))
 
@@ -327,6 +273,7 @@ class SettingsDialog(QDialog):
     def _launch_page(self) -> QWidget:
         page, layout = self._form_page(tr("launch.settings"))
         layout.addRow(tr("launch.range"), self.launch_range_combo)
+        layout.addRow(tr("display.timezone"), self.display_timezone_combo)
         layout.addRow(self.aerospace_translation_check)
         layout.addRow(
             tr("aerospace.translation.mode"),
@@ -338,28 +285,12 @@ class SettingsDialog(QDialog):
 
         return page
 
-    def _cost_page(self) -> QWidget:
-        page, layout = self._form_page(tr("cost.control"))
-        layout.addRow(tr("token.note"), QLabel(tr("token.note.text")))
-        layout.addRow(tr("article.input.tokens"), self.max_article_tokens_spin)
-        layout.addRow(tr("daily.api.calls"), self.max_daily_calls_spin)
-        layout.addRow(tr("daily.token.budget"), self.daily_token_limit_spin)
-        layout.addRow(tr("api.limit.action"), self.limit_action_combo)
-        layout.addRow(tr("token.limit.action"), self.token_action_combo)
-
-        return page
-
     def _advanced_page(self) -> QWidget:
         page, layout = self._form_page(tr("advanced"))
         layout.addRow(tr("advanced.params"), self._advanced_ai_row())
-        layout.addRow(tr("ai.workflow"), self._workflow_row())
         layout.addRow(tr("date.filter"), self.date_mode_combo)
         layout.addRow(tr("start.date"), self.start_date_edit)
         layout.addRow(tr("end.date"), self.end_date_edit)
-        layout.addRow(tr("custom.report.style"), self._checks_grid(
-            [self.custom_high_check, self.custom_medium_check, self.custom_low_check]
-        ))
-        layout.addRow(tr("score.threshold"), self.min_score_spin)
         layout.addRow(self.release_mode_check)
         layout.addRow(self.debug_ai_check)
 
@@ -402,31 +333,8 @@ class SettingsDialog(QDialog):
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        for label, control in [
-            ("Temperature", self.temperature_spin),
-            (tr("ai.output.tokens"), self.max_tokens_spin),
-        ]:
-            layout.addWidget(QLabel(label))
-            layout.addWidget(control)
-
-        return widget
-
-    def _workflow_row(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(QLabel(tr("workflow.note")))
-        layout.addWidget(self._checks_grid(
-            [
-                self.pipeline_filter_check,
-                self.ai_category_check,
-                self.ai_keywords_check,
-                self.ai_summary_check,
-                self.ai_translation_check,
-                self.auto_filter_check,
-            ]
-        ))
+        layout.addWidget(QLabel("Temperature"))
+        layout.addWidget(self.temperature_spin)
 
         return widget
 
@@ -437,8 +345,6 @@ class SettingsDialog(QDialog):
 
         for label, mode in [
             (tr("body.original"), "original"),
-            (tr("body.bilingual"), "bilingual"),
-            (tr("body.translated"), "translated"),
             (tr("body.none"), "none"),
         ]:
             button = QRadioButton(label)
@@ -451,28 +357,6 @@ class SettingsDialog(QDialog):
             self.body_mode_group.buttons()[0].setChecked(True)
 
         return widget
-
-    def _selected_category_options(self) -> list[str]:
-        selected = [
-            str(check.property("value"))
-            for check in self.category_option_checks
-            if check.isChecked()
-        ]
-
-        return selected or [value for value, _key, _legacy in AI_CATEGORY_OPTIONS]
-
-    def _category_option_check(
-        self,
-        value: str,
-        label_key: str,
-        legacy_value: str,
-        selected_values: list[str],
-    ) -> QCheckBox:
-        selected = value in selected_values or legacy_value in selected_values
-        check = self._check(tr(label_key), selected)
-        check.setProperty("value", value)
-
-        return check
 
     def _checks_grid(self, checks: list[QCheckBox]) -> QWidget:
         widget = QWidget()
@@ -496,15 +380,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(button)
 
         return widget
-
-    def _action_combo(self, current: str) -> QComboBox:
-        combo = QComboBox()
-        combo.addItem(tr("auto.stop"), "stop")
-        combo.addItem(tr("skip"), "skip")
-        combo.addItem(tr("ask.user"), "ask")
-        combo.setCurrentIndex(max(combo.findData(current), 0))
-
-        return combo
 
     def _date_mode_combo(self, current: str) -> QComboBox:
         combo = QComboBox()
@@ -555,6 +430,22 @@ class SettingsDialog(QDialog):
         combo.addItem(tr("translation.mode.hybrid"), "hybrid")
         combo.setCurrentIndex(max(combo.findData(current), 0))
 
+        return combo
+
+    def _display_timezone_combo(self, current: str) -> QComboBox:
+        combo = QComboBox()
+
+        for label, timezone_name in [
+            (tr("timezone.system"), "system"),
+            (tr("timezone.utc"), "UTC"),
+            (tr("timezone.beijing"), "Asia/Shanghai"),
+            (tr("timezone.tokyo"), "Asia/Tokyo"),
+            (tr("timezone.london"), "Europe/London"),
+            (tr("timezone.new.york"), "America/New_York"),
+        ]:
+            combo.addItem(label, timezone_name)
+
+        combo.setCurrentIndex(max(combo.findData(current), 0))
         return combo
 
     def _date_edit(self, value: str, fallback_days: int) -> QDateEdit:
@@ -610,8 +501,42 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, tr("test.connection"), tr("missing.api.key"))
             return
 
-        if not self.base_url_edit.text().strip() or not self.model_edit.text().strip():
+        if not self.base_url_edit.text().strip():
             QMessageBox.warning(self, tr("test.connection"), tr("missing.model.config"))
             return
 
-        QMessageBox.information(self, tr("test.connection"), tr("connection.ready"))
+        settings = self.settings()
+
+        try:
+            result = test_connection(
+                provider_config_from_settings(settings),
+                settings.model_candidates,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                tr("test.connection"),
+                f"{settings.ai_provider}{tr('connection.test.title')}\n\n"
+                f"✗ {exc}",
+            )
+            return
+
+        self.model_edit.setText(result.model)
+        models_source = (
+            tr("connection.models.api")
+            if result.models_api_supported
+            else tr("connection.models.config")
+        )
+        QMessageBox.information(
+            self,
+            tr("test.connection"),
+            (
+                f"{settings.ai_provider}{tr('connection.test.title')}\n\n"
+                f"✓ {tr('connection.api.key.valid')}\n"
+                f"✓ {tr('connection.endpoint.ok')}\n"
+                f"✓ {tr('connection.model.available')}\n\n"
+                f"{tr('connection.current.model')}{tr('label_separator')}{result.model}\n"
+                f"{tr('connection.model.source')}{tr('label_separator')}{models_source}\n"
+                f"{tr('connection.response.time')}{tr('label_separator')}{result.elapsed_ms} ms"
+            ),
+        )

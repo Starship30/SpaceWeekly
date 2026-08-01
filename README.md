@@ -2,11 +2,27 @@
 
 [Download](https://github.com/Starship30/SpaceWeekly/releases/download/v2.3.1/SpaceWeekly.exe)
 
-SpaceWeekly v2.3.1 AI Workflow Edition is an AI Aerospace News Workspace.
+SpaceWeekly v2.4.3 AI Workflow Edition is an AI Aerospace News Workspace.
 
-It collects aerospace RSS feeds, parses article pages, analyzes news value with
-AI, filters low-value items, classifies reports, and exports Word/Markdown
-weekly reports.
+It collects aerospace RSS feeds, parses article pages, screens news importance,
+generates content only for retained items, and exports Word/Markdown weekly
+reports.
+
+## v2.4.3 Controlled News Categories
+
+- Non-overwriting numbered Word and Markdown report names
+- Cooperative task cancellation with atomic report writes
+- Centralized provider/model configuration and automatic model discovery
+- Real API connection diagnostics with HTTP error details
+- Daily/latest logs, standalone error reports, and recoverable AI JSON parsing
+- Unified Chinese/English AI output rules and asynchronous startup checks
+- Stage 1 returns only `importance` and `reason`
+- Stage 2 returns only `summary`, `keywords`, and `category` for retained news
+- Selectable `High_only`, `High_Medium` (default), and `All` filter levels
+- RSS titles are preserved as source data and translated in batches when needed
+- Stage 2 also selects up to three categories from `categories.json`
+- Category IDs and Chinese/English labels are centralized and validated locally
+- Category statistics are available through `category_counts`
 
 ## One-Minute Start
 
@@ -26,21 +42,18 @@ python app.py
 
 - RSS feed manager
 - Dedicated parsers plus Generic Parser fallback
-- AI Workflow with optional score, filter, category, keywords, summary, and translation
+- Two-stage AI workflow: importance screening, then retained-news summaries
 - Prompt Studio for editing, testing, importing, and exporting prompt presets
 - Strict JSON AI output for stable parsing
-- AI news score from 0 to 100
-- AI keep/ignore decision with reason
-- Fixed multi-category system
-- Original, bilingual, translated, or no-body export modes
+- High/Medium/Low filtering with an AI reason
+- Original or no-body export modes
 - Custom report title
 - Word and Markdown export
-- Token, cost, and time estimates
-- Daily token and API-call limits
 
 ## Prompt Studio
 
-Prompt Studio manages prompt presets in `prompts/*.json`.
+Prompt Studio manages the `filter` and `summary` prompt presets in
+`prompts/*.json`.
 
 Supported variables:
 

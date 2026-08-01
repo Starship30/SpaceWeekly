@@ -1,0 +1,65 @@
+{
+  "max_per_article": 3,
+  "categories": [
+    {
+      "id": "launch_missions",
+      "zh_CN": "发射任务",
+      "en_US": "Launch Missions"
+    },
+    {
+      "id": "launch_vehicles",
+      "zh_CN": "运载火箭",
+      "en_US": "Launch Vehicles"
+    },
+    {
+      "id": "commercial_space",
+      "zh_CN": "商业航天",
+      "en_US": "Commercial Space"
+    },
+    {
+      "id": "spacecraft",
+      "zh_CN": "航天器",
+      "en_US": "Spacecraft"
+    },
+    {
+      "id": "satellites_communications",
+      "zh_CN": "卫星与通信",
+      "en_US": "Satellites and Communications"
+    },
+    {
+      "id": "deep_space_exploration",
+      "zh_CN": "深空探索",
+      "en_US": "Deep Space Exploration"
+    },
+    {
+      "id": "planetary_science",
+      "zh_CN": "行星科学",
+      "en_US": "Planetary Science"
+    },
+    {
+      "id": "astronomical_observation",
+      "zh_CN": "天文观测",
+      "en_US": "Astronomical Observation"
+    },
+    {
+      "id": "scientific_discoveries",
+      "zh_CN": "科学发现",
+      "en_US": "Scientific Discoveries"
+    },
+    {
+      "id": "space_technology",
+      "zh_CN": "航天技术",
+      "en_US": "Space Technology"
+    },
+    {
+      "id": "space_station_human_spaceflight",
+      "zh_CN": "空间站与载人航天",
+      "en_US": "Space Stations and Human Spaceflight"
+    },
+    {
+      "id": "space_policy",
+      "zh_CN": "航天政策",
+      "en_US": "Space Policy"
+    }
+  ]
+}

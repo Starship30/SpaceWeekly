@@ -1,12 +1,14 @@
-import json
 import logging
 import re
 from typing import Callable
 
 import config
+from ai.configuration import provider_config_from_settings
+from ai.json_utils import request_json
 from translator.dictionary import add_pending_term
 from translator.dictionary import dictionary_replace
 from translator.dictionary import pending_translation
+from services.cancellation import TaskCancelledError
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +23,13 @@ class Translator:
         settings=None,
         mode: str | None = None,
         ai_callable: Callable[[str, str, bool], str] | None = None,
+        cancel_token=None,
     ) -> None:
         selected_mode = mode or config.TRANSLATION_MODE
         self.mode = selected_mode if selected_mode in VALID_MODES else "hybrid"
         self.settings = settings
         self.ai_callable = ai_callable
+        self.cancel_token = cancel_token
         self._cache: dict[tuple[str, str, bool, bool], str] = {}
 
     def translate_term(
@@ -35,6 +39,7 @@ class Translator:
         allow_ai: bool = True,
     ) -> str:
         original = str(text or "").strip()
+        self._check_cancel()
 
         if not original:
             return ""
@@ -73,6 +78,7 @@ class Translator:
 
     def translate_description(self, text: str) -> str:
         original = str(text or "").strip()
+        self._check_cancel()
 
         if not original or self.mode == "dictionary":
             return original
@@ -104,38 +110,49 @@ class Translator:
             if self.ai_callable is not None:
                 result = self.ai_callable(text, term_type, long_text)
             else:
-                result = _provider_translate(text, term_type, long_text, self.settings)
+                result = _provider_translate(
+                    text,
+                    term_type,
+                    long_text,
+                    self.settings,
+                    self.cancel_token,
+                )
+        except TaskCancelledError:
+            raise
         except Exception as exc:
             logger.warning("[Translator] AI translation failed for %s: %s", text, exc)
             return text
 
         return str(result or "").strip() or text
 
+    def _check_cancel(self) -> None:
+        if self.cancel_token is not None:
+            self.cancel_token.check()
 
-def _provider_translate(text: str, term_type: str, long_text: bool, settings) -> str:
+
+def _provider_translate(
+    text: str,
+    term_type: str,
+    long_text: bool,
+    settings,
+    cancel_token=None,
+) -> str:
     if settings is None:
         raise ValueError("Translator AI settings are unavailable.")
 
-    from ai.providers import ProviderConfig
-    from ai.providers import complete
-
-    provider_config = ProviderConfig(
-        provider=settings.ai_provider,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
-        temperature=settings.temperature,
-        max_tokens=min(settings.max_tokens, 1000 if long_text else 256),
-        timeout=settings.request_timeout,
-        connect_timeout=settings.connect_timeout,
-        read_timeout=settings.read_timeout,
-        retry_count=settings.retry_count,
-    )
-    if long_text:
+    provider_config = provider_config_from_settings(settings)
+    if settings.language == "en_US":
+        prompt = (
+            f"Rewrite the following aerospace {term_type} in concise, natural English. "
+            "Preserve brands, numbers, model designations, and facts. "
+            'Return strict JSON only: {"translation": "..."}. Text: '
+            + text
+        )
+    elif long_text:
         prompt = (
             "你是专业航天新闻编辑。请将以下任务描述改写为简洁、自然的中文航天新闻表述，"
             "保留卫星数量、任务目的、机构、火箭和轨道等事实，不逐字翻译，不添加原文没有的事实。"
-            "品牌名 SpaceX 和 Starlink 保持英文；将 Starlink Group 表述为 Starlink批次，"
+            "品牌名 SpaceX、Starlink 和术语 Starlink Group 保持英文原样，"
             "避免使用‘星链组’‘XX项目’‘XX巨型星座’等数据库式或机器翻译表达。"
             "输出一至两句，并严格返回 JSON：{\"translation\": \"...\"}。原文："
             + text
@@ -147,8 +164,12 @@ def _provider_translate(text: str, term_type: str, long_text: bool, settings) ->
             '{"translation": "..."}. Term: '
             + text
         )
-    content = complete(prompt, provider_config)
-    data = json.loads(content)
+    data = request_json(
+        prompt,
+        provider_config,
+        module_name="translator",
+        cancel_token=cancel_token,
+    )
 
     return str(data.get("translation", "")).strip()
 
@@ -157,14 +178,14 @@ def _postprocess_description(text: str) -> str:
     result = str(text or "").strip()
     replacements = {
         "太空探索技术公司": "SpaceX",
-        "星链组": "Starlink批次",
-        "Starlink组": "Starlink批次",
+        "星链组": "Starlink Group",
+        "Starlink组": "Starlink Group",
         "星链巨型星座": "Starlink卫星星座",
         "Starlink巨型星座": "Starlink卫星星座",
         "星链项目": "Starlink卫星互联网计划",
         "Starlink项目": "Starlink卫星互联网计划",
         "Starlink卫星星座项目": "Starlink卫星星座",
-        "Starlink批次项目": "Starlink批次",
+        "Starlink批次项目": "Starlink Group",
     }
 
     for source, replacement in replacements.items():

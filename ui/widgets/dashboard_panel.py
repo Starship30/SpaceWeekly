@@ -4,7 +4,6 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QButtonGroup
 from PySide6.QtWidgets import QFormLayout
 from PySide6.QtWidgets import QFrame
-from PySide6.QtWidgets import QGridLayout
 from PySide6.QtWidgets import QHBoxLayout
 from PySide6.QtWidgets import QLabel
 from PySide6.QtWidgets import QLineEdit
@@ -18,11 +17,10 @@ from i18n import tr
 from services.settings import AppSettings
 
 
-REPORT_STYLES = [
-    ("complete", "complete.style"),
-    ("standard", "standard.style"),
-    ("curated", "curated.style"),
-    ("custom", "custom.style"),
+FILTER_LEVELS = [
+    ("High_only", "filter.level.high"),
+    ("High_Medium", "filter.level.high.medium"),
+    ("All", "filter.level.all"),
 ]
 
 
@@ -40,35 +38,29 @@ class DashboardPanel(QWidget):
     def apply_settings(self, settings: AppSettings) -> None:
         self.report_title_line.setText(settings.report_title)
         self.rss_limit_spin.setValue(max(1, settings.rss_limit or 20))
-        style = settings.report_style or "standard"
+        level = settings.news_filter_level or "High_Medium"
 
-        for button in self.report_style_group.buttons():
-            button.setChecked(button.property("style") == style)
+        for button in self.filter_level_group.buttons():
+            button.setChecked(button.property("filter_level") == level)
 
-        if not self.report_style_group.checkedButton():
-            self.report_style_group.buttons()[1].setChecked(True)
+        if not self.filter_level_group.checkedButton():
+            self.filter_level_group.buttons()[1].setChecked(True)
 
     def settings_snapshot(self, settings: AppSettings) -> AppSettings:
         return replace(
             settings,
             report_title=self.report_title_line.text().strip() or "SpaceWeekly",
             rss_limit=self.rss_limit_spin.value(),
-            report_style=self.report_style(),
-            ai_importance_enabled=True,
+            news_filter_level=self.news_filter_level(),
         )
 
-    def report_style(self) -> str:
-        button = self.report_style_group.checkedButton()
+    def news_filter_level(self) -> str:
+        button = self.filter_level_group.checkedButton()
 
         if button is None:
-            return "standard"
+            return "High_Medium"
 
-        return str(button.property("style"))
-
-    def set_estimate(self, articles: int, tokens: int, seconds: int) -> None:
-        self.article_value.setText(str(articles))
-        self.token_value.setText(f"{tokens:,}")
-        self.time_value.setText(tr("about.seconds", seconds=seconds))
+        return str(button.property("filter_level"))
 
     def set_running(self, running: bool) -> None:
         self.start_button.setEnabled(not running)
@@ -98,8 +90,7 @@ class DashboardPanel(QWidget):
         form.addRow(tr("report.title"), self.report_title_line)
         form.addRow(tr("rss.limit"), self.rss_limit_spin)
         layout.addLayout(form)
-        layout.addWidget(self._style_box())
-        layout.addWidget(self._estimate_box())
+        layout.addWidget(self._filter_level_box())
         layout.addStretch(1)
         action_row = QHBoxLayout()
         action_row.addStretch(1)
@@ -110,60 +101,22 @@ class DashboardPanel(QWidget):
         action_row.addWidget(self.start_button)
         layout.addLayout(action_row)
 
-    def _style_box(self) -> QFrame:
+    def _filter_level_box(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("SubtlePanel")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(8)
-        label = QLabel(tr("report.style"))
+        label = QLabel(tr("news.filter.level"))
         label.setObjectName("SectionTitle")
         layout.addWidget(label)
-        self.report_style_group = QButtonGroup(self)
+        self.filter_level_group = QButtonGroup(self)
 
-        for value, text in REPORT_STYLES:
+        for value, text in FILTER_LEVELS:
             button = QRadioButton(tr(text))
-            button.setProperty("style", value)
+            button.setProperty("filter_level", value)
             button.toggled.connect(lambda _checked: self.settings_changed.emit())
-            self.report_style_group.addButton(button)
+            self.filter_level_group.addButton(button)
             layout.addWidget(button)
 
         return frame
-
-    def _estimate_box(self) -> QFrame:
-        frame = QFrame()
-        frame.setObjectName("SubtlePanel")
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-        label = QLabel(tr("estimate.title"))
-        label.setObjectName("SectionTitle")
-        layout.addWidget(label)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(8)
-        self.article_value = self._metric_value()
-        self.token_value = self._metric_value()
-        self.time_value = self._metric_value()
-
-        for column, (name, value) in enumerate(
-            [
-                (tr("article.count"), self.article_value),
-                ("Token", self.token_value),
-                (tr("time.cost"), self.time_value),
-            ]
-        ):
-            metric_name = QLabel(name)
-            metric_name.setObjectName("MetricLabel")
-            grid.addWidget(metric_name, 0, column)
-            grid.addWidget(value, 1, column)
-
-        layout.addLayout(grid)
-
-        return frame
-
-    def _metric_value(self) -> QLabel:
-        label = QLabel("0")
-        label.setObjectName("MetricValue")
-
-        return label

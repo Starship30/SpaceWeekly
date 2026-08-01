@@ -1,4 +1,3 @@
-from datetime import datetime
 from pathlib import Path
 
 from config import OUTPUT_DIR
@@ -6,8 +5,11 @@ from i18n import tr
 from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
-from models.news_analysis import NewsAnalysis
-from utils.time import format_beijing_time
+from models.news_assessment import NewsAssessment
+from utils.time import BEIJING_TIMEZONE
+from utils.time import format_datetime
+from utils.output_files import reserved_output
+from utils.text import clean_ai_text
 
 IMPORTANCE_LEVELS = ["High", "Medium", "Low"]
 
@@ -16,16 +18,19 @@ def export_word(
     articles: list[Article],
     ai_summaries: dict[str, AISummary] | None = None,
     context: ExportContext | None = None,
-    analyses: dict[str, NewsAnalysis] | None = None,
+    assessments: dict[str, NewsAssessment] | None = None,
     launches: list[Article] | None = None,
     launch_range: str = "next_week",
+    launch_timezone: str = BEIJING_TIMEZONE,
     launch_term_translator=None,
+    cancel_check=None,
 ) -> Path:
     """Export articles to a styled Word document."""
     from docx import Document
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = _output_path()
+    check_cancel = cancel_check or (lambda: None)
+    check_cancel()
     document = Document()
     _setup_styles(document)
     document.add_heading(_report_title(context), level=0)
@@ -35,7 +40,13 @@ def export_word(
 
         if launches:
             for launch in launches:
-                _add_launch(document, launch, launch_term_translator)
+                check_cancel()
+                _add_launch(
+                    document,
+                    launch,
+                    launch_term_translator,
+                    launch_timezone,
+                )
         else:
             document.add_paragraph(tr("launch_none"))
 
@@ -43,20 +54,24 @@ def export_word(
 
     for section, section_articles in _group_by_importance(
         articles,
-        analyses or {},
+        assessments or {},
     ).items():
         document.add_heading(section, level=2)
 
         for article in section_articles:
+            check_cancel()
             _add_article(
                 document,
                 article,
                 (ai_summaries or {}).get(article.news.url),
                 context,
-                (analyses or {}).get(article.news.url),
+                (assessments or {}).get(article.news.url),
             )
 
-    document.save(output_path)
+    with reserved_output(OUTPUT_DIR, ".docx") as (output_path, temp_path):
+        check_cancel()
+        document.save(temp_path)
+        check_cancel()
 
     return output_path
 
@@ -65,9 +80,10 @@ def _add_launch(
     document,
     launch: Article,
     term_translator,
+    launch_timezone: str,
 ) -> None:
     fields = _launch_fields(launch)
-    fields["time"] = format_beijing_time(fields["time"])
+    fields["time"] = format_datetime(fields["time"], launch_timezone)
     fields["name"] = _translated_term(fields["name"], "mission", term_translator)
     fields["rocket"] = _translated_term(fields["rocket"], "rocket", term_translator)
     fields["provider"] = _translated_term(
@@ -190,12 +206,6 @@ def _launch_fields(launch: Article) -> dict[str, str]:
     return {key: value or tr("not_available") for key, value in fields.items()}
 
 
-def _output_path() -> Path:
-    today = datetime.now().date().isoformat()
-
-    return OUTPUT_DIR / f"SpaceWeekly_{today}.docx"
-
-
 def _setup_styles(document) -> None:
     from docx.oxml.ns import qn
     from docx.shared import Pt
@@ -224,37 +234,36 @@ def _add_article(
     article: Article,
     ai_summary: AISummary | None,
     context: ExportContext | None,
-    analysis: NewsAnalysis | None,
+    assessment: NewsAssessment | None,
 ) -> None:
     news = article.news
+    title = (
+        context.localized_titles.get(news.url, news.title)
+        if context is not None
+        else news.title
+    )
 
     if context is None or context.include_title:
-        document.add_heading(news.title, level=2)
+        document.add_heading(clean_ai_text(title), level=2)
 
     if context is None or context.include_published:
-        _add_label(document, tr("report_published"), news.published)
+        _add_label(document, tr("report_published"), clean_ai_text(news.published))
 
     if context is None or context.include_source:
-        _add_label(document, tr("report_source"), news.source)
+        _add_label(document, tr("report_source"), clean_ai_text(news.source))
 
-    if analysis is not None and (context is None or context.include_score):
-        _add_label(document, tr("report_importance"), _importance_label(_importance_level(analysis)))
-        _add_label(document, tr("report_reason"), analysis.reason)
-
-    if analysis is not None and (context is None or context.include_categories):
-        _add_label(document, tr("report_category"), _join_values(analysis.categories))
+    if assessment is not None and (context is None or context.include_score):
+        _add_label(
+            document,
+            tr("report_importance"),
+            _importance_label(assessment.importance),
+        )
+        _add_label(document, tr("report_reason"), clean_ai_text(assessment.reason))
 
     if ai_summary is None:
-        _add_label(document, tr("report_summary"), news.summary)
+        _add_label(document, tr("report_summary"), clean_ai_text(news.summary))
     else:
         _add_ai_summary(document, ai_summary, context)
-
-    if context is None or context.include_body:
-        body_text = _body_text(article, context)
-
-        if body_text:
-            document.add_heading(tr("report_body"), level=2)
-            document.add_paragraph(body_text)
 
     if context is None or context.include_link:
         paragraph = document.add_paragraph()
@@ -263,37 +272,36 @@ def _add_article(
         ).bold = True
         _add_hyperlink(paragraph, news.url, news.url)
 
+    if context is None or context.include_body:
+        body_text = _body_text(article, context)
+
+        if body_text:
+            document.add_heading(tr("report_body"), level=2)
+            document.add_paragraph(body_text)
 
 def _add_ai_summary(document, ai_summary: AISummary, context: ExportContext | None) -> None:
+    if ai_summary.categories:
+        _add_label(
+            document,
+            tr("report_category"),
+            _join_values(ai_summary.categories),
+        )
+
     if context is None or (context.show_summary and context.include_summary):
         paragraph = document.add_paragraph()
         paragraph.paragraph_format.space_after = 6
         run = paragraph.add_run(
-            f"{tr('report_ai_summary')}{tr('label_separator')}{ai_summary.summary}"
+            f"{tr('report_ai_summary')}{tr('label_separator')}{clean_ai_text(ai_summary.summary)}"
         )
         run.bold = True
 
     if context is None or (context.show_keywords and context.include_keywords):
         _add_label(document, tr("report_keywords"), _join_values(ai_summary.keywords))
 
-    if context is None or (context.show_category and context.include_categories):
-        _add_label(document, tr("report_category"), ai_summary.category)
-
-    if context is None or (context.show_importance and context.include_score):
-        _add_label(document, tr("report_importance"), _importance_label(ai_summary.importance))
-
 
 def _body_text(article: Article, context: ExportContext | None) -> str:
-    translation = context.translations.get(article.news.url) if context else None
-
     if context is not None and context.body_mode == "none":
         return ""
-
-    if context is not None and context.body_mode == "translated" and translation:
-        return translation
-
-    if context is not None and context.body_mode == "bilingual" and translation:
-        return _bilingual_body(article.body, translation)
 
     if context is not None and not context.include_original:
         return ""
@@ -301,27 +309,11 @@ def _body_text(article: Article, context: ExportContext | None) -> str:
     return article.body
 
 
-def _bilingual_body(original: str, translation: str) -> str:
-    original_lines = [line for line in original.splitlines() if line.strip()]
-    translated_lines = [line for line in translation.splitlines() if line.strip()]
-    blocks = []
-
-    for index, original_line in enumerate(original_lines):
-        blocks.append(original_line)
-
-        if index < len(translated_lines):
-            blocks.append(translated_lines[index])
-
-        blocks.append("")
-
-    return "\n".join(blocks).strip()
-
-
 def _add_label(document, label: str, value: str) -> None:
     paragraph = document.add_paragraph()
     run = paragraph.add_run(f"{label}{tr('label_separator')}")
     run.bold = True
-    paragraph.add_run(value)
+    paragraph.add_run(clean_ai_text(value))
 
 
 def _add_hyperlink(paragraph, text: str, url: str) -> None:
@@ -346,42 +338,17 @@ def _add_hyperlink(paragraph, text: str, url: str) -> None:
 
 def _group_by_importance(
     articles: list[Article],
-    analyses: dict[str, NewsAnalysis],
+    assessments: dict[str, NewsAssessment],
 ) -> dict[str, list[Article]]:
     grouped = {_importance_label(level): [] for level in IMPORTANCE_LEVELS}
 
     for article in articles:
-        analysis = analyses.get(article.news.url)
-        label = _importance_label(_importance_level(analysis))
+        assessment = assessments.get(article.news.url)
+        level = assessment.importance if assessment is not None else "Medium"
+        label = _importance_label(level)
         grouped.setdefault(label, []).append(article)
 
     return {label: items for label, items in grouped.items() if items}
-
-
-def _importance_level(analysis: NewsAnalysis | None) -> str:
-    if analysis is None:
-        return "Medium"
-
-    text = (analysis.importance or "").strip().lower()
-    aliases = {
-        "high": "High",
-        "高": "High",
-        "medium": "Medium",
-        "中": "Medium",
-        "low": "Low",
-        "低": "Low",
-    }
-
-    if text in aliases:
-        return aliases[text]
-
-    if analysis.score >= 80:
-        return "High"
-
-    if analysis.score >= 50:
-        return "Medium"
-
-    return "Low"
 
 
 def _importance_label(level: str) -> str:
@@ -402,4 +369,8 @@ def _importance_label(level: str) -> str:
 
 
 def _join_values(values: list[str]) -> str:
-    return tr("list_separator").join(values)
+    return tr("list_separator").join(
+        clean_ai_text(value)
+        for value in values
+        if clean_ai_text(value)
+    )

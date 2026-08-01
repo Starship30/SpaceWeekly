@@ -3,149 +3,220 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from config import OUTPUT_DIR
+from i18n import tr
 from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
-from models.news_analysis import NewsAnalysis
-
-IMPORTANCE_SECTIONS = [
-    ("High", "🔥 本周重点"),
-    ("Medium", "📰 推荐阅读"),
-    ("Low", "📌 简讯"),
-]
+from models.news_assessment import NewsAssessment
+from utils.output_files import reserved_output
+from utils.text import clean_ai_text
 
 
 def export_markdown(
     articles: list[Article],
     ai_summaries: dict[str, AISummary] | None = None,
     context: ExportContext | None = None,
-    analyses: dict[str, NewsAnalysis] | None = None,
+    assessments: dict[str, NewsAssessment] | None = None,
+    cancel_check=None,
 ) -> Path:
-    """Export articles to a UTF-8 Markdown weekly report."""
+    """Export the compact two-stage result to UTF-8 Markdown."""
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = _output_path()
-    content = _build_markdown(articles, ai_summaries or {}, context, analyses or {})
-    output_path.write_text(content, encoding="utf-8")
+    check_cancel = cancel_check or (lambda: None)
+    check_cancel()
+    content = _build_markdown(
+        articles,
+        ai_summaries or {},
+        context,
+        assessments or {},
+    )
+
+    with reserved_output(OUTPUT_DIR, ".md") as (output_path, temp_path):
+        check_cancel()
+        temp_path.write_text(content, encoding="utf-8")
+        check_cancel()
 
     return output_path
 
 
-def _output_path() -> Path:
-    today = datetime.now().date().isoformat()
-
-    return OUTPUT_DIR / f"SpaceWeekly_{today}.md"
-
-
 def _build_markdown(
     articles: list[Article],
-    ai_summaries: dict[str, AISummary],
+    summaries: dict[str, AISummary],
     context: ExportContext | None,
-    analyses: dict[str, NewsAnalysis],
+    assessments: dict[str, NewsAssessment],
 ) -> str:
     sorted_articles = _sort_articles(articles)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    separator = tr("label_separator")
     lines = [
         f"# {_report_title(context)}",
         "",
-        f"生成时间：{now}",
+        f"{tr('report_generated_at')}{separator}{datetime.now():%Y-%m-%d %H:%M:%S}",
         "",
-        f"发布日期：{datetime.now().date().isoformat()}",
+        f"{tr('report_release_date')}{separator}{datetime.now().date().isoformat()}",
         "",
-        *_stats_lines(sorted_articles, ai_summaries),
+        f"{tr('report_news_count')}{separator}{len(sorted_articles)}",
+        "",
+        f"{tr('report_source_stats')}{separator}",
     ]
 
-    for category, category_articles in _group_by_importance(sorted_articles, analyses).items():
-        lines.extend(
-            _category_lines(
-                category,
-                category_articles,
-                ai_summaries,
-                context,
-                analyses,
+    for source, count in _source_stats(sorted_articles).items():
+        lines.append(f"{source}{separator}{count}")
+
+    lines.extend(["", "---", ""])
+
+    for section, section_articles in _group_by_importance(
+        sorted_articles,
+        assessments,
+    ).items():
+        lines.extend([f"# {section}", ""])
+
+        for article in section_articles:
+            lines.extend(
+                _article_lines(
+                    article,
+                    summaries.get(article.news.url),
+                    assessments.get(article.news.url),
+                    context,
+                )
             )
-        )
 
     return "\n".join(lines)
+
+
+def _article_lines(
+    article: Article,
+    summary: AISummary | None,
+    assessment: NewsAssessment | None,
+    context: ExportContext | None,
+) -> list[str]:
+    news = article.news
+    separator = tr("label_separator")
+    title = (
+        context.localized_titles.get(news.url, news.title)
+        if context is not None
+        else news.title
+    )
+    lines: list[str] = []
+
+    if context is None or context.include_title:
+        lines.extend([f"## {clean_ai_text(title)}", ""])
+
+    if context is None or context.include_published:
+        lines.extend(
+            [f"{tr('report_published')}{separator}{clean_ai_text(news.published)}", ""]
+        )
+
+    if context is None or context.include_source:
+        lines.extend(
+            [f"{tr('report_source')}{separator}{clean_ai_text(_source_name(article))}", ""]
+        )
+
+    if assessment is not None and (context is None or context.include_score):
+        lines.extend(
+            [
+                f"{tr('report_importance')}{separator}{_importance_value_label(assessment.importance)}",
+                f"{tr('report_reason')}{separator}{clean_ai_text(assessment.reason)}",
+                "",
+            ]
+        )
+
+    if summary is not None:
+        if summary.categories:
+            categories = tr("list_separator").join(
+                clean_ai_text(category)
+                for category in summary.categories
+                if clean_ai_text(category)
+            )
+            lines.extend(
+                [f"{tr('report_category')}{separator}{categories}", ""]
+            )
+
+        if context is None or (context.show_summary and context.include_summary):
+            lines.extend(
+                [
+                    f"{tr('report_ai_summary')}{separator}{clean_ai_text(summary.summary)}",
+                    "",
+                ]
+            )
+
+        if context is None or (context.show_keywords and context.include_keywords):
+            keywords = tr("list_separator").join(
+                clean_ai_text(keyword)
+                for keyword in summary.keywords
+                if clean_ai_text(keyword)
+            )
+            lines.extend([f"{tr('report_keywords')}{separator}{keywords}", ""])
+    elif context is None or context.include_summary:
+        lines.extend(
+            [f"{tr('report_summary')}{separator}{clean_ai_text(news.summary)}", ""]
+        )
+
+    if context is None or context.include_link:
+        lines.extend([f"{tr('report_link')}{separator}{news.url}", ""])
+
+    if (
+        (context is None or context.include_body)
+        and (context is None or context.body_mode != "none")
+        and (context is None or context.include_original)
+    ):
+        lines.extend(
+            [
+                f"{tr('report_body')}{separator}",
+                "",
+                clean_ai_text(article.body),
+                "",
+            ]
+        )
+
+    lines.extend(["---", ""])
+    return lines
 
 
 def _sort_articles(articles: list[Article]) -> list[Article]:
     dated_articles = []
 
     for article in articles:
-        published = _parse_published(article.news.published)
-
-        if published is None:
+        try:
+            published = parsedate_to_datetime(article.news.published)
+        except (TypeError, ValueError):
             return articles
 
         dated_articles.append((published, article))
 
     dated_articles.sort(key=lambda item: item[0], reverse=True)
-
     return [article for _, article in dated_articles]
-
-
-def _parse_published(published: str) -> datetime | None:
-    try:
-        return parsedate_to_datetime(published)
-    except (TypeError, ValueError):
-        return None
-
-
-def _stats_lines(
-    articles: list[Article],
-    ai_summaries: dict[str, AISummary],
-) -> list[str]:
-    lines = [f"新闻总数：{len(articles)}", "", "来源统计："]
-
-    for source, count in _source_stats(articles).items():
-        lines.append(f"{source}：{count}")
-
-    lines.extend(["", "分类统计："])
-
-    for category, count in _category_stats(articles, ai_summaries).items():
-        lines.append(f"{category}：{count}")
-
-    lines.extend(["", "---", ""])
-
-    return lines
-
-
-def _report_title(context: ExportContext | None) -> str:
-    if context is None:
-        return "SpaceWeekly"
-
-    return context.report_title or "SpaceWeekly"
-
-
-def _group_by_category(
-    articles: list[Article],
-    analyses: dict[str, NewsAnalysis],
-) -> dict[str, list[Article]]:
-    grouped: dict[str, list[Article]] = {}
-
-    for article in articles:
-        analysis = analyses.get(article.news.url)
-        categories = analysis.categories if analysis and analysis.categories else ["其它"]
-
-        for category in categories:
-            grouped.setdefault(category, []).append(article)
-
-    return grouped
 
 
 def _group_by_importance(
     articles: list[Article],
-    analyses: dict[str, NewsAnalysis],
+    assessments: dict[str, NewsAssessment],
 ) -> dict[str, list[Article]]:
-    grouped = {label: [] for _, label in IMPORTANCE_SECTIONS}
+    grouped: dict[str, list[Article]] = {}
 
     for article in articles:
-        analysis = analyses.get(article.news.url)
-        level = _importance_level(analysis)
-        label = _importance_label(level)
-        grouped.setdefault(label, []).append(article)
+        assessment = assessments.get(article.news.url)
+        level = assessment.importance if assessment is not None else "Medium"
+        grouped.setdefault(_importance_section(level), []).append(article)
 
-    return {label: items for label, items in grouped.items() if items}
+    return grouped
+
+
+def _importance_section(level: str) -> str:
+    labels = {
+        "High": f"🔥 {tr('report_section_high')}",
+        "Medium": f"📰 {tr('report_section_medium')}",
+        "Low": f"📌 {tr('report_section_low')}",
+    }
+    return labels.get(level, labels["Medium"])
+
+
+def _importance_value_label(level: str) -> str:
+    labels = {
+        "High": tr("importance_high"),
+        "Medium": tr("importance_medium"),
+        "Low": tr("importance_low"),
+    }
+    return labels.get(level, tr("importance_medium"))
 
 
 def _source_stats(articles: list[Article]) -> dict[str, int]:
@@ -173,175 +244,8 @@ def _source_name(article: Article) -> str:
     return article.news.source
 
 
-def _category_stats(
-    articles: list[Article],
-    ai_summaries: dict[str, AISummary],
-) -> dict[str, int]:
-    stats: dict[str, int] = {}
+def _report_title(context: ExportContext | None) -> str:
+    if context is None:
+        return "SpaceWeekly"
 
-    for article in articles:
-        ai_summary = ai_summaries.get(article.news.url)
-
-        if ai_summary is None or not ai_summary.category:
-            continue
-
-        for category in ai_summary.category.split("、"):
-            stats[category] = stats.get(category, 0) + 1
-
-    return stats
-
-
-def _category_lines(
-    category: str,
-    articles: list[Article],
-    ai_summaries: dict[str, AISummary],
-    context: ExportContext | None,
-    analyses: dict[str, NewsAnalysis],
-) -> list[str]:
-    lines = [f"# {category}", ""]
-
-    for article in articles:
-        lines.extend(
-            _article_lines(
-                article,
-                ai_summaries.get(article.news.url),
-                context,
-                analyses.get(article.news.url),
-            )
-        )
-
-    return lines
-
-
-def _article_lines(
-    article: Article,
-    ai_summary: AISummary | None,
-    context: ExportContext | None,
-    analysis: NewsAnalysis | None,
-) -> list[str]:
-    news = article.news
-    lines: list[str] = []
-
-    if context is None or context.include_title:
-        lines.extend([f"## {news.title}", ""])
-
-    if context is None or context.include_source:
-        lines.extend([f"来源：{_source_name(article)}", ""])
-
-    if context is None or context.include_published:
-        lines.extend([f"发布时间：{news.published}", ""])
-
-    if analysis is not None and (context is None or context.include_score):
-        lines.extend(
-            [
-                f"重要程度：{_importance_level(analysis)}",
-                f"原因：{analysis.reason}",
-                "",
-            ]
-        )
-
-    if context is None or context.include_link:
-        lines.extend([f"链接：{news.url}", ""])
-
-    if ai_summary is None:
-        lines.extend([f"摘要：{news.summary}", ""])
-    else:
-        lines.extend(_ai_summary_lines(ai_summary, context, analysis is None))
-
-    if context is None or context.include_body:
-        lines.extend(_body_lines(article, context))
-
-    lines.extend(["---", ""])
-
-    return lines
-
-
-def _ai_summary_lines(
-    ai_summary: AISummary,
-    context: ExportContext | None,
-    include_importance: bool,
-) -> list[str]:
-    lines: list[str] = []
-
-    if context is None or (context.show_summary and context.include_summary):
-        lines.extend([f"AI 摘要：{ai_summary.summary}", ""])
-
-    if context is None or (context.show_keywords and context.include_keywords):
-        lines.extend([f"关键词：{'、'.join(ai_summary.keywords)}", ""])
-
-    if context is None or (context.show_category and context.include_categories):
-        lines.extend([f"分类：{ai_summary.category}", ""])
-
-    if include_importance and (context is None or (context.show_importance and context.include_score)):
-        lines.extend([f"重要程度：{ai_summary.importance}", ""])
-
-    return lines
-
-
-def _body_lines(article: Article, context: ExportContext | None) -> list[str]:
-    translation = context.translations.get(article.news.url) if context else None
-
-    if context is not None and context.body_mode == "none":
-        return []
-
-    if context is not None and context.body_mode == "translated" and translation:
-        return ["正文：", "", translation, ""]
-
-    if context is not None and context.body_mode == "bilingual" and translation:
-        return ["正文：", "", _bilingual_body(article.body, translation), ""]
-
-    if context is not None and not context.include_original:
-        return []
-
-    return ["正文：", "", article.body, ""]
-
-
-def _bilingual_body(original: str, translation: str) -> str:
-    original_lines = [line for line in original.splitlines() if line.strip()]
-    translated_lines = [line for line in translation.splitlines() if line.strip()]
-    blocks = []
-
-    for index, original_line in enumerate(original_lines):
-        blocks.append(original_line)
-
-        if index < len(translated_lines):
-            blocks.append("")
-            blocks.append(translated_lines[index])
-
-        blocks.append("")
-
-    return "\n".join(blocks).strip()
-
-
-def _importance_level(analysis: NewsAnalysis | None) -> str:
-    if analysis is None:
-        return "Medium"
-
-    text = (analysis.importance or "").strip().lower()
-    aliases = {
-        "high": "High",
-        "高": "High",
-        "medium": "Medium",
-        "中": "Medium",
-        "low": "Low",
-        "低": "Low",
-    }
-
-    if text in aliases:
-        return aliases[text]
-
-    if analysis.score >= 80:
-        return "High"
-
-    if analysis.score >= 50:
-        return "Medium"
-
-    return "Low"
-
-
-def _importance_label(level: str) -> str:
-    for value, label in IMPORTANCE_SECTIONS:
-        if value == level:
-            return label
-
-    return "📰 推荐阅读"
+    return clean_ai_text(context.report_title) or "SpaceWeekly"

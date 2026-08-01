@@ -32,11 +32,7 @@ from i18n import tr
 
 PROMPT_LABELS = {
     "summary": "prompt.summary",
-    "translation": "prompt.translation",
-    "category": "prompt.category",
-    "score": "prompt.score",
     "filter": "prompt.filter",
-    "custom": "prompt.custom",
 }
 
 
@@ -61,9 +57,6 @@ class PromptStudioDialog(QDialog):
             self.original_settings,
             prompt_preset=self.preset_combo.currentText(),
             summary_prompt=self._prompt("summary"),
-            translation_prompt=self._prompt("translation"),
-            category_prompt=self._prompt("category"),
-            score_prompt=self._prompt("score"),
             filter_prompt=self._prompt("filter"),
         )
 
@@ -164,9 +157,6 @@ class PromptStudioDialog(QDialog):
         self.original_settings = replace(
             self.original_settings,
             summary_prompt=preset.summary,
-            translation_prompt=preset.translation,
-            category_prompt=preset.category,
-            score_prompt=preset.score,
             filter_prompt=preset.filter,
         )
         self._load_current_prompt()
@@ -188,11 +178,7 @@ class PromptStudioDialog(QDialog):
         preset = PromptPreset(
             name=self.preset_combo.currentText() or "Custom",
             summary=self.original_settings.summary_prompt,
-            translation=self.original_settings.translation_prompt,
-            category=self.original_settings.category_prompt,
-            score=self.original_settings.score_prompt,
             filter=self.original_settings.filter_prompt,
-            custom="",
         )
         save_preset(preset)
         QMessageBox.information(self, "Prompt Studio", tr("preset.saved"))
@@ -222,11 +208,7 @@ class PromptStudioDialog(QDialog):
             PromptPreset(
                 name=name,
                 summary=str(data.get("summary", "")),
-                translation=str(data.get("translation", "")),
-                category=str(data.get("category", "")),
-                score=str(data.get("score", "")),
                 filter=str(data.get("filter", "")),
-                custom=str(data.get("custom", "")),
             )
         )
         self.presets = load_presets()
@@ -250,11 +232,7 @@ class PromptStudioDialog(QDialog):
             PromptPreset(
                 name=self.preset_combo.currentText() or "Custom",
                 summary=self.original_settings.summary_prompt,
-                translation=self.original_settings.translation_prompt,
-                category=self.original_settings.category_prompt,
-                score=self.original_settings.score_prompt,
                 filter=self.original_settings.filter_prompt,
-                custom="",
             )
         )
         import shutil
@@ -267,9 +245,6 @@ class PromptStudioDialog(QDialog):
         self.original_settings = replace(
             self.original_settings,
             summary_prompt=preset.summary,
-            translation_prompt=preset.translation,
-            category_prompt=preset.category,
-            score_prompt=preset.score,
             filter_prompt=preset.filter,
         )
         self._load_current_prompt()
@@ -279,11 +254,10 @@ class PromptStudioDialog(QDialog):
         started_at = time.perf_counter()
         rendered = self._render_current_prompt()
         elapsed = round(time.perf_counter() - started_at, 3)
-        tokens = max(len(rendered) // 4, 1)
         QMessageBox.information(
             self,
             tr("prompt.test"),
-            tr("prompt.rendered", tokens=tokens, elapsed=elapsed, rendered=rendered[:1200]),
+            tr("prompt.rendered", elapsed=elapsed, rendered=rendered[:1200]),
         )
 
     def _copy_rendered_prompt(self) -> None:

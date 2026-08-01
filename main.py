@@ -2,6 +2,7 @@ import sys
 
 from dependency_check import dependency_message
 from dependency_check import missing_dependencies
+from logging_config import setup_logging
 
 
 def main() -> None:
@@ -14,6 +15,7 @@ def main() -> None:
 
     from services.weekly_report import generate_weekly
 
+    setup_logging()
     generate_weekly()
 
 

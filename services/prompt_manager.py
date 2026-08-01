@@ -7,7 +7,7 @@ from models.article import Article
 from resources import resource_path
 
 PROMPTS_DIR = resource_path("prompts")
-PROMPT_TYPES = ["summary", "translation", "category", "score", "filter", "custom"]
+PROMPT_TYPES = ["filter", "summary"]
 VARIABLES = ["title", "body", "summary", "source", "published", "url"]
 
 
@@ -15,11 +15,7 @@ VARIABLES = ["title", "body", "summary", "source", "published", "url"]
 class PromptPreset:
     name: str
     summary: str
-    translation: str
-    category: str
-    score: str
     filter: str
-    custom: str
 
 
 def load_presets() -> list[PromptPreset]:
@@ -55,7 +51,7 @@ def default_preset() -> PromptPreset:
         if preset.name.lower() == "default":
             return preset
 
-    return PromptPreset("Default", "", "", "", "", "", "")
+    return PromptPreset("Default", "", "")
 
 
 def find_preset(name: str) -> PromptPreset:
@@ -101,11 +97,7 @@ def _preset_from_dict(data: dict[str, object]) -> PromptPreset:
     return PromptPreset(
         name=str(data.get("name", "Custom")),
         summary=str(data.get("summary", "")),
-        translation=str(data.get("translation", "")),
-        category=str(data.get("category", "")),
-        score=str(data.get("score", "")),
         filter=str(data.get("filter", "")),
-        custom=str(data.get("custom", "")),
     )
 
 

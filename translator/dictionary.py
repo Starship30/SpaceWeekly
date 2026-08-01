@@ -6,7 +6,7 @@ from resources import bundled_resource_path
 from resources import resource_path
 
 DEFAULT_DICTIONARY = {
-    "Starlink Group": {"translation": "Starlink批次", "type": "mission"},
+    "Starlink Group": {"translation": "Starlink Group", "type": "mission"},
     "SpaceX": {"translation": "SpaceX", "type": "organization"},
     "Falcon 9": {"translation": "猎鹰9号", "type": "rocket"},
     "Starship": {"translation": "星舰", "type": "rocket"},
