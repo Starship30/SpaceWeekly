@@ -11,6 +11,7 @@ DEFAULT_DICTIONARY = {
     "Falcon 9": {"translation": "猎鹰9号", "type": "rocket"},
     "Starship": {"translation": "星舰", "type": "rocket"},
     "Soyuz": {"translation": "联盟号", "type": "rocket"},
+    "Gravity-1": {"translation": "引力-1", "type": "rocket"},
     "Low Earth Orbit": {"translation": "近地轨道", "type": "orbit"},
     "Sun-Synchronous Orbit": {"translation": "太阳同步轨道", "type": "orbit"},
     "Geostationary Transfer Orbit": {
@@ -150,6 +151,26 @@ def dictionary_replace(
         matched = matched or count > 0
 
     return translated, matched
+
+
+def exact_dictionary_translation(
+    term: str,
+    entries: dict[str, dict[str, str]] | None = None,
+) -> str:
+    """Return only a complete glossary match, never a substring replacement."""
+
+    original = str(term or "").strip()
+
+    if not original:
+        return ""
+
+    dictionary = entries if entries is not None else load_dictionary()
+
+    for source, entry in dictionary.items():
+        if source.casefold() == original.casefold():
+            return str(entry.get("translation", "")).strip()
+
+    return ""
 
 
 def pending_translation(term: str) -> str:

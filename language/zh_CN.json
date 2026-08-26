@@ -224,6 +224,7 @@
   "terms.enter.translation": "请先填写确认后的译文。",
   "terms.dictionary.hit": "已使用词典译文，不调用 AI。",
   "terms.ai.result": "AI 翻译结果",
+  "terms.ai.failed": "翻译失败（{error}），未保存任何结果。请检查日志和 API/搜索配置。",
   "terms.ai.confirm": "{source} -> {translation}\n\n是否确认并保存到词典？",
   "launch_name": "任务名称",
   "launch_time": "时间",

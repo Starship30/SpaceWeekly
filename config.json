@@ -45,5 +45,10 @@
   "launch_range": "next_week",
   "aerospace_translation_enabled": true,
   "aerospace_translation_mode": "hybrid",
-  "display_timezone": "Asia/Shanghai"
+  "display_timezone": "Asia/Shanghai",
+  "web_search_enabled": false,
+  "web_search_provider": "duckduckgo",
+  "web_search_api_key": "",
+  "web_search_timeout": 10,
+  "web_search_max_results": 5
 }

@@ -19,6 +19,10 @@
     "translation": "联盟号",
     "type": "rocket"
   },
+  "Gravity-1": {
+    "translation": "引力-1",
+    "type": "rocket"
+  },
   "Low Earth Orbit": {
     "translation": "近地轨道",
     "type": "orbit"

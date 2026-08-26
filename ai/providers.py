@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from urllib import error
@@ -9,6 +10,7 @@ from urllib import request
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 60
 RETRY_COUNT = 2
+logger = logging.getLogger(__name__)
 
 
 class APIRequestError(RuntimeError):
@@ -265,6 +267,11 @@ def _post_with_retry(
             if not retryable or attempt >= config.retry_count:
                 raise
 
+            logger.warning(
+                "[AI] llm=FAIL attempt=%s error=API_ERROR detail=%s",
+                attempt + 1,
+                exc,
+            )
             _cancelable_wait(cancel_token, min(30, 2 ** attempt + 1))
         except error.URLError as exc:
             last_error = exc
@@ -272,6 +279,11 @@ def _post_with_retry(
             if attempt >= config.retry_count:
                 break
 
+            logger.warning(
+                "[AI] llm=FAIL attempt=%s error=API_ERROR detail=%s",
+                attempt + 1,
+                exc,
+            )
             _cancelable_wait(cancel_token, min(10, 2 ** attempt))
 
     if isinstance(last_error, APIRequestError):

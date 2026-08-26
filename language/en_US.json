@@ -222,6 +222,7 @@
   "terms.enter.translation": "Enter the confirmed translation first.",
   "terms.dictionary.hit": "The dictionary translation was used without calling AI.",
   "terms.ai.result": "AI Translation Result",
+  "terms.ai.failed": "Translation failed ({error}); nothing was saved. Check the logs and API/search configuration.",
   "terms.ai.confirm": "{source} -> {translation}\n\nConfirm and save this translation to the dictionary?",
   "launch_name": "Launch Name",
   "launch_time": "Time",

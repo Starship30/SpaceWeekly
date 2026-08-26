@@ -116,10 +116,28 @@ class TermEditorDialog(QDialog):
 
         source = self._source(row)
         term_type = self._cell_text(row, 2) or "term"
-        result = Translator(settings=self.settings, mode="ai").translate_term(
+        translation_result = Translator(
+            settings=self.settings,
+            mode="ai",
+        ).translate_term_result(
             source,
             term_type,
         )
+
+        if not translation_result.success or translation_result.translation is None:
+            QMessageBox.warning(
+                self,
+                tr("terms.ai.result"),
+                tr(
+                    "terms.ai.failed",
+                    error=translation_result.error_code.value
+                    if translation_result.error_code
+                    else translation_result.error_message,
+                ),
+            )
+            return
+
+        result = translation_result.translation
         answer = QMessageBox.question(
             self,
             tr("terms.ai.result"),

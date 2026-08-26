@@ -55,6 +55,11 @@ class AppSettings:
     aerospace_translation_enabled: bool
     aerospace_translation_mode: str
     display_timezone: str
+    web_search_enabled: bool
+    web_search_provider: str
+    web_search_api_key: str
+    web_search_timeout: int
+    web_search_max_results: int
 
 
 def default_settings() -> AppSettings:
@@ -104,6 +109,11 @@ def default_settings() -> AppSettings:
         aerospace_translation_enabled=True,
         aerospace_translation_mode=config.TRANSLATION_MODE,
         display_timezone="Asia/Shanghai",
+        web_search_enabled=config.WEB_SEARCH_ENABLED,
+        web_search_provider=config.WEB_SEARCH_PROVIDER,
+        web_search_api_key=config.WEB_SEARCH_API_KEY,
+        web_search_timeout=config.WEB_SEARCH_TIMEOUT,
+        web_search_max_results=config.WEB_SEARCH_MAX_RESULTS,
     )
 
 
@@ -196,6 +206,29 @@ def load_settings() -> AppSettings:
                 "Europe/London",
                 "America/New_York",
             },
+        ),
+        web_search_enabled=bool(
+            data.get("web_search_enabled", defaults.web_search_enabled)
+        ),
+        web_search_provider=str(
+            data.get("web_search_provider") or defaults.web_search_provider
+        ),
+        web_search_api_key=str(
+            data.get("web_search_api_key") or defaults.web_search_api_key
+        ),
+        web_search_timeout=max(
+            1,
+            int(data.get("web_search_timeout") or defaults.web_search_timeout),
+        ),
+        web_search_max_results=max(
+            1,
+            min(
+                10,
+                int(
+                    data.get("web_search_max_results")
+                    or defaults.web_search_max_results
+                ),
+            ),
         ),
     )
 

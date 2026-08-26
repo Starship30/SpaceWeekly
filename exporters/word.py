@@ -133,7 +133,7 @@ def _translated_term(
     if translator is None or value in {"Not available", tr("not_available")}:
         return value
 
-    return translator.translate_term(value, term_type, allow_ai=False) or value
+    return translator.translate_term(value, term_type, allow_ai=True) or value
 
 
 def _translated_description(value: str, translator) -> str:

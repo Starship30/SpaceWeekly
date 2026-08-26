@@ -80,7 +80,10 @@ def workspace_path() -> Path | None:
 
     pointer = workspace_pointer_path()
 
-    if not pointer.exists():
+    try:
+        if not pointer.exists():
+            return None
+    except OSError:
         return None
 
     try:

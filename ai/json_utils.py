@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +17,10 @@ class AIResponseParseError(ValueError):
     """Raised after all safe JSON recovery strategies have failed."""
 
 
+class AIEmptyResponseError(AIResponseParseError):
+    """Raised when a provider returned no content at all."""
+
+
 def request_json(
     prompt: str,
     provider_config,
@@ -23,23 +28,31 @@ def request_json(
     module_name: str,
     cancel_token=None,
     validator=None,
+    max_attempts: int = 2,
+    retry_base_delay: float = 0.25,
 ) -> dict[str, object]:
-    """Request strict JSON and retry once only when parsing fails."""
+    """Request strict JSON with bounded parse/empty-response retries."""
 
     from ai.providers import complete
 
     raw_outputs: list[str] = []
     errors: list[str] = []
 
-    for attempt in range(2):
+    attempts = max(1, min(int(max_attempts), 4))
+    last_error: AIResponseParseError | None = None
+
+    for attempt in range(attempts):
         request_prompt = prompt
 
         if attempt:
+            previous_reason = errors[-1] if errors else "invalid JSON"
             request_prompt = (
                 prompt
-                + "\n\nYour previous response was not valid JSON. "
-                "Retry once. Return only the exact JSON object required by the "
-                "schema, with valid escaping and no Markdown code fence."
+                + "\n\nYour previous response was rejected for this reason: "
+                + previous_reason
+                + ". Correct that specific problem. Return only the exact JSON "
+                "object required by the schema, with valid escaping and no "
+                "Markdown code fence."
             )
 
         content = complete(
@@ -57,7 +70,27 @@ def request_json(
 
             return data
         except AIResponseParseError as exc:
+            last_error = exc
             errors.append(str(exc))
+            reason = (
+                "EMPTY_RESPONSE"
+                if isinstance(exc, AIEmptyResponseError)
+                else "INVALID_JSON"
+            )
+            label = "Translator" if module_name.startswith("translator") else "AI"
+            logger.warning(
+                "[%s] llm=FAIL attempt=%s error=%s detail=%s",
+                label,
+                attempt + 1,
+                reason,
+                exc,
+            )
+
+            if attempt + 1 < attempts:
+                _cancelable_wait(
+                    cancel_token,
+                    min(2.0, max(0.0, retry_base_delay) * (2 ** attempt)),
+                )
 
     raw_path = save_raw_response(
         raw_outputs,
@@ -66,15 +99,22 @@ def request_json(
         prompt=prompt,
         errors=errors,
     )
-    raise AIResponseParseError(
-        f"AI JSON 重试后仍解析失败；诊断已保存到 {raw_path}"
-    )
+    message = f"AI JSON 重试后仍解析失败；诊断已保存到 {raw_path}"
+
+    if isinstance(last_error, AIEmptyResponseError):
+        raise AIEmptyResponseError(message)
+
+    raise AIResponseParseError(message)
 
 
 def parse_json_object(content: str) -> dict[str, object]:
     """Strip wrappers, extract an object, and repair common JSON mistakes."""
 
     cleaned = _strip_code_fence(content)
+
+    if not cleaned:
+        raise AIEmptyResponseError("AI 返回内容为空")
+
     candidates = _repair_candidates(cleaned)
     last_error: json.JSONDecodeError | None = None
 
@@ -211,3 +251,16 @@ def _close_unterminated_json(text: str) -> str:
         repaired += "]" if stack.pop() == "[" else "}"
 
     return repaired
+
+
+def _cancelable_wait(cancel_token, seconds: float) -> None:
+    if seconds <= 0:
+        return
+
+    deadline = time.monotonic() + seconds
+
+    while time.monotonic() < deadline:
+        if cancel_token is not None:
+            cancel_token.check()
+
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
