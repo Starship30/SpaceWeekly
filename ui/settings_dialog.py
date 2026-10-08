@@ -1,12 +1,17 @@
 import sys
 from dataclasses import replace
 
+from PySide6.QtCore import QTimer
+from PySide6.QtCore import QSize
+from PySide6.QtCore import Qt
 from PySide6.QtCore import QDate
 from PySide6.QtCore import qVersion
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QButtonGroup
 from PySide6.QtWidgets import QCheckBox
-from PySide6.QtWidgets import QComboBox
+from ui.widgets.combo_box import RoundedComboBox as QComboBox
+from ui.widgets.model_worker import ModelWorker
+from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QDateEdit
 from PySide6.QtWidgets import QDialog
 from PySide6.QtWidgets import QDialogButtonBox
@@ -21,12 +26,14 @@ from PySide6.QtWidgets import QListWidget
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import QPushButton
 from PySide6.QtWidgets import QRadioButton
+from PySide6.QtWidgets import QScrollArea
 from PySide6.QtWidgets import QSpinBox
 from PySide6.QtWidgets import QStackedWidget
 from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
 
-from config import APP_VERSION
+from config import app_version
+from ai.configuration import PROVIDER_URLS
 from ai.configuration import provider_config_from_settings
 from ai.providers import test_connection
 from i18n import tr
@@ -48,7 +55,8 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.original_settings = settings
         self.setWindowTitle(tr("settings"))
-        self.resize(900, 660)
+        self.resize(1040, 760)
+        self.setMinimumSize(900, 680)
         self._set_icon()
         self._create_fields(settings)
         self._build_layout()
@@ -62,16 +70,16 @@ class SettingsDialog(QDialog):
             self.original_settings,
             deepseek_api_key=self.api_key_edit.text().strip(),
             deepseek_base_url=self.base_url_edit.text().strip(),
-            deepseek_model=self.model_edit.text().strip(),
+            deepseek_model=self.model_combo.currentText().strip(),
             model_candidates=list(
                 dict.fromkeys(
                     [
-                        self.model_edit.text().strip(),
-                        *self.original_settings.model_candidates,
+                        self.model_combo.currentText().strip(),
+                        *[self.model_combo.itemText(i) for i in range(self.model_combo.count())],
                     ]
                 )
             ),
-            ai_provider=self.provider_combo.currentText(),
+            ai_provider=str(self.provider_combo.currentData()),
             temperature=self.temperature_spin.value(),
             user_agent=self.user_agent_edit.text().strip(),
             request_timeout=self.timeout_spin.value(),
@@ -96,15 +104,27 @@ class SettingsDialog(QDialog):
             body_mode=str(body_mode),
             theme_mode=str(self.theme_mode_combo.currentData()),
             language=str(self.language_combo.currentData()),
-            date_mode=str(self.date_mode_combo.currentData()),
+            date_mode="custom" if self.news_custom_radio.isChecked() else str(self.date_mode_combo.currentData()),
             start_date=self.start_date_edit.date().toString("yyyy-MM-dd"),
             end_date=self.end_date_edit.date().toString("yyyy-MM-dd"),
             release_mode=self.release_mode_check.isChecked(),
-            launch_range=str(self.launch_range_combo.currentData()),
+            launch_range="custom" if self.launch_custom_radio.isChecked() else str(self.launch_range_combo.currentData()),
+            launch_start_date=self.launch_start_date_edit.date().toString("yyyy-MM-dd"),
+            launch_end_date=self.launch_end_date_edit.date().toString("yyyy-MM-dd"),
             aerospace_translation_enabled=self.aerospace_translation_check.isChecked(),
             aerospace_translation_mode=str(self.aerospace_translation_mode_combo.currentData()),
             display_timezone=str(self.display_timezone_combo.currentData()),
         )
+
+    def accept(self) -> None:
+        for custom, start, end in [
+            (self.news_custom_radio, self.start_date_edit, self.end_date_edit),
+            (self.launch_custom_radio, self.launch_start_date_edit, self.launch_end_date_edit),
+        ]:
+            if custom.isChecked() and start.date() > end.date():
+                QMessageBox.warning(self, tr("settings"), tr("date.range.invalid"))
+                return
+        super().accept()
 
     def _set_icon(self) -> None:
         icon_path = resource_path("assets", "sspo.ico")
@@ -116,12 +136,37 @@ class SettingsDialog(QDialog):
         self.api_key_edit = QLineEdit(settings.deepseek_api_key)
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(
-            ["DeepSeek", "OpenAI", "Gemini", "Claude", "OpenRouter", "SiliconFlow"]
-        )
-        self.provider_combo.setCurrentText(settings.ai_provider)
-        self.base_url_edit = QLineEdit(settings.deepseek_base_url)
-        self.model_edit = QLineEdit(settings.deepseek_model)
+        for name in PROVIDER_URLS:
+            self.provider_combo.addItem(name, name)
+        self.provider_combo.addItem(tr("provider.custom"), "Custom")
+        provider = settings.ai_provider
+        expected_url = PROVIDER_URLS.get(provider, "")
+        configured_url = settings.deepseek_base_url.rstrip("/")
+        if provider not in PROVIDER_URLS or (configured_url and configured_url not in {expected_url, expected_url + "/v1"}):
+            provider = "Custom"
+        self.provider_combo.setCurrentIndex(self.provider_combo.findData(provider))
+        self._current_provider = provider
+        self._provider_values = {}
+        self.base_url_edit = QLineEdit(configured_url or expected_url)
+        self.base_url_edit.setReadOnly(provider != "Custom")
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_combo.addItems(list(dict.fromkeys([settings.deepseek_model, *settings.model_candidates])))
+        self.model_combo.setCurrentText(settings.deepseek_model)
+        self.model_status = QLabel(tr("models.key.required"))
+        self.model_status.setObjectName("Eyebrow")
+        self.model_status.setWordWrap(True)
+        self._model_request = None
+        self._model_timer = QTimer(self)
+        self._model_timer.setSingleShot(True)
+        self._model_timer.setInterval(400)
+        self._model_timer.timeout.connect(self._discover_models)
+        self.provider_combo.currentIndexChanged.connect(self._provider_changed)
+        self.api_key_edit.editingFinished.connect(self._queue_model_discovery)
+        self.base_url_edit.editingFinished.connect(self._queue_model_discovery)
+        if settings.deepseek_api_key:
+            self._model_timer.start()
         self.temperature_spin = QDoubleSpinBox()
         self.temperature_spin.setRange(0, 2)
         self.temperature_spin.setSingleStep(0.1)
@@ -154,6 +199,14 @@ class SettingsDialog(QDialog):
         self.end_date_edit = self._date_edit(settings.end_date, 0)
         self.body_mode_group = QButtonGroup(self)
         self.launch_range_combo = self._launch_range_combo(settings.launch_range)
+        self.launch_start_date_edit = self._date_edit(settings.launch_start_date, -6)
+        self.launch_end_date_edit = self._date_edit(settings.launch_end_date, 0)
+        self.news_range_selector, self.news_custom_radio = self._range_selector(
+            settings.date_mode, self.date_mode_combo, self.start_date_edit, self.end_date_edit
+        )
+        self.launch_range_selector, self.launch_custom_radio = self._range_selector(
+            settings.launch_range, self.launch_range_combo, self.launch_start_date_edit, self.launch_end_date_edit
+        )
         self.display_timezone_combo = self._display_timezone_combo(
             settings.display_timezone
         )
@@ -173,9 +226,23 @@ class SettingsDialog(QDialog):
 
     def _build_layout(self) -> None:
         main = QVBoxLayout(self)
+        main.setContentsMargins(24, 22, 24, 22)
+        main.setSpacing(20)
+        header = QHBoxLayout()
+        title = QLabel(tr("settings"))
+        title.setObjectName("HeroTitle")
+        header.addWidget(title)
+        header.addStretch()
+        brand = QLabel(f"SPACEWEEKLY   /   v{app_version()}")
+        brand.setObjectName("Eyebrow")
+        header.addWidget(brand)
+        main.addLayout(header)
         content = QHBoxLayout()
         self.nav = QListWidget()
-        self.nav.setFixedWidth(150)
+        self.nav.setObjectName("SettingsNav")
+        self.nav.setFixedWidth(200)
+        self.nav.setSpacing(8)
+        content.setSpacing(22)
         self.stack = QStackedWidget()
 
         for title, page in [
@@ -183,13 +250,19 @@ class SettingsDialog(QDialog):
             (tr("ai"), self._ai_page()),
             (tr("prompt"), self._prompt_page()),
             (tr("export"), self._export_page()),
+            (tr("news.settings"), self._news_page()),
             (tr("launch.settings"), self._launch_page()),
             (tr("network"), self._network_page()),
             (tr("advanced"), self._advanced_page()),
             (tr("about"), self._about_page()),
         ]:
             self.nav.addItem(title)
-            self.stack.addWidget(page)
+            self.nav.item(self.nav.count() - 1).setSizeHint(QSize(160, 48))
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setWidget(page)
+            self.stack.addWidget(scroll)
 
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
@@ -200,6 +273,9 @@ class SettingsDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel
         )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("save"))
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("PrimaryButton")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("cancel"))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         main.addWidget(buttons)
@@ -219,7 +295,11 @@ class SettingsDialog(QDialog):
         layout.addRow(tr("provider"), self.provider_combo)
         layout.addRow("API Key", self.api_key_edit)
         layout.addRow("Base URL", self.base_url_edit)
-        layout.addRow(tr("model"), self.model_edit)
+        layout.addRow(tr("model"), self.model_combo)
+        refresh = QPushButton(tr("models.refresh"))
+        refresh.clicked.connect(self._queue_model_discovery)
+        layout.addRow(refresh)
+        layout.addRow(self.model_status)
         test_button = QPushButton(tr("test.connection"))
         test_button.clicked.connect(self._test_connection)
         layout.addRow(test_button)
@@ -272,7 +352,10 @@ class SettingsDialog(QDialog):
 
     def _launch_page(self) -> QWidget:
         page, layout = self._form_page(tr("launch.settings"))
-        layout.addRow(tr("launch.range"), self.launch_range_combo)
+        layout.addRow(tr("launch.range"), self.launch_range_selector)
+        layout.addRow(tr("date.preset"), self.launch_range_combo)
+        layout.addRow(tr("start.date"), self.launch_start_date_edit)
+        layout.addRow(tr("end.date"), self.launch_end_date_edit)
         layout.addRow(tr("display.timezone"), self.display_timezone_combo)
         layout.addRow(self.aerospace_translation_check)
         layout.addRow(
@@ -285,12 +368,17 @@ class SettingsDialog(QDialog):
 
         return page
 
+    def _news_page(self) -> QWidget:
+        page, layout = self._form_page(tr("news.settings"))
+        layout.addRow(tr("date.filter"), self.news_range_selector)
+        layout.addRow(tr("date.preset"), self.date_mode_combo)
+        layout.addRow(tr("start.date"), self.start_date_edit)
+        layout.addRow(tr("end.date"), self.end_date_edit)
+        return page
+
     def _advanced_page(self) -> QWidget:
         page, layout = self._form_page(tr("advanced"))
         layout.addRow(tr("advanced.params"), self._advanced_ai_row())
-        layout.addRow(tr("date.filter"), self.date_mode_combo)
-        layout.addRow(tr("start.date"), self.start_date_edit)
-        layout.addRow(tr("end.date"), self.end_date_edit)
         layout.addRow(self.release_mode_check)
         layout.addRow(self.debug_ai_check)
 
@@ -300,7 +388,7 @@ class SettingsDialog(QDialog):
         page, layout = self._form_page(tr("about"))
         layout.addRow(
             tr("version"),
-            QLabel(f"v{APP_VERSION} Professional Edition"),
+            QLabel(f"v{app_version()} Professional Edition"),
         )
         github_label = QLabel(
         '<a href="https://github.com/Starship30/SpaceWeekly/">https://github.com/Starship30/SpaceWeekly/</a>'
@@ -317,19 +405,29 @@ class SettingsDialog(QDialog):
     def _form_page(self, title: str) -> tuple[QWidget, QFormLayout]:
         page = QWidget()
         wrapper = QVBoxLayout(page)
+        wrapper.setContentsMargins(0, 0, 0, 0)
+        card = QWidget()
+        card.setObjectName("SettingsCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(26, 24, 26, 26)
+        card_layout.setSpacing(24)
         heading = QLabel(title)
         heading.setObjectName("PanelTitle")
-        wrapper.addWidget(heading)
+        card_layout.addWidget(heading)
         layout = QFormLayout()
-        layout.setHorizontalSpacing(16)
-        layout.setVerticalSpacing(12)
-        wrapper.addLayout(layout)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.setHorizontalSpacing(22)
+        layout.setVerticalSpacing(18)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        card_layout.addLayout(layout)
+        wrapper.addWidget(card)
         wrapper.addStretch(1)
-
         return page, layout
 
     def _advanced_ai_row(self) -> QWidget:
         widget = QWidget()
+        widget.setProperty("formGroup", True)
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -340,6 +438,7 @@ class SettingsDialog(QDialog):
 
     def _body_mode_row(self) -> QWidget:
         widget = QWidget()
+        widget.setProperty("formGroup", True)
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -360,6 +459,7 @@ class SettingsDialog(QDialog):
 
     def _checks_grid(self, checks: list[QCheckBox]) -> QWidget:
         widget = QWidget()
+        widget.setProperty("formGroup", True)
         layout = QGridLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(12)
@@ -372,6 +472,7 @@ class SettingsDialog(QDialog):
 
     def _path_row(self, edit: QLineEdit, directory: bool) -> QWidget:
         widget = QWidget()
+        widget.setProperty("formGroup", True)
         button = QPushButton(tr("select"))
         button.clicked.connect(lambda: self._select_path(edit, directory))
         layout = QHBoxLayout(widget)
@@ -381,6 +482,30 @@ class SettingsDialog(QDialog):
 
         return widget
 
+    def _range_selector(self, mode: str, combo: QComboBox, start: QDateEdit, end: QDateEdit):
+        widget = QWidget()
+        widget.setProperty("formGroup", True)
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        preset = QRadioButton(tr("date.preset"))
+        custom = QRadioButton(tr("date.custom"))
+        preset.setProperty("rangeOption", True)
+        custom.setProperty("rangeOption", True)
+        layout.setSpacing(6)
+        layout.addWidget(preset)
+        layout.addWidget(custom)
+
+        def update(custom_selected: bool) -> None:
+            combo.setEnabled(not custom_selected)
+            start.setEnabled(custom_selected)
+            end.setEnabled(custom_selected)
+
+        custom.toggled.connect(update)
+        custom.setChecked(mode == "custom")
+        preset.setChecked(mode != "custom")
+        update(mode == "custom")
+        return widget, custom
+
     def _date_mode_combo(self, current: str) -> QComboBox:
         combo = QComboBox()
 
@@ -389,7 +514,6 @@ class SettingsDialog(QDialog):
             (tr("last3"), "last_3_days"),
             (tr("last7"), "last_7_days"),
             (tr("last30"), "last_30_days"),
-            (tr("custom"), "custom"),
         ]:
             combo.addItem(label, mode)
 
@@ -418,6 +542,8 @@ class SettingsDialog(QDialog):
         combo = QComboBox()
         combo.addItem(tr("launch.range.past"), "past_week")
         combo.addItem(tr("launch.range.next"), "next_week")
+        combo.addItem(tr("launch.range.past30"), "past_30_days")
+        combo.addItem(tr("launch.range.next30"), "next_30_days")
         combo.addItem(tr("disabled"), "disabled")
         combo.setCurrentIndex(max(combo.findData(current), 0))
 
@@ -451,6 +577,7 @@ class SettingsDialog(QDialog):
     def _date_edit(self, value: str, fallback_days: int) -> QDateEdit:
         edit = QDateEdit()
         edit.setCalendarPopup(True)
+        edit.setDisplayFormat("yyyy-MM-dd")
         parsed = QDate.fromString(value, "yyyy-MM-dd")
         edit.setDate(parsed if parsed.isValid() else QDate.currentDate().addDays(fallback_days))
 
@@ -496,6 +623,59 @@ class SettingsDialog(QDialog):
             self.output_edit.setText(self.original_settings.output_dir)
             QMessageBox.information(self, "SpaceWeekly", tr("workspace.updated"))
 
+    def _provider_changed(self) -> None:
+        self._provider_values[self._current_provider] = (
+            self.api_key_edit.text(), self.base_url_edit.text(),
+            self.model_combo.currentText(),
+            [self.model_combo.itemText(i) for i in range(self.model_combo.count())],
+        )
+        provider = str(self.provider_combo.currentData())
+        key, url, model, models = self._provider_values.get(provider, ("", PROVIDER_URLS.get(provider, ""), "", []))
+        self._current_provider = provider
+        self.api_key_edit.setText(key)
+        self.base_url_edit.setText(url)
+        self.base_url_edit.setReadOnly(provider != "Custom")
+        self.model_combo.clear()
+        self.model_combo.addItems(models)
+        self.model_combo.setCurrentText(model)
+        self._model_request = None
+        self._queue_model_discovery()
+
+    def _queue_model_discovery(self) -> None:
+        self._model_request = None
+        self.model_status.setText(tr("models.loading") if self.api_key_edit.text().strip() else tr("models.key.required"))
+        self._model_timer.start()
+
+    def _discover_models(self) -> None:
+        if not self.api_key_edit.text().strip() or not self.base_url_edit.text().strip():
+            self.model_status.setText(tr("models.key.required"))
+            return
+        config = provider_config_from_settings(self.settings())
+        self._model_request = config
+        self.model_status.setText(tr("models.loading"))
+        # QApplication owns in-flight workers so closing the dialog cannot destroy a running thread.
+        worker = ModelWorker(config, QApplication.instance())
+        QApplication.instance().aboutToQuit.connect(worker.wait)
+        worker.result_ready.connect(self._models_discovered)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _models_discovered(self, config, models, error: str) -> None:
+        if config != self._model_request or config != provider_config_from_settings(self.settings()):
+            return
+        if error:
+            self.model_status.setText(tr("models.failed", error=error))
+            return
+        if not models:
+            self.model_status.setText(tr("models.manual"))
+            return
+        selected = self.model_combo.currentText()
+        self.model_combo.clear()
+        self.model_combo.addItems(list(dict.fromkeys(models)))
+        if selected in models:
+            self.model_combo.setCurrentText(selected)
+        self.model_status.setText(tr("models.found", count=len(models)))
+
     def _test_connection(self) -> None:
         if not self.api_key_edit.text().strip():
             QMessageBox.warning(self, tr("test.connection"), tr("missing.api.key"))
@@ -521,7 +701,9 @@ class SettingsDialog(QDialog):
             )
             return
 
-        self.model_edit.setText(result.model)
+        self.model_combo.clear()
+        self.model_combo.addItems(result.available_models or [result.model])
+        self.model_combo.setCurrentText(result.model)
         models_source = (
             tr("connection.models.api")
             if result.models_api_supported

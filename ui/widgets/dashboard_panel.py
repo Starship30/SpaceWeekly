@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from dataclasses import replace
 
 from PySide6.QtCore import Signal
@@ -32,6 +33,8 @@ class DashboardPanel(QWidget):
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("WorkspacePanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._build_ui()
         self.apply_settings(settings)
 

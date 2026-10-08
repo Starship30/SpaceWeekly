@@ -5,6 +5,7 @@ from string import Template
 
 from PySide6.QtCore import QObject
 from PySide6.QtCore import Signal
+from PySide6.QtGui import QFont
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
@@ -27,22 +28,23 @@ class Theme:
 LIGHT_THEME = Theme(
     name=THEME_LIGHT,
     colors={
-        "window_bg": "#f6f8fa",
+        "window_bg": "#f3f5fa",
+        "sidebar_bg": "#e7edf8",
         "panel_bg": "#ffffff",
         "panel_alt_bg": "#f8fafc",
         "control_bg": "#ffffff",
         "control_hover_bg": "#f3f4f6",
         "control_pressed_bg": "#eaeef2",
-        "border": "#d8dee4",
-        "border_strong": "#d0d7de",
-        "text": "#24292f",
-        "text_muted": "#57606a",
+        "border": "#e3e8f2",
+        "border_strong": "#d6deeb",
+        "text": "#17233c",
+        "text_muted": "#65738b",
         "text_subtle": "#6e7781",
-        "accent": "#0969da",
-        "accent_hover": "#0759b8",
-        "primary": "#2da44e",
-        "primary_hover": "#2c974b",
-        "primary_border": "#2a9146",
+        "accent": "#4468e8",
+        "accent_hover": "#3656c8",
+        "primary": "#4468e8",
+        "primary_hover": "#3656c8",
+        "primary_border": "#4468e8",
         "on_primary": "#ffffff",
         "selection_text": "#ffffff",
         "input_shadow": "#eef2f6",
@@ -56,10 +58,11 @@ LIGHT_THEME = Theme(
 DARK_THEME = Theme(
     name=THEME_DARK,
     colors={
-        "window_bg": "#1f242b",
-        "panel_bg": "#262c34",
-        "panel_alt_bg": "#20262e",
-        "control_bg": "#2b323b",
+        "window_bg": "#121827",
+        "sidebar_bg": "#0e1422",
+        "panel_bg": "#1a2235",
+        "panel_alt_bg": "#161e30",
+        "control_bg": "#202a40",
         "control_hover_bg": "#343c46",
         "control_pressed_bg": "#3c4652",
         "border": "#3a434f",
@@ -69,10 +72,10 @@ DARK_THEME = Theme(
         "text_subtle": "#8d99a6",
         "accent": "#5b9dff",
         "accent_hover": "#75adff",
-        "primary": "#3fb950",
-        "primary_hover": "#46c85a",
-        "primary_border": "#329a44",
-        "on_primary": "#07130a",
+        "primary": "#7094ff",
+        "primary_hover": "#8aabff",
+        "primary_border": "#7094ff",
+        "on_primary": "#10172a",
         "selection_text": "#0d1117",
         "input_shadow": "#1c2229",
         "log_info": "#79b8ff",
@@ -91,6 +94,11 @@ class ThemeManager(QObject):
     def __init__(self, app: QApplication) -> None:
         super().__init__(app)
         self.app = app
+        self.app.setStyle("Fusion")
+        font = QFont()
+        font.setFamilies(["Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei"])
+        font.setPointSize(10)
+        self.app.setFont(font)
         self.mode = THEME_SYSTEM
         self.theme = LIGHT_THEME
         self._connect_system_theme()
@@ -151,7 +159,10 @@ class ThemeManager(QObject):
             return ""
 
         return Template(style_path.read_text(encoding="utf-8")).safe_substitute(
-            theme.colors
+            **theme.colors,
+            check_icon=resource_path("assets", "ui-check.svg").as_posix(),
+            arrow_down=resource_path("assets", "ui-arrow-down.svg").as_posix(),
+            arrow_up=resource_path("assets", "ui-arrow-up.svg").as_posix(),
         )
 
     def _apply_palette(self, theme: Theme) -> None:

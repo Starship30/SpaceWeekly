@@ -52,6 +52,8 @@ class AppSettings:
     theme_mode: str
     language: str
     launch_range: str
+    launch_start_date: str
+    launch_end_date: str
     aerospace_translation_enabled: bool
     aerospace_translation_mode: str
     display_timezone: str
@@ -106,6 +108,8 @@ def default_settings() -> AppSettings:
         theme_mode="system",
         language="zh_CN",
         launch_range="next_week",
+        launch_start_date="",
+        launch_end_date="",
         aerospace_translation_enabled=True,
         aerospace_translation_mode=config.TRANSLATION_MODE,
         display_timezone="Asia/Shanghai",
@@ -183,8 +187,10 @@ def load_settings() -> AppSettings:
         launch_range=_choice_setting(
             data.get("launch_range"),
             defaults.launch_range,
-            {"past_week", "next_week", "disabled"},
+            {"past_week", "next_week", "past_30_days", "next_30_days", "custom", "disabled"},
         ),
+        launch_start_date=str(data.get("launch_start_date") or defaults.launch_start_date),
+        launch_end_date=str(data.get("launch_end_date") or defaults.launch_end_date),
         aerospace_translation_enabled=bool(
             data.get(
                 "aerospace_translation_enabled",

@@ -2,14 +2,26 @@
 
 from pathlib import Path
 import sys
+import os
+from importlib.util import find_spec
 
 ROOT = Path.cwd()
+# Resolve native dependencies from Python/Qt and Windows, never unrelated PATH tools.
+os.environ["PATH"] = os.pathsep.join([
+    sys.base_prefix,
+    str(Path(sys.base_prefix) / "DLLs"),
+    str(Path(find_spec("PySide6").origin).parent),
+    str(Path(find_spec("shiboken6").origin).parent),
+    str(Path(os.environ["SystemRoot"]) / "System32"),
+    os.environ["SystemRoot"],
+])
 PYTHON_DLLS = Path(sys.base_prefix) / "DLLs"
 # Prevent PyInstaller from resolving Python's _ssl dependencies to an
 # incompatible OpenSSL installation found earlier on PATH (for example Git).
 SSL_BINARIES = [
-    (str(PYTHON_DLLS / "libssl-3-x64.dll"), "."),
-    (str(PYTHON_DLLS / "libcrypto-3-x64.dll"), "."),
+    (str(dll), ".")
+    for pattern in ("libssl*.dll", "libcrypto*.dll")
+    for dll in PYTHON_DLLS.glob(pattern)
 ]
 
 datas = [

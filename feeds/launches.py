@@ -1,9 +1,11 @@
 import json
 import logging
+from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 
+from utils.time import _timezone
 from models.article import Article
 from models.news import News
 
@@ -20,14 +22,19 @@ def get_launches(
     limit: int = 10,
     timeout: int | None = None,
     launch_range: str = "next_week",
+    start_date: str = "",
+    end_date: str = "",
+    display_timezone: str = "Asia/Shanghai",
 ) -> list[Article]:
-    """Fetch launches in the configured seven-day range as Article objects."""
+    """Fetch launches in the configured date range as Article objects."""
     global _LAST_ERROR, _LAST_FIRST_LAUNCH
     _LAST_ERROR = ""
     _LAST_FIRST_LAUNCH = None
 
     if launch_range == "disabled":
         return []
+
+    params = _query_params(limit, launch_range, start_date=start_date, end_date=end_date, display_timezone=display_timezone)
 
     try:
         import requests
@@ -39,7 +46,7 @@ def get_launches(
     try:
         response = requests.get(
             API_URL,
-            params=_query_params(limit, launch_range),
+            params=params,
             timeout=timeout or DEFAULT_TIMEOUT,
         )
         response.raise_for_status()
@@ -79,13 +86,30 @@ def _query_params(
     limit: int,
     launch_range: str,
     now: datetime | None = None,
+    *,
+    start_date: str = "",
+    end_date: str = "",
+    display_timezone: str = "Asia/Shanghai",
 ) -> dict[str, object]:
     current = now or datetime.now(timezone.utc)
 
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
 
-    if launch_range == "past_week":
+    if launch_range == "custom":
+        first, last = date.fromisoformat(start_date), date.fromisoformat(end_date)
+        if first > last:
+            raise ValueError("Start date must not be after end date")
+        tz = _timezone(display_timezone)
+        start = datetime.combine(first, datetime.min.time(), tzinfo=tz)
+        end = datetime.combine(last + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+        return {"limit": limit, "net__gte": _api_datetime(start), "net__lt": _api_datetime(end), "ordering": "net"}
+
+    if launch_range == "past_30_days":
+        start, end, ordering = current - timedelta(days=30), current, "-net"
+    elif launch_range == "next_30_days":
+        start, end, ordering = current, current + timedelta(days=30), "net"
+    elif launch_range == "past_week":
         start, end, ordering = current - timedelta(days=7), current, "-net"
     else:
         start, end, ordering = current, current + timedelta(days=7), "net"

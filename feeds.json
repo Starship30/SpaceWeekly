@@ -21,7 +21,7 @@
   },
   {
     "name": "Space.com",
-    "rss": "https://www.space.com/feeds.xml",
+    "rss": "https://www.space.com/news",
     "enabled": true
   }
 ]

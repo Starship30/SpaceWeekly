@@ -3,7 +3,7 @@ from dataclasses import replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QComboBox
+from ui.widgets.combo_box import RoundedComboBox as QComboBox
 from PySide6.QtWidgets import QDialog
 from PySide6.QtWidgets import QDialogButtonBox
 from PySide6.QtWidgets import QFileDialog

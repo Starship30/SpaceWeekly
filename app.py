@@ -31,6 +31,20 @@ def main() -> None:
     else:
         logging.getLogger(__name__).warning("Icon not found %s", icon_path)
 
+    if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+        from pathlib import Path
+        from ui.settings_dialog import SettingsDialog
+        from services.settings import default_settings
+        from ui.theme import ThemeManager
+        from config import app_version
+        ThemeManager(app).apply("light")
+        dialog = SettingsDialog(default_settings())
+        dialog.show()
+        app.processEvents()
+        dialog.close()
+        Path(sys.argv[2]).write_text(app_version(), encoding="utf-8")
+        return
+
     if needs_first_run_wizard():
         wizard = FirstRunWizard()
 

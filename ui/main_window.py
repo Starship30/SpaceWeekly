@@ -9,11 +9,13 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QMainWindow
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import QSplitter
 
-from config import APP_VERSION
+from config import app_version
 from feeds.launches import get_launches
 from feeds.launches import last_error as launch_last_error
 from i18n import set_language
@@ -62,15 +64,15 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_ui()
         self._connect_logging()
-        logger.info("SpaceWeekly v%s", APP_VERSION)
+        logger.info("SpaceWeekly v%s", app_version())
         logger.info("AI Model: %s", self.settings.deepseek_model or "-")
         self._update_context()
         self.status_bar.show_state(tr("ready"))
         QTimer.singleShot(0, self._start_startup_checks)
 
     def _setup_window(self) -> None:
-        self.setWindowTitle(tr("app.title"))
-        self.resize(1280, 760)
+        self.setWindowTitle(tr("app.title", version=app_version()))
+        self.resize(1440, 860)
         self.setMinimumSize(1080, 650)
         icon_path = resource_path("assets", "sspo.ico")
 
@@ -97,8 +99,13 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 2)
-        splitter.setSizes([320, 430, 530])
-        self.setCentralWidget(splitter)
+        splitter.setSizes([320, 420, 660])
+        splitter.setHandleWidth(14)
+        workspace = QWidget()
+        layout = QVBoxLayout(workspace)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.addWidget(splitter)
+        self.setCentralWidget(workspace)
         self.status_bar = SpaceStatusBar(self)
         self.setStatusBar(self.status_bar)
 
@@ -131,7 +138,9 @@ class MainWindow(QMainWindow):
 
     def _test_launch_data(self) -> None:
         settings = load_settings()
-        launches = get_launches(limit=5, launch_range=settings.launch_range)
+        launches = get_launches(limit=5, launch_range=settings.launch_range,
+                         start_date=settings.launch_start_date, end_date=settings.launch_end_date,
+                         display_timezone=settings.display_timezone)
         error = launch_last_error()
         translator = (
             Translator(settings=settings, mode="dictionary")
@@ -188,7 +197,7 @@ class MainWindow(QMainWindow):
             save_settings(dialog.settings())
             self.settings = load_settings()
             set_language(self.settings.language)
-            self.setWindowTitle(tr("app.title"))
+            self.setWindowTitle(tr("app.title", version=app_version()))
             if previous_language != self.settings.language:
                 self._rebuild_translated_ui()
             else:
@@ -246,9 +255,9 @@ class MainWindow(QMainWindow):
             {author}: RMS-TITANIC
             </p>
             """.format(
-                title=tr("app.title"),
+                title=tr("app.title", version=app_version()),
                 version=tr("version"),
-                app_version=APP_VERSION,
+                app_version=app_version(),
                 github=tr("github.link"),
                 python_version=tr("python.version"),
                 python=sys.version.split()[0],

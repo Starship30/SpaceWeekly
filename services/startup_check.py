@@ -48,7 +48,9 @@ def _launch_check(settings: AppSettings) -> StartupCheck:
         from feeds.launches import last_error
 
         if settings.launch_range != "disabled":
-            get_launches(limit=1, launch_range=settings.launch_range)
+            get_launches(limit=1, launch_range=settings.launch_range,
+                         start_date=settings.launch_start_date, end_date=settings.launch_end_date,
+                         display_timezone=settings.display_timezone)
             failure = last_error()
 
             if failure:

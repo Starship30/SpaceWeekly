@@ -3,20 +3,21 @@ import re
 from dataclasses import replace
 from datetime import date
 from datetime import timedelta
-from email.utils import parsedate_to_datetime
 
 from ai.configuration import provider_config_from_settings
 from ai.deepseek import assess_importance
 from ai.deepseek import generate_content
 from ai.deepseek import translate_titles
 from ai.providers import test_connection
-from config import APP_VERSION
+from config import app_version
 from database.sqlite import initialize_database
 from database.sqlite import save_article
 from downloader.client import download
 from exporters.markdown import export_markdown
 from exporters.word import export_word
 from feeds.launches import get_launches
+from feeds.spacecom import SpaceComError
+from feeds.spacecom import SpaceComWebProvider
 from i18n import set_language
 from logging_config import setup_logging
 from models.ai_summary import AISummary
@@ -34,6 +35,7 @@ from services.settings import AppSettings
 from services.settings import apply_settings
 from services.settings import load_settings
 from translator.translator import Translator
+from utils.time import parse_datetime
 from utils.text import clean_ai_text
 
 logger = logging.getLogger(__name__)
@@ -55,7 +57,7 @@ def generate_weekly(
     set_language(settings.language)
     logger.setLevel(logging.DEBUG if not settings.release_mode else logging.NOTSET)
     apply_settings(settings)
-    logger.info("SpaceWeekly v%s", APP_VERSION)
+    logger.info("SpaceWeekly v%s", app_version())
     logger.info("AI Model: %s", settings.deepseek_model or "-")
 
     if _ai_configured(settings):
@@ -69,15 +71,34 @@ def generate_weekly(
     markdown_enabled = _enabled(export_markdown_enabled, settings.export_markdown)
     word_enabled = _enabled(export_word_enabled, settings.export_word)
     date_range = _date_range(settings)
+    web_feeds = [feed for feed in selected_feeds if SpaceComWebProvider.handles(feed.rss)]
     rss_news, launch_articles = get_news(
-        selected_feeds,
+        [feed for feed in selected_feeds if feed not in web_feeds],
         settings.rss_limit,
         settings.launch_range,
         token,
+        launch_start_date=settings.launch_start_date,
+        launch_end_date=settings.launch_end_date,
+        display_timezone=settings.display_timezone,
+        news_date_range=date_range,
     )
     news_list = _filter_news(rss_news, date_range)
     logger.info("基础解析文章数量：%s", len(news_list))
     parsed_articles = _parse_articles(news_list, token)
+    if web_feeds:
+        token.check()
+        try:
+            web_articles = SpaceComWebProvider().fetch(
+                limit=settings.rss_limit, cancel_check=token.check, date_range=date_range,
+            )
+        except SpaceComError as exc:
+            logger.warning("[Space.com] Provider failed, continuing other sources: %s", exc)
+            web_articles = []
+        token.check()
+        parsed_articles.extend(
+            article for article in web_articles
+            if _filter_news([article.news], date_range)
+        )
     logger.info("基础解析完成：%s 篇", len(parsed_articles))
 
     preset = find_preset(settings.prompt_preset)
@@ -147,15 +168,20 @@ def get_news(
     rss_limit: int = 0,
     launch_range: str = "next_week",
     cancel_token: CancellationToken | None = None,
+    *,
+    launch_start_date: str = "",
+    launch_end_date: str = "",
+    display_timezone: str = "Asia/Shanghai",
+    news_date_range: tuple[str, str] | None = None,
 ) -> tuple[list[News], list[Article]]:
     """Fetch RSS news and Launch Library 2 launch articles."""
 
     logger.info("抓取 RSS")
     token = cancel_token or CancellationToken()
     token.check()
-    rss_news = _fetch_news(feeds, rss_limit, token)
+    rss_news = _fetch_news(feeds, rss_limit, token, news_date_range)
     token.check()
-    launch_articles = _fetch_launch_articles(launch_range, token)
+    launch_articles = _fetch_launch_articles(launch_range, token, launch_start_date, launch_end_date, display_timezone)
     token.check()
     return rss_news, launch_articles
 
@@ -164,6 +190,7 @@ def _fetch_news(
     feeds: list[FeedSource],
     rss_limit: int,
     cancel_token: CancellationToken,
+    date_range: tuple[str, str] | None = None,
 ) -> list[News]:
     import feedparser
 
@@ -173,16 +200,21 @@ def _fetch_news(
         cancel_token.check()
         parsed_feed = feedparser.parse(feed.rss)
         cancel_token.check()
-        entries = parsed_feed.entries[:rss_limit] if rss_limit > 0 else parsed_feed.entries
-
-        for item in entries:
+        retained = 0
+        for item in parsed_feed.entries:
             cancel_token.check()
             url = str(getattr(item, "link", ""))
 
             if not url or url.endswith(".js"):
                 continue
 
-            news_list.append(_news_from_feed_item(feed, item, url))
+            news = _news_from_feed_item(feed, item, url)
+            if not _filter_news([news], date_range):
+                continue
+            news_list.append(news)
+            retained += 1
+            if rss_limit > 0 and retained >= rss_limit:
+                break
 
     return news_list
 
@@ -190,6 +222,9 @@ def _fetch_news(
 def _fetch_launch_articles(
     launch_range: str,
     cancel_token: CancellationToken,
+    start_date: str = "",
+    end_date: str = "",
+    display_timezone: str = "Asia/Shanghai",
 ) -> list[Article]:
     if launch_range == "disabled":
         return []
@@ -198,7 +233,7 @@ def _fetch_launch_articles(
     cancel_token.check()
 
     try:
-        launches = get_launches(launch_range=launch_range)
+        launches = get_launches(launch_range=launch_range, start_date=start_date, end_date=end_date, display_timezone=display_timezone)
         cancel_token.check()
         return launches
     except TaskCancelledError:
@@ -218,7 +253,7 @@ def _news_from_feed_item(feed: FeedSource, item, url: str) -> News:
     return News(
         source=feed.name,
         title=str(getattr(item, "title", "")),
-        published=str(getattr(item, "published", "")),
+        published=str(getattr(item, "published", "") or getattr(item, "updated", "")),
         summary=summary,
         url=url,
     )
@@ -587,14 +622,15 @@ def _date_range(settings: AppSettings) -> tuple[str, str] | None:
     if settings.date_mode == "last_30_days":
         return (today - timedelta(days=29)).isoformat(), today.isoformat()
 
-    if settings.date_mode == "custom" and settings.start_date and settings.end_date:
-        return settings.start_date, settings.end_date
+    if settings.date_mode == "custom":
+        start, end = date.fromisoformat(settings.start_date), date.fromisoformat(settings.end_date)
+        if start > end:
+            raise ValueError("Start date must not be after end date")
+        return start.isoformat(), end.isoformat()
 
     return None
 
 
 def _published_date(published: str) -> date | None:
-    try:
-        return parsedate_to_datetime(published).date()
-    except (TypeError, ValueError):
-        return None
+    parsed = parse_datetime(published)
+    return parsed.date() if parsed is not None else None

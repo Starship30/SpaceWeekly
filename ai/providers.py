@@ -84,6 +84,13 @@ def complete_with_metadata(
         "temperature": config.temperature,
         "response_format": {"type": "json_object"},
     }
+    if config.provider == "Claude":
+        payload = {
+            "model": config.model,
+            "system": _system_prompt(config.language),
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 4096,
+        }
     started_at = time.perf_counter()
     response_data = _post_with_retry(payload, config, cancel_token=cancel_token)
     _check_cancel(cancel_token)
@@ -103,9 +110,10 @@ def list_models(config: ProviderConfig, cancel_token=None) -> list[str] | None:
 
     _validate_credentials(config)
     _check_cancel(cancel_token)
+    # ponytail: Claude catalog fits one 1000-item page; paginate if has_more becomes true.
     api_request = request.Request(
-        config.base_url.rstrip("/") + "/models",
-        headers={"Authorization": f"Bearer {config.api_key}"},
+        config.base_url.rstrip("/") + ("/models?limit=1000" if config.provider == "Claude" else "/models"),
+        headers=_request_headers(config),
         method="GET",
     )
 
@@ -295,12 +303,9 @@ def _post_with_retry(
 
 def _post(payload: dict[str, object], config: ProviderConfig) -> dict[str, object]:
     api_request = request.Request(
-        config.base_url.rstrip("/") + "/chat/completions",
+        config.base_url.rstrip("/") + ("/messages" if config.provider == "Claude" else "/chat/completions"),
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {config.api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=_request_headers(config),
         method="POST",
     )
     timeout = config.read_timeout or config.timeout
@@ -331,7 +336,15 @@ def _post(payload: dict[str, object], config: ProviderConfig) -> dict[str, objec
     return data
 
 
+def _request_headers(config: ProviderConfig) -> dict[str, str]:
+    if config.provider == "Claude":
+        return {"x-api-key": config.api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+    return {"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"}
+
+
 def _extract_content(data: dict[str, object]) -> str:
+    if isinstance(data.get("content"), list):
+        return "".join(block.get("text", "") for block in data["content"] if isinstance(block, dict) and block.get("type") == "text")
     choices = data.get("choices")
 
     if not isinstance(choices, list) or not choices:

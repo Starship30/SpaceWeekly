@@ -122,6 +122,11 @@ def _launch_section_title(launch_range: str) -> str:
     if launch_range == "past_week":
         return tr("launch_section_past")
 
+    if launch_range == "custom":
+        return tr("launch_section_custom")
+    if launch_range == "past_30_days":
+        return tr("launch_section_past30")
+
     return tr("launch_section_next")
 
 

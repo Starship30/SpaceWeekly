@@ -1,5 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QGridLayout
 from PySide6.QtWidgets import QHBoxLayout
 from PySide6.QtWidgets import QLabel
 from PySide6.QtWidgets import QListWidget
@@ -21,8 +22,10 @@ class FeedPanel(QWidget):
 
     def __init__(self, feeds: list[FeedSource], parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("WorkspacePanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.feeds = list(feeds)
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(300)
         self.setMaximumWidth(360)
         self._build_ui()
         self.refresh()
@@ -64,18 +67,18 @@ class FeedPanel(QWidget):
         self.feed_list.setSpacing(3)
         self.feed_list.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.feed_list, 1)
-        buttons = QHBoxLayout()
+        buttons = QGridLayout()
         buttons.setSpacing(8)
 
-        for label, handler in [
+        for index, (label, handler) in enumerate([
             (tr("add"), self._add_feed),
             (tr("edit"), self._edit_feed),
             (tr("delete"), self._delete_feed),
             (tr("save"), self._save_clicked),
-        ]:
+        ]):
             button = QPushButton(label)
             button.clicked.connect(handler)
-            buttons.addWidget(button)
+            buttons.addWidget(button, index // 2, index % 2)
 
         layout.addLayout(buttons)
 

@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout
 from PySide6.QtWidgets import QLabel
 from PySide6.QtWidgets import QPushButton
@@ -13,6 +14,8 @@ class LogPanel(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("WorkspacePanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._build_ui()
 
     def append_html(self, message: str) -> None:

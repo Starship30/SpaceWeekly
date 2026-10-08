@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QLabel
 from PySide6.QtWidgets import QStyle
 from PySide6.QtWidgets import QToolBar
 
@@ -25,6 +26,10 @@ class AppToolBar(QToolBar):
         self.setFloatable(False)
         self.setIconSize(self.iconSize())
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        brand = QLabel("SPACEWEEKLY")
+        brand.setObjectName("BrandTitle")
+        self.addWidget(brand)
+        self.addSeparator()
         self._build_actions()
 
     def set_running(self, running: bool) -> None:
@@ -98,7 +103,7 @@ class AppToolBar(QToolBar):
         icon: QStyle.StandardPixmap,
         handler,
     ) -> QAction:
-        action = QAction(self.style().standardIcon(icon), text, self)
+        action = QAction(text, self)
         action.triggered.connect(handler)
 
         return action

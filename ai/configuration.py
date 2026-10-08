@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from ai.providers import ProviderConfig
 
+PROVIDER_URLS = {
+    "DeepSeek": "https://api.deepseek.com",
+    "OpenAI": "https://api.openai.com/v1",
+    "Gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "Claude": "https://api.anthropic.com/v1",
+    "OpenRouter": "https://openrouter.ai/api/v1",
+    "SiliconFlow": "https://api.siliconflow.cn/v1",
+}
+
 
 def provider_config_from_settings(
     settings,
