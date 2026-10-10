@@ -15,6 +15,7 @@ class AppToolBar(QToolBar):
     stop_requested = Signal()
     settings_requested = Signal()
     prompt_studio_requested = Signal()
+    video_cards_requested = Signal()
     output_requested = Signal()
     refresh_requested = Signal()
     launch_test_requested = Signal()
@@ -65,6 +66,13 @@ class AppToolBar(QToolBar):
                 tr("prompt.studio"),
                 QStyle.StandardPixmap.SP_FileDialogContentsView,
                 self.prompt_studio_requested.emit,
+            )
+        )
+        self.addAction(
+            self._action(
+                tr("video.toolbar"),
+                QStyle.StandardPixmap.SP_MediaPlay,
+                self.video_cards_requested.emit,
             )
         )
         self.addAction(

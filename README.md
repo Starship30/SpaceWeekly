@@ -1,12 +1,25 @@
 # SpaceWeekly
 
-[Download](https://github.com/Starship30/SpaceWeekly/releases/download/v2.4.6/SpaceWeekly.exe)
+[Download V3.0](https://github.com/Starship30/SpaceWeekly/releases/download/v3.0/SpaceWeekly.exe)
 
-SpaceWeekly v2.4.6 AI Workflow Edition is an AI Aerospace News Workspace.
+SpaceWeekly V3.0 AI Workflow Edition is an AI Aerospace News Workspace.
 
-It collects aerospace RSS feeds and Space.com web news, parses articles, screens news importance,
+It collects aerospace RSS feeds, Space.com web news and Spaceflight News API articles, screens news importance,
 generates content only for retained items, and exports Word/Markdown weekly
 reports.
+
+## V3.0
+
+- Spaceflight News API joins RSS and Space.com, with date pagination, per-source unlimited/custom limits and duplicate detection before AI processing
+- The main dashboard contains independent news and launch date ranges; either collection can be disabled
+- Optional UTF-8 JSON content snapshots reuse the current generation results, with localized titles, summaries, stable IDs and launch records
+- Video assets creates news strips, launch cards and a minimal opener with custom name, date range, logo and saved template
+- Selected news and launches are numbered independently without gaps; chronological order is configurable
+- Opener logos support static motion presets, looping GIFs and videos that hold their final frame
+- Windows EXE includes the desktop video modules and Pillow; video encoding still requires FFmpeg and ffprobe on PATH
+- The UXP panel is an experimental offline option. Premiere 26/27 MOGRT text integration is **not host-verified**; the failed CEP experiment remains stopped and is not installed by this release
+
+See [V3.0 release notes and validation limits](RELEASE_NOTES.md).
 
 ## v2.4.6 Modern Workspace and Date Ranges
 
@@ -19,6 +32,7 @@ reports.
 - Packaged startup check: `python tests/check_packaged.py`
 - Application version is maintained in `config.app_version()`
 - News supports recent-day presets or an explicit date range
+- News and launch date ranges are available in the main dashboard and stay in sync with Settings; either collection can be disabled independently
 - Launches support past/next week, past/next 30 days, or an explicit date range
 - Custom launch dates include the full end day in the selected display timezone
 - Quick range and custom dates are mutually exclusive; reversed dates are rejected
@@ -73,7 +87,7 @@ python app.py
 
 ## Main Features
 
-- RSS feed manager
+- RSS, web and API news source manager
 - Dedicated parsers plus Generic Parser fallback
 - Two-stage AI workflow: importance screening, then retained-news summaries
 - Prompt Studio for editing, testing, importing, and exporting prompt presets
@@ -82,6 +96,83 @@ python app.py
 - Original or no-body export modes
 - Custom report title
 - Word and Markdown export
+
+## News sources, limits and duplicates
+
+Spaceflight News API v4 is available as a news source at
+`https://api.spaceflightnewsapi.net/v4/articles/`. Enable **Spaceflight News API**
+in the source list (new sources are initially unchecked). For an older workspace,
+add that address through **Add → Source URL (RSS/API)**. The source uses the
+official [date filters and pagination](https://api.spaceflightnewsapi.net/v4/docs/)
+to collect the selected publication-date range, including the whole end day in UTC.
+Original site names, dates, titles, summaries and URLs are retained; the API summary
+is used as article content without additional detail-page requests.
+
+The dashboard's **News limit per source** offers **Custom count** (including values
+above 500) or **Unlimited within dates**. Existing positive `rss_limit` settings
+retain their meaning; `0` now persists as unlimited. Each source filters dates
+before applying the limit; merged results are deduplicated before AI screening.
+Space.com also follows pages within the date range when unlimited is selected.
+RSS can only supply entries present in its feed, so unlimited cannot recover
+history the source does not expose. AI screening still applies after collection.
+
+**Detect and skip duplicate news** defaults to enabled. It retains the first
+article and logs later matches by normalized URL (ignoring tracking parameters,
+fragments and HTTP/HTTPS/www variations), or the same normalized title across
+different sources on the same UTC publication day. Meaningful URL query parameters,
+numbers in titles and different publication days remain distinct. Original Article
+objects and URLs are unchanged. This is per-run deduplication, without a database
+migration or extra AI requests; different headlines covering the same event are
+not automatically merged. The checkbox can disable this step.
+
+An API first-page failure is isolated from other sources. A later-page network or
+JSON failure preserves collected articles and logs that the result is incomplete.
+Cancellation is checked between requests and articles; invalid pagination hosts
+and repeated pagination URLs are rejected.
+
+Validation: `python -m unittest discover -s tests -p "test_*.py"`.
+Real API/JSON and Qt offscreen checks are recorded in
+`output/news-source-trial/verification.json`: the 2026-10-01 through 2026-10-10
+range returned 146 articles across two HTTP requests and produced a UTF-8 content
+snapshot, without AI calls or SQLite changes. V3.0 packages the updated desktop app.
+
+## Premiere offline MVP
+
+Enable **Premiere content package (JSON)** in Settings → Export (off by default)
+to export this run's selected news, localized titles and AI summaries into the
+workspace output directory. The same JSON and UXP panel serve PR 26.x and PR 27.x;
+actual MOGRT text support is checked on the first card. Neither host path has been
+verified in Premiere here. See [installation, template contract, version limits
+and manual acceptance](plugins/premiere-uxp/README.md).
+
+## Offline video cards (experimental)
+
+Generate transparent lower-third news strips (one-line title and scrolling summary)
+and launch-task side panels from the same offline JSON without a Premiere plugin.
+PNG MOV is the compact lossless default; ProRes 4444 remains available.
+News and launches have separate display numbering and chronological sorting
+(oldest first by default, newest first available in the UI or with `--order desc`). Launch text is localized
+during content-package generation using the existing aerospace translator;
+offline import/rendering does not call AI. Launch time labels omit UTC offsets.
+Only checked items receive consecutive numbers within each type; unchecked
+items have no number. Selection changes update preview numbers and invalidate
+cached cards whose visible number changed, while retaining older MOV files.
+Run `python -m tools.video_cards <snapshot.premiere.json> --seconds 16`
+from the repository root. Unchanged cards are skipped; `--item-id` regenerates a
+single stable news ID. Requires Pillow, FFmpeg/ffprobe and the local template fonts.
+See [setup, regeneration, limits and Premiere acceptance](tools/VIDEO_CARDS.md).
+The toolbar provides a **Video assets** window to select news/launches, edit text,
+play a preview and generate MOV files in the background. **Create opener** makes
+a minimal 7-second MP4 with a custom name, subtitle, local logo and date range
+(latest 7 days by default). Logos can be static images, animated GIFs or local
+MP4/MOV/M4V videos. Static logos offer fade, smooth zoom or rise presets; dynamic
+logos keep their own animation. Videos play once and hold their last frame;
+GIFs loop. The editor previews the first
+frame; view the exported opener for playback. **Save template** restores name,
+subtitle, logo and static motion; dates are set afresh each time. See the
+[desktop workflow and validation scope](tools/VIDEO_CARDS_UI.md).
+Prior ProRes news-strip and launch MOV playback has been confirmed by the user
+in Premiere; the new PNG MOV and opener still need a host check.
 
 ## Prompt Studio
 

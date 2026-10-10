@@ -1,4 +1,5 @@
 import json
+import hashlib
 import logging
 from datetime import date
 from datetime import datetime
@@ -25,6 +26,7 @@ def get_launches(
     start_date: str = "",
     end_date: str = "",
     display_timezone: str = "Asia/Shanghai",
+    video_items: list[dict] | None = None,
 ) -> list[Article]:
     """Fetch launches in the configured date range as Article objects."""
     global _LAST_ERROR, _LAST_FIRST_LAUNCH
@@ -69,7 +71,30 @@ def get_launches(
     )
     _debug_launch_payload(results)
 
+    if video_items is not None:
+        video_items.extend(_launch_video_item(item, display_timezone) for item in results if isinstance(item, dict))
     return [_launch_to_article(item) for item in results if isinstance(item, dict)]
+
+
+def _launch_video_item(item, display_timezone):
+    url = _launch_url(item)
+    identifier = _text(item.get('id'))
+    net = _text(item.get('net'))
+    display_time = net
+    try:
+        parsed = datetime.fromisoformat(net.replace('Z', '+00:00'))
+        if parsed.tzinfo is not None:
+            local = parsed.astimezone(_timezone(display_timezone))
+            display_time = local.strftime('%Y/%m/%d %H:%M')
+    except ValueError:
+        pass
+    return dict(id='ll2:'+identifier if identifier else 'launch-url-sha256:'+hashlib.sha256(url.encode()).hexdigest(),
+        title=_nested_text(item, 'rocket', 'configuration', 'full_name') or _text(item.get('name')) or 'Upcoming Launch',
+        summary=_nested_text(item, 'mission', 'name') or _text(item.get('name')),
+        source=SOURCE, published=net, url=url, categories=[], video_type='launch',
+        launch=dict(orbit=_nested_text(item, 'mission', 'orbit', 'name'),
+                    payload=_nested_text(item, 'mission', 'name'), site=_nested_text(item, 'pad', 'name'),
+                    time=display_time, display_timezone=display_timezone))
 
 
 def last_error() -> str:

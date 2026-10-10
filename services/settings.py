@@ -62,6 +62,8 @@ class AppSettings:
     web_search_api_key: str
     web_search_timeout: int
     web_search_max_results: int
+    export_premiere: bool = False
+    news_dedup_enabled: bool = True
 
 
 def default_settings() -> AppSettings:
@@ -152,12 +154,14 @@ def load_settings() -> AppSettings:
         output_dir=str(data.get("output_dir") or defaults.output_dir),
         export_markdown=bool(data.get("export_markdown", defaults.export_markdown)),
         export_word=bool(data.get("export_word", defaults.export_word)),
+        export_premiere=bool(data.get("export_premiere", defaults.export_premiere)),
         export_sqlite=bool(data.get("export_sqlite", defaults.export_sqlite)),
         body_mode=_body_mode_setting(data.get("body_mode"), defaults.body_mode),
         date_mode=str(data.get("date_mode") or defaults.date_mode),
         start_date=str(data.get("start_date") or defaults.start_date),
         end_date=str(data.get("end_date") or defaults.end_date),
-        rss_limit=int(data.get("rss_limit") or defaults.rss_limit),
+        rss_limit=_news_limit_setting(data.get("rss_limit", defaults.rss_limit), defaults.rss_limit),
+        news_dedup_enabled=bool(data.get("news_dedup_enabled", defaults.news_dedup_enabled)),
         news_filter_level=_news_filter_level(data, defaults.news_filter_level),
         report_title=str(data.get("report_title") or defaults.report_title),
         ai_provider=str(data.get("ai_provider") or defaults.ai_provider),
@@ -252,6 +256,16 @@ def save_settings(settings: AppSettings) -> None:
     )
 
 
+def _news_limit_setting(value, fallback: int) -> int:
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            return fallback
+        limit = int(value)
+        return limit if 0 <= limit <= 2_147_483_647 else fallback
+    except ValueError:
+        return fallback
+
+
 def _news_filter_level(data: dict[str, object], fallback: str) -> str:
     configured = str(data.get("news_filter_level") or "")
 
@@ -322,6 +336,7 @@ def apply_settings(settings: AppSettings) -> None:
     import downloader.client as client
     import exporters.markdown as markdown
     import exporters.word as word
+    import exporters.premiere as premiere
 
     providers.CONNECT_TIMEOUT = settings.connect_timeout
     providers.READ_TIMEOUT = settings.read_timeout
@@ -329,6 +344,7 @@ def apply_settings(settings: AppSettings) -> None:
     sqlite.DATABASE_PATH = Path(settings.sqlite_path)
     markdown.OUTPUT_DIR = Path(settings.output_dir)
     word.OUTPUT_DIR = Path(settings.output_dir)
+    premiere.OUTPUT_DIR = Path(settings.output_dir)
     client.headers["User-Agent"] = settings.user_agent
     client.REQUEST_TIMEOUT = settings.request_timeout
     client.CONNECT_TIMEOUT = settings.connect_timeout

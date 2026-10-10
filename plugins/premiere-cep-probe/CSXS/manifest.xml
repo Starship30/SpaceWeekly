@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExtensionManifest Version="7.0" ExtensionBundleId="spaceweekly.cep.singlecard" ExtensionBundleVersion="0.0.1" ExtensionBundleName="SpaceWeekly Single Card Probe">
+  <!-- A fresh panel ID avoids restoring the old experimental workspace instance. -->
+  <ExtensionList><Extension Id="spaceweekly.cep.singlecard.manual" Version="0.0.1"/></ExtensionList>
+  <ExecutionEnvironment>
+    <HostList><Host Name="PPRO" Version="[26.3,26.4)"/></HostList>
+    <LocaleList><Locale Code="All"/></LocaleList>
+    <RequiredRuntimeList><RequiredRuntime Name="CSXS" Version="12.0"/></RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList><Extension Id="spaceweekly.cep.singlecard.manual"><DispatchInfo>
+    <Resources><MainPath>./index.html</MainPath><CEFCommandLine><Parameter>--enable-nodejs</Parameter><Parameter>--mixed-context</Parameter></CEFCommandLine></Resources>
+    <Lifecycle><AutoVisible>false</AutoVisible></Lifecycle>
+    <UI><Type>Panel</Type><Menu>SpaceWeekly 单卡验证（实验）</Menu><Geometry><Size><Width>460</Width><Height>650</Height></Size></Geometry></UI>
+  </DispatchInfo></Extension></DispatchInfoList>
+</ExtensionManifest>

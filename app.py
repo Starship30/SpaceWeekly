@@ -37,12 +37,25 @@ def main() -> None:
         from services.settings import default_settings
         from ui.theme import ThemeManager
         from config import app_version
+        from ui.widgets.dashboard_panel import DashboardPanel
+        from ui.video_cards_dialog import VideoCardsDialog
+        from ui.video_intro_dialog import VideoIntroDialog
+        from tools import video_intro
         ThemeManager(app).apply("light")
         dialog = SettingsDialog(default_settings())
         dialog.show()
         app.processEvents()
         dialog.close()
-        Path(sys.argv[2]).write_text(app_version(), encoding="utf-8")
+        marker = Path(sys.argv[2])
+        dashboard = DashboardPanel(default_settings())
+        cards = VideoCardsDialog(str(marker.parent))
+        intro = VideoIntroDialog(str(marker.parent))
+        frame = video_intro.render_frame(video_intro.prepare("2026-01-01", end_date="2026-01-07"), 3)
+        assert frame.size == (1920, 1080), "Packaged opener renderer failed"
+        dashboard.close()
+        cards.close()
+        intro.close()
+        marker.write_text(app_version(), encoding="utf-8")
         return
 
     if needs_first_run_wizard():

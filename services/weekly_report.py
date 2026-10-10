@@ -3,6 +3,9 @@ import re
 from dataclasses import replace
 from datetime import date
 from datetime import timedelta
+from datetime import timezone
+import unicodedata
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ai.configuration import provider_config_from_settings
 from ai.deepseek import assess_importance
@@ -15,9 +18,11 @@ from database.sqlite import save_article
 from downloader.client import download
 from exporters.markdown import export_markdown
 from exporters.word import export_word
+from exporters.premiere import export_premiere
 from feeds.launches import get_launches
 from feeds.spacecom import SpaceComError
 from feeds.spacecom import SpaceComWebProvider
+from feeds.spaceflightnews import SpaceflightNewsError, SpaceflightNewsProvider
 from i18n import set_language
 from logging_config import setup_logging
 from models.ai_summary import AISummary
@@ -67,13 +72,19 @@ def generate_weekly(
         token.check()
         initialize_database()
 
-    selected_feeds = feeds if feeds is not None else enabled_feeds()
+    if settings.date_mode == "disabled":
+        selected_feeds = []
+        logger.info("新闻采集已停用，仅按发射记录设置生成内容")
+    else:
+        selected_feeds = feeds if feeds is not None else enabled_feeds()
     markdown_enabled = _enabled(export_markdown_enabled, settings.export_markdown)
     word_enabled = _enabled(export_word_enabled, settings.export_word)
     date_range = _date_range(settings)
     web_feeds = [feed for feed in selected_feeds if SpaceComWebProvider.handles(feed.rss)]
+    api_feeds = [feed for feed in selected_feeds if SpaceflightNewsProvider.handles(feed.rss)]
+    launch_video_items = [] if settings.export_premiere else None
     rss_news, launch_articles = get_news(
-        [feed for feed in selected_feeds if feed not in web_feeds],
+        [feed for feed in selected_feeds if feed not in web_feeds and feed not in api_feeds],
         settings.rss_limit,
         settings.launch_range,
         token,
@@ -81,6 +92,7 @@ def generate_weekly(
         launch_end_date=settings.launch_end_date,
         display_timezone=settings.display_timezone,
         news_date_range=date_range,
+        **({"launch_video_items": launch_video_items} if launch_video_items is not None else {}),
     )
     news_list = _filter_news(rss_news, date_range)
     logger.info("基础解析文章数量：%s", len(news_list))
@@ -99,6 +111,19 @@ def generate_weekly(
             article for article in web_articles
             if _filter_news([article.news], date_range)
         )
+    if api_feeds:
+        token.check()
+        try:
+            api_articles = SpaceflightNewsProvider().fetch(
+                limit=settings.rss_limit, cancel_check=token.check, date_range=date_range,
+            )
+        except SpaceflightNewsError as exc:
+            logger.warning("[SNAPI] Provider failed, continuing other sources: %s", exc)
+            api_articles = []
+        token.check()
+        parsed_articles.extend(api_articles)
+    if settings.news_dedup_enabled:
+        parsed_articles = _deduplicate_articles(parsed_articles, token)
     logger.info("基础解析完成：%s 篇", len(parsed_articles))
 
     preset = find_preset(settings.prompt_preset)
@@ -159,6 +184,7 @@ def generate_weekly(
         markdown_enabled,
         word_enabled,
         token,
+        launch_video_items=launch_video_items,
     )
     return selected_articles
 
@@ -173,6 +199,7 @@ def get_news(
     launch_end_date: str = "",
     display_timezone: str = "Asia/Shanghai",
     news_date_range: tuple[str, str] | None = None,
+    launch_video_items: list[dict] | None = None,
 ) -> tuple[list[News], list[Article]]:
     """Fetch RSS news and Launch Library 2 launch articles."""
 
@@ -181,7 +208,8 @@ def get_news(
     token.check()
     rss_news = _fetch_news(feeds, rss_limit, token, news_date_range)
     token.check()
-    launch_articles = _fetch_launch_articles(launch_range, token, launch_start_date, launch_end_date, display_timezone)
+    launch_articles = _fetch_launch_articles(launch_range, token, launch_start_date, launch_end_date, display_timezone,
+        **({"video_items": launch_video_items} if launch_video_items is not None else {}))
     token.check()
     return rss_news, launch_articles
 
@@ -225,6 +253,7 @@ def _fetch_launch_articles(
     start_date: str = "",
     end_date: str = "",
     display_timezone: str = "Asia/Shanghai",
+    video_items: list[dict] | None = None,
 ) -> list[Article]:
     if launch_range == "disabled":
         return []
@@ -233,7 +262,8 @@ def _fetch_launch_articles(
     cancel_token.check()
 
     try:
-        launches = get_launches(launch_range=launch_range, start_date=start_date, end_date=end_date, display_timezone=display_timezone)
+        launches = get_launches(launch_range=launch_range, start_date=start_date, end_date=end_date, display_timezone=display_timezone,
+            **({"video_items": video_items} if video_items is not None else {}))
         cancel_token.check()
         return launches
     except TaskCancelledError:
@@ -275,6 +305,50 @@ def _filter_news(
             and start_date <= published_date.isoformat() <= end_date
         )
     ]
+
+
+def _deduplicate_articles(articles: list[Article], cancel_token: CancellationToken) -> list[Article]:
+    retained, by_url, by_title = [], {}, {}
+    for article in articles:
+        cancel_token.check()
+        news = article.news
+        url = _news_url_key(news.url)
+        title = unicodedata.normalize("NFKC", news.title).casefold()
+        title = re.sub(r"[\W_]+", " ", title).strip()
+        published = parse_datetime(news.published)
+        title_key = (title, published.astimezone(timezone.utc).date()) if title and published else None
+        previous = by_url.get(url) if url else None
+        title_match = by_title.get(title_key)
+        if previous is None and title_match is not None and title_match.news.source != news.source:
+            previous = title_match
+        if previous is not None:
+            if url:
+                by_url[url] = previous
+            logger.info("重复新闻跳过：%s %s；保留 %s %s", news.source, news.url, previous.news.source, previous.news.url)
+            continue
+        retained.append(article)
+        if url:
+            by_url[url] = article
+        if title_key:
+            by_title.setdefault(title_key, article)
+    logger.info("新闻去重：%s → %s 篇", len(articles), len(retained))
+    return retained
+
+
+def _news_url_key(url: str) -> str:
+    try:
+        parsed = urlsplit(url.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return url.strip()
+        host = parsed.hostname.lower().removeprefix("www.")
+        if parsed.port is not None and parsed.port != (443 if parsed.scheme == "https" else 80):
+            host += f":{parsed.port}"
+        query = urlencode(sorted((key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if not key.lower().startswith("utm_") and key.lower() not in
+            {"fbclid", "gclid", "dclid", "msclkid", "mc_cid", "mc_eid"}))
+        return urlunsplit(("https", host, parsed.path.rstrip("/"), query, ""))
+    except ValueError:
+        return url.strip()
 
 
 def _parse_articles(
@@ -538,6 +612,7 @@ def _export_reports(
     markdown_enabled: bool,
     word_enabled: bool,
     cancel_token: CancellationToken,
+    launch_video_items: list[dict] | None = None,
 ) -> None:
     cancel_token.check()
 
@@ -551,6 +626,8 @@ def _export_reports(
         )
         logger.info("导出 Markdown")
 
+    launch_translator = (_launch_term_translator(settings, cancel_token) if word_enabled or
+                         settings.export_premiere and launch_video_items else None)
     if word_enabled:
         cancel_token.check()
         export_word(
@@ -561,10 +638,45 @@ def _export_reports(
             launches=launch_articles,
             launch_range=settings.launch_range,
             launch_timezone=settings.display_timezone,
-            launch_term_translator=_launch_term_translator(settings, cancel_token),
+            launch_term_translator=launch_translator,
             cancel_check=cancel_token.check,
         )
         logger.info("导出 Word")
+
+    if settings.export_premiere:
+        cancel_token.check()
+        if launch_video_items is not None:
+            launch_video_items = _localize_launch_video_items(launch_video_items, launch_translator, cancel_token)
+        path = export_premiere(
+            articles, summaries, context, settings.language,
+            cancel_check=cancel_token.check,
+            **({"launches": launch_video_items} if launch_video_items is not None else {}),
+        )
+        logger.info("导出 Premiere 内容包：%s", path)
+
+
+def _localize_launch_video_items(items, translator, cancel_token):
+    cancel_token.check()
+    if translator is None:
+        return items
+    localized = []
+    for item in items:
+        cancel_token.check()
+        record = dict(item, launch=dict(item['launch']))
+        for target, key, term_type in [(record, 'title', 'rocket'), (record, 'summary', 'mission'),
+                (record['launch'], 'orbit', 'orbit'), (record['launch'], 'payload', 'mission'),
+                (record['launch'], 'site', 'location')]:
+            cancel_token.check()
+            original = target[key]
+            if not re.search(r'[A-Za-z]', original) or re.search(r'[\u3400-\u9fff]', original):
+                continue
+            result = translator.translate_term_result(original, term_type, allow_ai=True)
+            cancel_token.check()
+            target[key] = result.translation if result.success and result.translation else original
+            if not result.success:
+                logger.warning('发射视频翻译回退：%s %s；%s', item['id'], key, result.error_message)
+        localized.append(record)
+    return localized
 
 
 def _launch_term_translator(

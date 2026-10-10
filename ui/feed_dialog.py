@@ -9,13 +9,14 @@ from services.feed_manager import FeedSource
 
 
 class FeedDialog(QDialog):
-    """Dialog for adding or editing one RSS feed source."""
+    """Dialog for adding or editing an RSS or supported API source."""
 
     def __init__(self, feed: FeedSource | None = None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("feed.dialog.title"))
         self.name_edit = QLineEdit(feed.name if feed else "")
         self.rss_edit = QLineEdit(feed.rss if feed else "")
+        self.rss_edit.setPlaceholderText(tr("feed.url_hint"))
         self.enabled_check = QCheckBox()
         self.enabled_check.setChecked(feed.enabled if feed else True)
 
@@ -28,7 +29,7 @@ class FeedDialog(QDialog):
 
         layout = QFormLayout(self)
         layout.addRow(tr("name"), self.name_edit)
-        layout.addRow("RSS", self.rss_edit)
+        layout.addRow(tr("feed.url"), self.rss_edit)
         layout.addRow(tr("enabled"), self.enabled_check)
         layout.addRow(buttons)
 

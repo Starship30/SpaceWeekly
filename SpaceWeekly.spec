@@ -25,6 +25,7 @@ SSL_BINARIES = [
 ]
 
 datas = [
+    (str(ROOT / "tools" / "video_cards.py"), "tools"),
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "language"), "language"),
     (str(ROOT / "prompts"), "prompts"),

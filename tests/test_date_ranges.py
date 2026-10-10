@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 os.environ['APPDATA'] = tempfile.mkdtemp(prefix='spaceweekly-review-')
 import unittest
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from feeds.launches import _query_params
 from services.settings import default_settings, load_settings, save_settings
 from services.weekly_report import _date_range, get_news
 from ui.settings_dialog import SettingsDialog
+from ui.widgets.dashboard_panel import DashboardPanel
 from i18n import tr, set_language
 
 class DateRangeTests(unittest.TestCase):
@@ -93,6 +95,123 @@ class DateRangeTests(unittest.TestCase):
                 end.setDate(QDate(2026, 10, 8))
             self.assertEqual(dialog.settings().launch_start_date, '2026-10-08')
             dialog.close()
+
+    def test_dashboard_ranges_roundtrip_and_independent_disable(self):
+        app = QApplication.instance() or QApplication([])
+        base = replace(default_settings(), deepseek_api_key="", date_mode="custom",
+                       start_date="2026-10-01", end_date="2026-10-08",
+                       launch_range="custom", launch_start_date="2026-10-02",
+                       launch_end_date="2026-10-09")
+        for language in ["zh_CN", "en_US"]:
+            set_language(language)
+            panel = DashboardPanel(base)
+            self.assertEqual(panel.settings_snapshot(base), base)
+            for combo, start, end in [
+                (panel.date_mode_combo, panel.start_date_edit, panel.end_date_edit),
+                (panel.launch_range_combo, panel.launch_start_date_edit, panel.launch_end_date_edit),
+            ]:
+                self.assertTrue(start.isEnabled())
+                self.assertFalse(start.parentWidget().isHidden())
+                start.setDate(QDate(2026, 10, 10))
+                end.setDate(QDate(2026, 10, 1))
+                self.assertFalse(panel.date_ranges_valid())
+                end.setDate(QDate(2026, 10, 10))
+                self.assertTrue(panel.date_ranges_valid())
+                combo.setCurrentIndex(combo.findData("disabled"))
+                self.assertFalse(start.isEnabled())
+                self.assertTrue(start.parentWidget().isHidden())
+            snapshot = panel.settings_snapshot(base)
+            self.assertEqual((snapshot.date_mode, snapshot.launch_range), ("disabled", "disabled"))
+            dialog = SettingsDialog(snapshot)
+            self.assertEqual(dialog.date_mode_combo.currentData(), "disabled")
+            self.assertEqual(dialog.launch_range_combo.currentData(), "disabled")
+            dialog.news_custom_radio.setChecked(True)
+            dialog.start_date_edit.setDate(QDate(2026, 10, 3))
+            panel.apply_settings(dialog.settings())
+            self.assertEqual(panel.date_mode_combo.currentData(), "custom")
+            self.assertEqual(panel.start_date_edit.date(), QDate(2026, 10, 3))
+            self.assertEqual(panel.launch_range_combo.currentData(), "disabled")
+            with tempfile.TemporaryDirectory() as directory, patch("services.settings.CONFIG_PATH", Path(directory)/"config.json"):
+                save_settings(snapshot)
+                self.assertEqual(load_settings().date_mode, "disabled")
+            dialog.close()
+            panel.close()
+
+    def test_main_window_dates_settings_and_start_validation(self):
+        import ui.main_window as main
+        app = QApplication.instance() or QApplication([])
+        base = replace(default_settings(), deepseek_api_key="", aerospace_translation_enabled=False)
+        with patch.object(main, "load_settings", return_value=base), \
+             patch.object(main, "load_feeds", return_value=[]), \
+             patch.object(main, "save_settings") as save, \
+             patch.object(main.MainWindow, "_connect_logging"), \
+             patch.object(main.MainWindow, "_start_startup_checks"), \
+             patch.object(main, "ReportWorker") as worker:
+            window = main.MainWindow()
+            panel = window.dashboard_panel
+            panel.date_mode_combo.setCurrentIndex(panel.date_mode_combo.findData("custom"))
+            panel.start_date_edit.setDate(QDate(2026, 10, 8))
+            panel.end_date_edit.setDate(QDate(2026, 10, 1))
+            with patch.object(main, "SettingsDialog") as dialog:
+                dialog.return_value.exec.return_value = 0
+                window._open_settings()
+                self.assertEqual(dialog.call_args.args[0].start_date, "2026-10-08")
+                self.assertEqual(dialog.call_args.args[0].date_mode, "custom")
+            with patch.object(main.QMessageBox, "warning") as warning:
+                window._start_report()
+                warning.assert_called_once()
+                save.assert_not_called()
+                worker.assert_not_called()
+            panel.end_date_edit.setDate(QDate(2026, 10, 10))
+            panel.launch_range_combo.setCurrentIndex(panel.launch_range_combo.findData("custom"))
+            panel.launch_start_date_edit.setDate(QDate(2026, 10, 2))
+            panel.launch_end_date_edit.setDate(QDate(2026, 10, 9))
+            with patch.object(main, "get_launches", return_value=[]) as launches, \
+                 patch.object(main, "launch_last_error", return_value=""), \
+                 patch.object(main.QMessageBox, "information"):
+                window._test_launch_data()
+                self.assertEqual(launches.call_args.kwargs["start_date"], "2026-10-02")
+                self.assertEqual(launches.call_args.kwargs["end_date"], "2026-10-09")
+            with patch.object(window.feed_panel, "save_state"):
+                window._start_report()
+            saved = save.call_args.args[0]
+            self.assertEqual((saved.start_date, saved.end_date), ("2026-10-08", "2026-10-10"))
+            self.assertEqual(saved.launch_range, "custom")
+            worker.return_value.start.assert_called_once()
+            window.worker = None
+            window.close()
+
+    def test_disabled_news_skips_all_sources_but_keeps_launches(self):
+        import services.weekly_report as report
+        from feeds.spaceflightnews import ARTICLES_URL, SpaceflightNewsProvider
+        from feeds.spacecom import SpaceComWebProvider
+        from services.feed_manager import FeedSource
+        from models.article import Article
+        from models.news import News
+        settings = replace(default_settings(), deepseek_api_key="", date_mode="disabled",
+                           launch_range="past_week", export_premiere=False)
+        launch = Article(News("LL2", "测试发射", "2026-10-01", "", "https://example.com/launch"), "", "LL2")
+        feeds = [FeedSource("RSS", "https://example.com/rss", True),
+                 FeedSource("Web", "https://www.space.com/feeds/all", True),
+                 FeedSource("API", ARTICLES_URL, True)]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(report, "load_settings", return_value=settings))
+            stack.enter_context(patch.object(report, "setup_logging"))
+            stack.enter_context(patch.object(report, "apply_settings"))
+            launch_fetch = stack.enter_context(patch.object(report, "_fetch_launch_articles", return_value=[launch]))
+            export = stack.enter_context(patch.object(report, "_export_reports"))
+            unused = [stack.enter_context(patch(target)) for target in [
+                "feedparser.parse", "services.weekly_report.download",
+                "services.weekly_report.assess_importance", "services.weekly_report.generate_content",
+                "services.weekly_report.translate_titles",
+            ]]
+            unused.append(stack.enter_context(patch.object(SpaceComWebProvider, "fetch")))
+            unused.append(stack.enter_context(patch.object(SpaceflightNewsProvider, "fetch")))
+            self.assertEqual(report.generate_weekly(feeds, export_sqlite=False), [])
+            self.assertEqual(launch_fetch.call_args.args[0], "past_week")
+            self.assertEqual(export.call_args.args[4], [launch])
+            for operation in unused:
+                operation.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

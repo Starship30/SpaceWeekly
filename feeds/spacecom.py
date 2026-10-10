@@ -62,7 +62,7 @@ class SpaceComWebProvider:
         self, limit: int = 0, cancel_check: CancelCheck = no_cancel,
         date_range: tuple[str, str] | None = None,
     ) -> list[Article]:
-        """Follow listing pages to a positive limit; 0 reads the current page only."""
+        """Follow pages within a date range or to a limit; bare 0 reads one page."""
         articles: list[Article] = []
         seen_urls: set[str] = set()
         visited_pages: set[str] = set()
@@ -99,7 +99,7 @@ class SpaceComWebProvider:
                 "[Space.com] Collected %s articles (requested: %s, pages: %s)",
                 len(articles), limit or "current page", len(visited_pages),
             )
-            if limit <= 0 or len(articles) >= limit:
+            if (limit <= 0 and not date_range) or (limit > 0 and len(articles) >= limit):
                 break
             if len(seen_urls) == previous_count:
                 logger.warning("[Space.com] No new articles on %s; stopping pagination", url)

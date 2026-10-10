@@ -1,0 +1,51 @@
+{
+  "protocol_version": "1.0",
+  "job_id": "7f6146e2-f858-442b-990e-d045df19f9f1",
+  "report_title": "SpaceWeekly 虚构新闻验收样例",
+  "language": "zh_CN",
+  "order_policy": "selected_articles_input_order",
+  "items": [
+    {
+      "id": "url-sha256:2f02bb82316efc644a31dd24ac46c0f51e65c888824e44331ecf80e22b1f6fa6",
+      "title": "虚构月面传感器完成测试",
+      "title_origin": "localized",
+      "summary": "这是一条虚构新闻：月面传感器在实验室完成温度循环测试，为后续模拟任务提供数据。",
+      "summary_origin": "ai",
+      "summary_fallback": null,
+      "source": "虚构深空观察社",
+      "published": "Thu, 01 Oct 2026 10:00:00 GMT",
+      "url": "https://example.com/fiction/lunar-sensor",
+      "categories": [
+        "科学研究",
+        "月球探测"
+      ]
+    },
+    {
+      "id": "url-sha256:fddfa7dd68129a53b9ba931e4f9e98261a1d9c5330c5d0e2a3b4e16400672410",
+      "title": "虚构轨道温室启动实验",
+      "title_origin": "localized",
+      "summary": "这是一条虚构新闻：轨道温室模拟舱启动植物生长实验，研究光照与湿度对幼苗的影响。",
+      "summary_origin": "ai",
+      "summary_fallback": null,
+      "source": "虚构轨道实验室",
+      "published": "2026-10-02T09:30:00+08:00",
+      "url": "https://example.com/fiction/orbital-greenhouse",
+      "categories": [
+        "空间技术",
+        "科学研究"
+      ]
+    },
+    {
+      "id": "url-sha256:72d7e9c59a33d83fa9a8846636c4f55c0f1bcad450f4845ba80b31ef6345a3bb",
+      "title": "虚构探测器完成通信演练",
+      "title_origin": "original",
+      "summary": "虚构探测器在地面模拟环境中完成深空通信演练。",
+      "summary_origin": "original",
+      "summary_fallback": "missing_ai_summary",
+      "source": "虚构星际通讯社",
+      "published": "2026-10-03",
+      "url": "https://example.com/fiction/deep-space-link",
+      "categories": []
+    }
+  ]
+}

@@ -53,6 +53,8 @@ class MainWindow(QMainWindow):
         self.worker: ReportWorker | None = None
         self.startup_worker: StartupCheckWorker | None = None
         self._close_after_cancel = False
+        self.video_dialog = None
+        self._close_after_video = False
         self.log_handler = QtLogHandler()
         app = QApplication.instance()
 
@@ -117,6 +119,7 @@ class MainWindow(QMainWindow):
         self.toolbar.stop_requested.connect(self._cancel_report)
         self.toolbar.settings_requested.connect(self._open_settings)
         self.toolbar.prompt_studio_requested.connect(self._open_prompt_studio)
+        self.toolbar.video_cards_requested.connect(self._open_video_cards)
         self.toolbar.output_requested.connect(self._open_output_dir)
         self.toolbar.refresh_requested.connect(self._refresh_feeds)
         self.toolbar.launch_test_requested.connect(self._test_launch_data)
@@ -137,7 +140,10 @@ class MainWindow(QMainWindow):
         logger.info("RSS 列表已刷新")
 
     def _test_launch_data(self) -> None:
-        settings = load_settings()
+        settings = self.dashboard_panel.settings_snapshot(load_settings())
+        if settings.launch_range == "custom" and settings.launch_start_date > settings.launch_end_date:
+            QMessageBox.warning(self, tr("launch_test_title"), tr("date.range.invalid"))
+            return
         launches = get_launches(limit=5, launch_range=settings.launch_range,
                          start_date=settings.launch_start_date, end_date=settings.launch_end_date,
                          display_timezone=settings.display_timezone)
@@ -190,7 +196,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, tr("launch_test_title"), "\n".join(lines))
 
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(load_settings(), self)
+        dialog = SettingsDialog(self.dashboard_panel.settings_snapshot(load_settings()), self)
 
         if dialog.exec():
             previous_language = self.settings.language
@@ -237,6 +243,20 @@ class MainWindow(QMainWindow):
             save_settings(dialog.settings())
             self.settings = load_settings()
 
+    def _open_video_cards(self) -> None:
+        try:
+            from ui.video_cards_dialog import VideoCardsDialog
+        except ImportError as error:
+            QMessageBox.warning(self, tr("video.toolbar"), tr("video.dependency_error", error=error))
+            return
+        self.video_dialog = VideoCardsDialog(load_settings().output_dir, self)
+        self.video_dialog.exec()
+        self.video_dialog.deleteLater()
+        self.video_dialog = None
+        if self._close_after_video:
+            self._close_after_video = False
+            QTimer.singleShot(0, self.close)
+
     def _show_about(self) -> None:
         QMessageBox.about(
            self,
@@ -269,6 +289,10 @@ class MainWindow(QMainWindow):
 
     def _start_report(self) -> None:
         if self.worker is not None and self.worker.isRunning():
+            return
+
+        if not self.dashboard_panel.date_ranges_valid():
+            QMessageBox.warning(self, tr("dashboard"), tr("date.range.invalid"))
             return
 
         self._save_runtime_settings()
@@ -345,6 +369,12 @@ class MainWindow(QMainWindow):
         self._finish_pending_close()
 
     def closeEvent(self, event) -> None:
+        if self.video_dialog is not None and (self.video_dialog.worker is not None or
+                                              self.video_dialog.intro_dialog is not None):
+            self._close_after_video = True
+            self.video_dialog.reject()
+            event.ignore()
+            return
         if self.worker is not None and self.worker.isRunning():
             self._close_after_cancel = True
             self._cancel_report()

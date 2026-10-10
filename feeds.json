@@ -23,5 +23,10 @@
     "name": "Space.com",
     "rss": "https://www.space.com/news",
     "enabled": true
+  },
+  {
+    "name": "Spaceflight News API",
+    "rss": "https://api.spaceflightnewsapi.net/v4/articles/",
+    "enabled": false
   }
 ]

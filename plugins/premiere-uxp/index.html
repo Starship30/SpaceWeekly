@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { padding: 16px; color: #eee; background: #292929; font-size: 13px; }
+    h2 { font-size: 18px; margin-bottom: 12px; }
+    button, input { margin: 6px 0; padding: 8px; }
+    button { display: block; width: 100%; }
+    p { margin: 8px 0; white-space: pre-wrap; }
+    #log { height: 220px; overflow: auto; white-space: pre-wrap; background: #202020; padding: 8px; }
+  </style>
+</head>
+<body>
+  <h2>SpaceWeekly → Premiere</h2>
+  <button id="json">选择 SpaceWeekly JSON</button>
+  <p id="json-name">未选择内容包</p>
+  <button id="mogrt">选择本地 .mogrt</button>
+  <p id="mogrt-name">未选择模板</p>
+  <p>先在 Premiere 中激活专用空序列，然后绑定。</p>
+  <label><input id="dedicated" type="checkbox">我选择的是本次任务的专用空序列</label>
+  <button id="bind">绑定当前项目 / 序列</button>
+  <p id="target">尚未绑定目标</p>
+  <label for="seconds">每张卡片持续秒数</label>
+  <input id="seconds" type="number" min="0.01" step="0.1" value="8">
+  <button id="preflight">预检（不写入时间线）</button>
+  <button id="start" disabled>开始导入</button>
+  <p>模板须有标题和摘要控件，来源控件可选。首卡验证文字与时长后才继续；失败停止，保留已插入内容。</p>
+  <p id="progress" role="status" aria-live="polite">就绪</p>
+  <div id="log" role="log" aria-live="polite"></div>
+  <script src="main.js"></script>
+</body>
+</html>

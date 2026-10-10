@@ -4,13 +4,13 @@ from dataclasses import replace
 from PySide6.QtCore import QTimer
 from PySide6.QtCore import QSize
 from PySide6.QtCore import Qt
-from PySide6.QtCore import QDate
 from PySide6.QtCore import qVersion
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QButtonGroup
 from PySide6.QtWidgets import QCheckBox
 from ui.widgets.combo_box import RoundedComboBox as QComboBox
 from ui.widgets.model_worker import ModelWorker
+from ui.widgets.date_range import LAUNCH_DATE_RANGES, NEWS_DATE_RANGES, date_edit
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QDateEdit
 from PySide6.QtWidgets import QDialog
@@ -92,6 +92,7 @@ class SettingsDialog(QDialog):
             export_sqlite=self.sqlite_check.isChecked(),
             export_markdown=self.markdown_check.isChecked(),
             export_word=self.word_check.isChecked(),
+            export_premiere=self.premiere_check.isChecked(),
             include_title=self.include_title_check.isChecked(),
             include_source=self.include_source_check.isChecked(),
             include_published=self.include_published_check.isChecked(),
@@ -183,6 +184,7 @@ class SettingsDialog(QDialog):
         self.sqlite_check = self._check("", settings.export_sqlite)
         self.markdown_check = self._check("", settings.export_markdown)
         self.word_check = self._check("", settings.export_word)
+        self.premiere_check = self._check("", settings.export_premiere)
         self.include_title_check = self._check(tr("include.title"), settings.include_title)
         self.include_source_check = self._check(tr("include.source"), settings.include_source)
         self.include_published_check = self._check(tr("include.published"), settings.include_published)
@@ -195,12 +197,12 @@ class SettingsDialog(QDialog):
         self.theme_mode_combo = self._theme_mode_combo(settings.theme_mode)
         self.language_combo = self._language_combo(settings.language)
         self.date_mode_combo = self._date_mode_combo(settings.date_mode)
-        self.start_date_edit = self._date_edit(settings.start_date, -6)
-        self.end_date_edit = self._date_edit(settings.end_date, 0)
+        self.start_date_edit = date_edit(settings.start_date, -6)
+        self.end_date_edit = date_edit(settings.end_date, 0)
         self.body_mode_group = QButtonGroup(self)
         self.launch_range_combo = self._launch_range_combo(settings.launch_range)
-        self.launch_start_date_edit = self._date_edit(settings.launch_start_date, -6)
-        self.launch_end_date_edit = self._date_edit(settings.launch_end_date, 0)
+        self.launch_start_date_edit = date_edit(settings.launch_start_date, -6)
+        self.launch_end_date_edit = date_edit(settings.launch_end_date, 0)
         self.news_range_selector, self.news_custom_radio = self._range_selector(
             settings.date_mode, self.date_mode_combo, self.start_date_edit, self.end_date_edit
         )
@@ -320,6 +322,7 @@ class SettingsDialog(QDialog):
         layout.addRow("SQLite", self.sqlite_check)
         layout.addRow("Markdown", self.markdown_check)
         layout.addRow("Word", self.word_check)
+        layout.addRow(tr("export.premiere"), self.premiere_check)
         layout.addRow(tr("field.note"), QLabel(tr("field.note.text")))
         layout.addRow(tr("sqlite.path"), self._path_row(self.sqlite_edit, False))
         layout.addRow(tr("output.dir"), self._path_row(self.output_edit, True))
@@ -509,13 +512,8 @@ class SettingsDialog(QDialog):
     def _date_mode_combo(self, current: str) -> QComboBox:
         combo = QComboBox()
 
-        for label, mode in [
-            (tr("today"), "today"),
-            (tr("last3"), "last_3_days"),
-            (tr("last7"), "last_7_days"),
-            (tr("last30"), "last_30_days"),
-        ]:
-            combo.addItem(label, mode)
+        for label, mode in NEWS_DATE_RANGES:
+            combo.addItem(tr(label), mode)
 
         combo.setCurrentIndex(max(combo.findData(current), 0))
 
@@ -540,11 +538,8 @@ class SettingsDialog(QDialog):
 
     def _launch_range_combo(self, current: str) -> QComboBox:
         combo = QComboBox()
-        combo.addItem(tr("launch.range.past"), "past_week")
-        combo.addItem(tr("launch.range.next"), "next_week")
-        combo.addItem(tr("launch.range.past30"), "past_30_days")
-        combo.addItem(tr("launch.range.next30"), "next_30_days")
-        combo.addItem(tr("disabled"), "disabled")
+        for label, mode in LAUNCH_DATE_RANGES:
+            combo.addItem(tr(label), mode)
         combo.setCurrentIndex(max(combo.findData(current), 0))
 
         return combo
@@ -573,15 +568,6 @@ class SettingsDialog(QDialog):
 
         combo.setCurrentIndex(max(combo.findData(current), 0))
         return combo
-
-    def _date_edit(self, value: str, fallback_days: int) -> QDateEdit:
-        edit = QDateEdit()
-        edit.setCalendarPopup(True)
-        edit.setDisplayFormat("yyyy-MM-dd")
-        parsed = QDate.fromString(value, "yyyy-MM-dd")
-        edit.setDate(parsed if parsed.isValid() else QDate.currentDate().addDays(fallback_days))
-
-        return edit
 
     def _spin(self, minimum: int, maximum: int, value: int) -> QSpinBox:
         spin = QSpinBox()
