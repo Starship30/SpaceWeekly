@@ -1,0 +1,4 @@
+# Optional: install into the Python environment used to run SpaceWeekly.
+# Frozen Windows builds use yt-dlp.exe beside SpaceWeekly.exe or on PATH.
+yt-dlp>=2026.8.19,<2027
+qrcode>=8.2,<9

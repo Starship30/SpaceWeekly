@@ -321,7 +321,8 @@ def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel
     codec_args = (['-c:v', 'png', '-pix_fmt', 'rgba', '-pred', 'mixed', '-compression_level', '6'] if encoding == 'png' else
                   ['-c:v', 'prores_ks', '-profile:v', '4', '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16'])
     seconds = frames/FPS
-    with reserved_output(directory, '.card.mov') as (final, temporary):
+    suffix = '.launch.mov' if card.get('video_type') == 'launch' else '.news.mov'
+    with reserved_output(directory, suffix) as (final, temporary):
         log_path = temporary.with_suffix('.log')
         try:
             with log_path.open('wb') as log:
@@ -387,6 +388,18 @@ def save_manifest(path, payload, cancel_check):
         temporary.unlink(missing_ok=True)
 
 
+def manifest_video_path(directory: Path, name: str) -> Path:
+    """Accept old basenames and the two new media folders, without escaping the job."""
+    parts = name.split('/')
+    if (not name or '\\' in name or ':' in name or any(p in ('', '.', '..') for p in parts)
+            or len(parts) > 2 or (len(parts) == 2 and parts[0] not in ('news', 'launches'))):
+        raise ValueError('执行清单含不安全的文件路径')
+    path = directory/name
+    if not path.resolve().is_relative_to(directory.resolve()):
+        raise ValueError('执行清单含不安全的文件路径')
+    return path
+
+
 def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, cancel_check=no_cancel,
              selected_ids=None, on_progress=None, encoding='png', sort_order='asc'):
     cancel_check()
@@ -436,9 +449,7 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
                 continue
             if not all(isinstance(record.get(key), str) for key in ('fingerprint', 'file', 'sha256')):
                 raise ValueError('执行清单中的已生成卡片无效')
-            name = record['file']
-            if not name or Path(name).name != name or '/' in name or '\\' in name or name in ('.', '..'):
-                raise ValueError('执行清单含不安全的文件路径')
+            manifest_video_path(directory, record['file'])
             if record['id'] in old:
                 raise ValueError('执行清单含重复新闻 ID')
             old[record['id']] = record
@@ -475,7 +486,7 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
     for item, fingerprint, ordinal in zip(data['items'], fingerprints, ordinals):
         record = dict(old.get(item['id'], {'id': item['id']}))
         record.update(ordinal=ordinal, video_type=item.get('video_type', 'news'), selected=ordinal is not None)
-        path = directory/record['file'] if 'file' in record else None
+        path = manifest_video_path(directory, record['file']) if 'file' in record else None
         record['current'] = (ordinal is not None and record.get('fingerprint') == fingerprint and path is not None
                              and path.is_file() and sha_file(path) == record['sha256'])
         records.append(record)
@@ -507,11 +518,12 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
         print(f'RENDER {item["id"]}: {item["title"]}', flush=True)
         notify(item, 'rendering')
         on_frame = (lambda fraction: notify(item, 'rendering', fraction*.95)) if on_progress else None
-        path = encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check, on_frame, encoding)
+        folder = 'launches' if item.get('video_type') == 'launch' else 'news'
+        path = encode_card(card, directory/folder, frames, ffmpeg, ffprobe, cancel_check, on_frame, encoding)
         try:
             record.clear()
             record.update(id=item['id'], ordinal=ordinal, selected=True, title=item['title'],
-                          fingerprint=fingerprint, current=True, file=path.name, sha256=sha_file(path),
+                          fingerprint=fingerprint, current=True, file=path.relative_to(directory).as_posix(), sha256=sha_file(path),
                           frames=frames, seconds=card_seconds, scroll_distance=card['scroll_distance'], title_font_size=card['title_font_size'],
                           summary_font_size=card['summary_font_size'], encoding=encoding,
                           video_type=item.get('video_type', 'news'))

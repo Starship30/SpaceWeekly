@@ -152,6 +152,10 @@ class NewRenderTests(unittest.TestCase):
         self.assertEqual([r['ordinal'] for r in before['cards']], [1, 2, 3, 1, 2])
         self.assertEqual([r['id'] for r in before['cards']], [item['id'] for item in news]+[first['id'], second['id']])
         self.assertEqual(before['numbering_policy'], 'independent_news_and_launch')
+        for record in before['cards']:
+            launch = record['video_type'] == 'launch'
+            self.assertTrue(record['file'].startswith('launches/' if launch else 'news/'))
+            self.assertTrue(record['file'].endswith('.launch.mov' if launch else '.news.mov'))
         inserted = dict(first, id='ll2:fictional-launch-03')
         self.data['items'].insert(2, inserted);self.save()
         after, count, _ = self.run_fake(selected_ids={item['id'] for item in news})

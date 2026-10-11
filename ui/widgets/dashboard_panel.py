@@ -48,6 +48,7 @@ class DashboardPanel(QWidget):
         self.news_limit_combo.setCurrentIndex(1 if settings.rss_limit == 0 else 0)
         self.rss_limit_spin.setEnabled(settings.rss_limit != 0)
         self.news_dedup_check.setChecked(settings.news_dedup_enabled)
+        self.news_date_check.setChecked(settings.news_event_date_check_enabled)
         for combo, start, end, mode, first, last in [
             (self.date_mode_combo, self.start_date_edit, self.end_date_edit,
              settings.date_mode, settings.start_date, settings.end_date),
@@ -72,6 +73,7 @@ class DashboardPanel(QWidget):
             report_title=self.report_title_line.text().strip() or "SpaceWeekly",
             rss_limit=0 if self.news_limit_combo.currentData() == "unlimited" else self.rss_limit_spin.value(),
             news_dedup_enabled=self.news_dedup_check.isChecked(),
+            news_event_date_check_enabled=self.news_date_check.isChecked(),
             news_filter_level=self.news_filter_level(),
             date_mode=str(self.date_mode_combo.currentData()),
             start_date=self.start_date_edit.date().toString("yyyy-MM-dd"),
@@ -160,6 +162,10 @@ class DashboardPanel(QWidget):
         launch_frame, self.launch_range_combo, self.launch_start_date_edit, self.launch_end_date_edit = self._range_box(
             "dashboard.launch.range", LAUNCH_DATE_RANGES,
         )
+        self.news_date_check = QCheckBox(tr("news.event_date_check"))
+        self.news_date_check.setToolTip(tr("news.event_date_check.hint"))
+        self.news_date_check.toggled.connect(lambda: self.settings_changed.emit())
+        news_frame.layout().addWidget(self.news_date_check)
         controls_layout.addWidget(news_frame)
         controls_layout.addWidget(launch_frame)
         controls_layout.addStretch(1)

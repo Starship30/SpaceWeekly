@@ -40,7 +40,7 @@ class VideoCardTests(unittest.TestCase):
         self.snapshot.write_text(json.dumps(self.data, ensure_ascii=False), encoding='utf-8-sig')
 
     def fake_encode(self, card, directory, *args):
-        with reserved_output(directory, '.card.mov') as (final, temp):
+        with reserved_output(directory, '.launch.mov' if card.get('video_type') == 'launch' else '.news.mov') as (final, temp):
             temp.write_bytes(card['layers'][2][0].tobytes()[:1000])
         return final
 
@@ -48,6 +48,28 @@ class VideoCardTests(unittest.TestCase):
         with patch.object(video, 'encode_card', side_effect=self.fake_encode) as encode, redirect_stdout(io.StringIO()):
             path = video.generate(self.snapshot, self.output, **kwargs)
         return json.loads(path.read_text(encoding='utf-8')), encode.call_count, path
+
+    def test_manifest_accepts_legacy_and_split_paths_rejects_escapes(self):
+        for name in ['old.card.mov', 'news/one.news.mov', 'launches/one.launch.mov']:
+            self.assertEqual(video.manifest_video_path(self.output, name), self.output/name)
+        for name in ['', '../other.mov', 'news/../../other.mov', 'news//one.mov',
+                     '/absolute.mov', 'D:/other.mov', 'news\\one.mov', 'other/one.mov',
+                     'news/sub/one.mov', 'news/one.mov:stream']:
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                video.manifest_video_path(self.output, name)
+
+    def test_legacy_basename_manifest_still_resumes_without_overwriting(self):
+        payload, _, manifest = self.run_fake()
+        for record in payload['cards']:
+            old_path = manifest.parent/record['file']
+            legacy = manifest.parent/old_path.name
+            old_path.rename(legacy)
+            record['file'] = legacy.name
+        manifest.write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8')
+        resumed, count, _ = self.run_fake()
+        self.assertEqual(count, 0)
+        self.assertEqual(resumed['cards'], payload['cards'])
+        self.assertTrue(all((manifest.parent/r['file']).is_file() for r in resumed['cards']))
 
     def test_bom_chinese_protocol_validation(self):
         data = video.load_snapshot(self.snapshot)
@@ -284,7 +306,7 @@ class VideoCardTests(unittest.TestCase):
     def test_manifest_failure_preserves_previous_outputs(self):
         first, _, manifest = self.run_fake()
         before = manifest.read_bytes()
-        old_files = sorted(p.name for p in manifest.parent.iterdir())
+        old_files = sorted(p.relative_to(manifest.parent).as_posix() for p in manifest.parent.rglob('*'))
         self.data['items'][0]['title'] = '新版本'; self.save()
         original = Path.replace
         def fail(path, target):
@@ -294,7 +316,7 @@ class VideoCardTests(unittest.TestCase):
         with patch.object(Path, 'replace', fail), self.assertRaises(OSError):
             self.run_fake(item_id=self.data['items'][0]['id'])
         self.assertEqual(manifest.read_bytes(), before)
-        self.assertEqual(sorted(p.name for p in manifest.parent.iterdir()), old_files)
+        self.assertEqual(sorted(p.relative_to(manifest.parent).as_posix() for p in manifest.parent.rglob('*')), old_files)
 
     def test_bad_manifest_path_is_rejected(self):
         _, _, path = self.run_fake()

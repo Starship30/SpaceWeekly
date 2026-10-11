@@ -19,6 +19,43 @@ from ui.widgets.dashboard_panel import DashboardPanel
 from i18n import tr, set_language
 
 class DateRangeTests(unittest.TestCase):
+    def test_event_date_check_setting_roundtrips_between_dashboard_dialog_and_disk(self):
+        app = QApplication.instance() or QApplication([])
+        base = replace(default_settings(), deepseek_api_key='')
+        self.assertTrue(base.news_event_date_check_enabled)
+        panel = DashboardPanel(base)
+        self.assertTrue(panel.news_date_check.isChecked())
+        panel.news_date_check.setChecked(False)
+        settings = panel.settings_snapshot(base)
+        self.assertFalse(settings.news_event_date_check_enabled)
+        dialog = SettingsDialog(settings)
+        self.assertFalse(dialog.news_date_check.isChecked())
+        dialog.news_date_check.setChecked(True)
+        panel.apply_settings(dialog.settings())
+        self.assertTrue(panel.news_date_check.isChecked())
+        with tempfile.TemporaryDirectory() as directory, patch('services.settings.CONFIG_PATH', Path(directory)/'config.json'):
+            save_settings(settings)
+            self.assertFalse(load_settings().news_event_date_check_enabled)
+        dialog.close();panel.close()
+
+    def test_search_settings_can_select_existing_brave_api_and_mask_key(self):
+        from PySide6.QtWidgets import QLineEdit
+        app = QApplication.instance() or QApplication([])
+        settings = replace(default_settings(),deepseek_api_key='',web_search_provider='duckduckgo',web_search_api_key='')
+        dialog = SettingsDialog(settings)
+        self.assertFalse(dialog.search_api_key_edit.isEnabled())
+        dialog.search_provider_combo.setCurrentIndex(dialog.search_provider_combo.findData('brave'))
+        self.assertTrue(dialog.search_api_key_edit.isEnabled())
+        self.assertEqual(dialog.search_api_key_edit.echoMode(),QLineEdit.EchoMode.Password)
+        dialog.search_api_key_edit.setText('fake-search-key')
+        changed=dialog.settings()
+        self.assertEqual((changed.web_search_provider,changed.web_search_api_key),('brave','fake-search-key'))
+        with tempfile.TemporaryDirectory() as directory,patch('services.settings.CONFIG_PATH',Path(directory)/'config.json'):
+            save_settings(changed)
+            restored=load_settings()
+            self.assertEqual((restored.web_search_provider,restored.web_search_api_key),('brave','fake-search-key'))
+        dialog.close()
+
     def test_launch_bounds_and_presets(self):
         now = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
         past = _query_params(10, 'past_week', now)
@@ -35,14 +72,15 @@ class DateRangeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _date_range(replace(default_settings(), date_mode='custom', start_date='2026-10-08', end_date='2026-10-01'))
 
-    def test_news_filter_precedes_limit_and_accepts_iso_updated_dates(self):
+    def test_news_filter_precedes_limit_and_ignores_updated_only_dates(self):
         from types import SimpleNamespace
         from services.weekly_report import _fetch_news, _published_date
         from services.feed_manager import FeedSource
         from services.cancellation import CancellationToken
         entries = [
             SimpleNamespace(link="https://example.com/new", published="2026-10-09T12:00:00Z"),
-            SimpleNamespace(link="https://example.com/selected", updated="2026-10-01T12:00:00Z"),
+            SimpleNamespace(link="https://example.com/updated-only", updated="2026-10-01T12:00:00Z"),
+            SimpleNamespace(link="https://example.com/selected", published="2026-10-01T12:00:00Z"),
             SimpleNamespace(link="https://example.com/old", published="2026-09-30T12:00:00Z"),
         ]
         with patch("feedparser.parse", return_value=SimpleNamespace(entries=entries)):
@@ -50,6 +88,7 @@ class DateRangeTests(unittest.TestCase):
         self.assertEqual([item.url for item in news], ["https://example.com/selected"])
         self.assertEqual(_published_date("Thu, 01 Oct 2026 12:00:00 GMT").isoformat(), "2026-10-01")
         self.assertIsNone(_published_date("invalid"))
+        self.assertEqual(_published_date("2026-10-01T01:00:00+08:00").isoformat(), "2026-09-30")
 
     def test_web_pagination_finds_dates_before_consuming_limit(self):
         from feeds.spacecom import SpaceComWebProvider

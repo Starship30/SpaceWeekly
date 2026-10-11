@@ -141,7 +141,7 @@ class NewsSourceTests(unittest.TestCase):
     def test_api_merges_before_ai_and_existing_premiere_export(self):
         rss_article = article("https://example.com/news/1", title="虚构新闻 1", source="RSS")
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
-            settings = replace(default_settings(), deepseek_api_key="", launch_range="disabled", date_mode="custom",
+            settings = replace(default_settings(), news_event_date_check_enabled=False, deepseek_api_key="", launch_range="disabled", date_mode="custom",
                 start_date="2026-10-01", end_date="2026-10-01", export_sqlite=False, export_word=False,
                 export_markdown=False, export_premiere=True, rss_limit=0, output_dir=directory)
             stack.enter_context(patch.object(report, "load_settings", return_value=settings))
@@ -168,7 +168,7 @@ class NewsSourceTests(unittest.TestCase):
     def test_api_failure_isolated_and_unselected_api_not_called(self):
         retained = article("https://example.com/kept")
         with ExitStack() as stack:
-            settings = replace(default_settings(), deepseek_api_key="", launch_range="disabled", export_word=False, export_markdown=False)
+            settings = replace(default_settings(), news_event_date_check_enabled=False, deepseek_api_key="", launch_range="disabled", export_word=False, export_markdown=False)
             stack.enter_context(patch.object(report, "load_settings", return_value=settings))
             stack.enter_context(patch.object(report, "setup_logging"))
             stack.enter_context(patch.object(report, "apply_settings"))

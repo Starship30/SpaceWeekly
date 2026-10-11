@@ -64,6 +64,7 @@ class AppSettings:
     web_search_max_results: int
     export_premiere: bool = False
     news_dedup_enabled: bool = True
+    news_event_date_check_enabled: bool = True
 
 
 def default_settings() -> AppSettings:
@@ -162,6 +163,7 @@ def load_settings() -> AppSettings:
         end_date=str(data.get("end_date") or defaults.end_date),
         rss_limit=_news_limit_setting(data.get("rss_limit", defaults.rss_limit), defaults.rss_limit),
         news_dedup_enabled=bool(data.get("news_dedup_enabled", defaults.news_dedup_enabled)),
+        news_event_date_check_enabled=bool(data.get("news_event_date_check_enabled", defaults.news_event_date_check_enabled)),
         news_filter_level=_news_filter_level(data, defaults.news_filter_level),
         report_title=str(data.get("report_title") or defaults.report_title),
         ai_provider=str(data.get("ai_provider") or defaults.ai_provider),

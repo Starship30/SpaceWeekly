@@ -49,6 +49,7 @@ a = Analysis(
         "feedparser",
         "requests",
         "PySide6",
+        "qrcode.image.pil",
     ],
     hookspath=[],
     hooksconfig={},

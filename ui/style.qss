@@ -84,6 +84,7 @@ QComboBox QAbstractItemView::item:selected:!active { background: $accent; color:
 
 QProgressBar#VideoProgress { background: $panel_alt_bg; border: 1px solid $border; border-radius: 6px; min-height: 14px; text-align: center; font-size: 11px; }
 QProgressBar#VideoProgress::chunk { background: $accent; border-radius: 5px; }
+QListWidget#VideoDownloadResults::item { min-height: 76px; font-weight: 400; }
 QSlider#VideoPreviewSlider::groove:horizontal { background: $border; height: 4px; border-radius: 2px; }
 QSlider#VideoPreviewSlider::sub-page:horizontal { background: $accent; border-radius: 2px; }
 QSlider#VideoPreviewSlider::handle:horizontal { background: $panel_bg; border: 2px solid $accent; width: 12px; margin: -6px 0; border-radius: 7px; }

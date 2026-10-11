@@ -26,6 +26,8 @@ OFFICIAL_DOMAINS = (
     "roscosmos.ru",
     "isro.gov.in",
     "cnsa.gov.cn",
+    "cas.cn",
+    "jaxa.jp",
     "landspace.com",
     "spacepioneer.cc",
     "galactic-energy.cn",
@@ -35,6 +37,10 @@ OFFICIAL_DOMAINS = (
 
 class SearchProviderError(RuntimeError):
     pass
+
+
+class SearchRateLimitError(SearchProviderError):
+    """A search host requires waiting or interactive verification."""
 
 
 @dataclass(frozen=True)
@@ -71,8 +77,11 @@ class DuckDuckGoSearchProvider(SearchProvider):
                 timeout=self.timeout,
             )
         except (error.HTTPError, error.URLError, OSError) as exc:
-            raise SearchProviderError(f"DuckDuckGo request failed: {exc}") from exc
+            kind = SearchRateLimitError if isinstance(exc, error.HTTPError) and exc.code == 429 else SearchProviderError
+            raise kind(f"DuckDuckGo request failed: {exc}") from exc
 
+        if 'id="challenge-form"' in body or 'id="anomaly-form"' in body:
+            raise SearchRateLimitError("DuckDuckGo requires interactive verification")
         parser = _DuckDuckGoParser()
         parser.feed(body)
         results: list[SearchResult] = []
@@ -120,7 +129,8 @@ class BraveSearchProvider(SearchProvider):
             )
             payload = json.loads(body)
         except (error.HTTPError, error.URLError, OSError, ValueError) as exc:
-            raise SearchProviderError(f"Brave Search request failed: {exc}") from exc
+            kind = SearchRateLimitError if isinstance(exc, error.HTTPError) and exc.code == 429 else SearchProviderError
+            raise kind(f"Brave Search request failed: {exc}") from exc
 
         raw_results = payload.get("web", {}).get("results", [])
         results = [
@@ -209,7 +219,7 @@ class FallbackSearchProvider(SearchProvider):
         raise SearchProviderError("; ".join(errors) or "all search providers failed")
 
 
-def create_search_provider(settings) -> SearchProvider:
+def create_search_provider(settings, *, allow_wikipedia_fallback=True) -> SearchProvider:
     provider = str(getattr(settings, "web_search_provider", "duckduckgo") or "duckduckgo")
     timeout = int(getattr(settings, "web_search_timeout", 10) or 10)
 
@@ -220,20 +230,16 @@ def create_search_provider(settings) -> SearchProvider:
         )
 
     if provider.casefold() == "duckduckgo":
-        return FallbackSearchProvider(
-            [
-                DuckDuckGoSearchProvider(
-                    timeout=timeout,
-                    user_agent=getattr(settings, "user_agent", ""),
-                ),
-                WikipediaSearchProvider(
-                    timeout=timeout,
-                    user_agent=getattr(settings, "user_agent", ""),
-                ),
-            ]
-        )
+        primary = DuckDuckGoSearchProvider(
+            timeout=timeout, user_agent=getattr(settings, "user_agent", ""))
+        if not allow_wikipedia_fallback:
+            return primary
+        return FallbackSearchProvider([primary, WikipediaSearchProvider(
+            timeout=timeout, user_agent=getattr(settings, "user_agent", ""))])
 
     if provider.casefold() == "wikipedia":
+        if not allow_wikipedia_fallback:
+            raise SearchProviderError("Wikipedia cannot verify dated news announcements; choose DuckDuckGo or Brave")
         return WikipediaSearchProvider(
             timeout=timeout,
             user_agent=getattr(settings, "user_agent", ""),

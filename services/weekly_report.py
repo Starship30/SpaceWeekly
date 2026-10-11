@@ -36,6 +36,7 @@ from services.feed_manager import FeedSource
 from services.feed_manager import enabled_feeds
 from services.prompt_manager import find_preset
 from services.prompt_manager import prompt_value
+from services.news_dates import verify_news_dates
 from services.settings import AppSettings
 from services.settings import apply_settings
 from services.settings import load_settings
@@ -145,6 +146,9 @@ def generate_weekly(
         len(parsed_articles),
         settings.news_filter_level,
     )
+
+    selected_articles, date_calls = verify_news_dates(selected_articles, settings, date_range, token)
+    api_calls += date_calls
 
     if export_sqlite:
         for article in selected_articles:
@@ -283,7 +287,7 @@ def _news_from_feed_item(feed: FeedSource, item, url: str) -> News:
     return News(
         source=feed.name,
         title=str(getattr(item, "title", "")),
-        published=str(getattr(item, "published", "") or getattr(item, "updated", "")),
+        published=str(getattr(item, "published", "")),
         summary=summary,
         url=url,
     )
@@ -745,4 +749,4 @@ def _date_range(settings: AppSettings) -> tuple[str, str] | None:
 
 def _published_date(published: str) -> date | None:
     parsed = parse_datetime(published)
-    return parsed.date() if parsed is not None else None
+    return parsed.astimezone(timezone.utc).date() if parsed is not None else None

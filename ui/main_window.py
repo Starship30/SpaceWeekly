@@ -370,7 +370,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.video_dialog is not None and (self.video_dialog.worker is not None or
-                                              self.video_dialog.intro_dialog is not None):
+                                              self.video_dialog.intro_dialog is not None or
+                                              self.video_dialog.download_dialog is not None):
             self._close_after_video = True
             self.video_dialog.reject()
             event.ignore()

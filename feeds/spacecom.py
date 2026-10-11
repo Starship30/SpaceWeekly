@@ -3,7 +3,6 @@
 import logging
 import re
 from datetime import datetime, timezone
-from email.utils import format_datetime
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
@@ -206,8 +205,8 @@ class SpaceComWebProvider:
         news = News(
             source="Space.com",
             title=title,
-            # News stores RFC date strings; this also works with _filter_news.
-            published=format_datetime(published.astimezone(timezone.utc)),
+            # Preserve the timezone; display formatting is an exporter concern.
+            published=published.astimezone(timezone.utc).isoformat(),
             summary=summary,
             url=url,
         )
@@ -237,7 +236,9 @@ class SpaceComWebProvider:
         parsed = parse_datetime(value)
         if parsed is not None:
             return parsed
-        text = value.strip().removeprefix("Published ").removeprefix("Last updated ")
+        if value.strip().lower().startswith("last updated"):
+            return None
+        text = value.strip().removeprefix("Published ")
         for date_format in ("%d %B %y", "%d %B %Y", "%d %b %Y", "%b %d, %Y", "%B %d, %Y"):
             try:
                 return datetime.strptime(text, date_format).replace(tzinfo=timezone.utc)

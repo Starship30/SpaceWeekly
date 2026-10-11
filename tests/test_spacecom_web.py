@@ -74,11 +74,16 @@ class SpaceComWebProviderTests(unittest.TestCase):
         self.assertEqual(article.news.summary, "A mission reached orbit.")
         self.assertEqual(article.body, article.news.summary)
         self.assertEqual(article.parser, "Space.com Web")
-        self.assertEqual(article.news.published, "Sun, 20 Sep 2026 06:40:13 +0000")
+        self.assertEqual(article.news.published, "2026-09-20T06:40:13+00:00")
         get.assert_called_once()
         self.assertEqual(get.call_args.args, ("https://www.space.com/news",))
         self.assertIn("HTTP 200", '\n'.join(logs.output))
         self.assertIn("Parsed 1 articles", '\n'.join(logs.output))
+
+    def test_modified_label_is_not_original_publication(self):
+        self.assertIsNone(self.provider._parse_date('Last updated October 7, 2026'))
+        published = self.provider.parse_listing(listing(card(published='2026-10-04T01:00:00+08:00')))[0].news.published
+        self.assertEqual(parse_datetime(published).isoformat(), '2026-10-03T17:00:00+00:00')
 
     def test_root_level_article_slug_is_not_mistaken_for_navigation(self):
         articles = self.provider.parse_listing(listing(card('/amazon-prime-day-space-deals')))
@@ -270,7 +275,7 @@ class SpaceComWebProviderTests(unittest.TestCase):
 
 class SpaceComPipelineTests(unittest.TestCase):
     def workflow(self, stack, database_path, rss_limit=0, start="2026-09-20", end="2026-09-20"):
-        settings = replace(default_settings(), deepseek_api_key="", date_mode="custom",
+        settings = replace(default_settings(), news_event_date_check_enabled=False, deepseek_api_key="", date_mode="custom",
                            start_date=start, end_date=end, rss_limit=rss_limit,
                            launch_range="disabled", export_markdown=False, export_word=False)
         stack.enter_context(patch.object(sqlite, "DATABASE_PATH", database_path))

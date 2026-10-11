@@ -1,12 +1,26 @@
 # SpaceWeekly
 
-[Download V3.0](https://github.com/Starship30/SpaceWeekly/releases/download/v3.0/SpaceWeekly.exe)
+[Download V3.0.2 for Windows x64](https://github.com/Starship30/SpaceWeekly/releases/download/v3.0.2/SpaceWeekly_v3.0.2_Windows_x64.zip)
 
-SpaceWeekly V3.0 AI Workflow Edition is an AI Aerospace News Workspace.
+SpaceWeekly V3.0.2 AI Workflow Edition is an AI Aerospace News Workspace.
 
 It collects aerospace RSS feeds, Space.com web news and Spaceflight News API articles, screens news importance,
 generates content only for retained items, and exports Word/Markdown weekly
 reports.
+
+## V3.0.2 Video search and downloads
+
+Open **Video assets → Video downloads** to search Bilibili or paste a BV/av/b23 link, inspect MP4 quality (highest downloadable quality selected by default) and download into the current Workspace's `video-downloads/`. Optional Bilibili QR login saves a Windows current-user encrypted session across windows and restarts; sign out deletes it. The download window reads JSON launch mission names, excludes news by default, supports a list of UP UIDs/space links and sorts retrieved videos oldest first. Mission searches default to the launch date and following day in UTC+8. After confirming usage rights, the All launches download Demo processes every JSON launch, tries up to three dated candidates and saves one permitted MP4 at the highest downloadable quality per task. Individual failures continue; cancel stops the batch and keeps completed videos. All videos in a batch share a folder named by the UTC+8 run date, with numbering for repeated batches; filenames use original video titles with collision numbering. The Windows ZIP includes SpaceWeekly.exe, yt-dlp.exe and QR support; extract the whole ZIP together. FFmpeg and ffprobe must be on PATH for merging and video encoding. Source users install `python -m pip install -r tools/requirements-video-download.txt`. See [3.0.2 release notes](RELEASE_NOTES_3.0.2.md). See [usage, implementation research and verification limits](tools/VIDEO_DOWNLOAD.md).
+
+## V3.0.1 fixes (included in V3.0.2)
+
+- News and launch MOV assets use separate `news` and `launches` folders, with `.news.mov` / `.launch.mov` filenames. Old files and manifests remain readable.
+- The optional event-date check is enabled by default. It compares each retained report against dated official announcements from another organization, before database saves, summaries and exports. Unconfirmed in-range reports are retained and marked for review in the log; only evidenced out-of-range events are excluded. News searches do not fall back to Wikipedia; rate limits or verification pages pause further searches for the current batch. Turning it off keeps publication-date filtering. Search and configured AI are required and add time/API cost.
+- The Network settings page exposes the existing DuckDuckGo / Brave search provider and masked Brave API key. A search key is separate from the AI key.
+- Publication-only filtering excludes RSS entries with only an update date and compares timezone-aware dates as UTC calendar days.
+- Prompt Studio is now **AI writing rules**: choose a step, describe requirements, preview with a fictional example, then apply. Preview runs locally without an AI call. Opening the editor preserves existing summary rules.
+
+Event-date checking compares only retrieved announcements. AI matching and incomplete search results can miss earlier announcements; retained reports awaiting review may still cover old events; it does not guarantee the globally earliest event date. Background dates and new progress are handled separately. See [3.0.1 notes](RELEASE_NOTES_3.0.1.md).
 
 ## V3.0
 

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFileDialog, QFormLayout
 from PIL import Image, ImageDraw
 
 from i18n import tr
+from resources import workspace_path
 from services.cancellation import CancellationToken, TaskCancelledError, no_cancel
 from tools import video_cards
 from ui.widgets.combo_box import RoundedComboBox as QComboBox
@@ -57,11 +58,13 @@ class VideoCardsDialog(QDialog):
         self.resize(1240, 920)
         self.setMinimumSize(1000, 800)
         self.output_root = Path(output_dir)/'video-cards'
+        self.workspace_root = workspace_path() or Path(output_dir).resolve().parent
         self.data = None
         self.source = None
         self.index = -1
         self.worker = None
         self.intro_dialog = None
+        self.download_dialog = None
         self.manifest = None
         self._changing = False
         self._close_requested = False
@@ -105,6 +108,7 @@ class VideoCardsDialog(QDialog):
         header.addStretch()
         header.addWidget(self._button('video.add_launch', self._add_launch))
         header.addWidget(self._button('video.intro', self._open_intro))
+        header.addWidget(self._button('video_download.title', self._open_download))
         layout.addLayout(header)
         top = QHBoxLayout()
         self.source_edit = QLineEdit()
@@ -345,6 +349,22 @@ class VideoCardsDialog(QDialog):
         self.intro_dialog = dialog
         dialog.exec()
         self.intro_dialog = None
+        dialog.deleteLater()
+        if self._close_requested:
+            super().reject()
+
+    def _open_download(self):
+        if self.worker is not None:
+            return
+        from ui.video_download_dialog import VideoDownloadDialog
+        self._store_editor()
+        items = list(self.data['items']) if self.data else []
+        if self.index >= 0 and items:
+            items.insert(0, items.pop(self.index))
+        dialog = VideoDownloadDialog(self.workspace_root, items, self)
+        self.download_dialog = dialog
+        dialog.exec()
+        self.download_dialog = None
         dialog.deleteLater()
         if self._close_requested:
             super().reject()
@@ -593,6 +613,10 @@ class VideoCardsDialog(QDialog):
     def reject(self):
         self._stop_preview()
         self._refresh_timer.stop()
+        if self.download_dialog is not None:
+            self._close_requested = True
+            self.download_dialog.reject()
+            return
         if self.intro_dialog is not None:
             self._close_requested = True
             self.intro_dialog.reject()
@@ -604,7 +628,7 @@ class VideoCardsDialog(QDialog):
         super().reject()
 
     def closeEvent(self, event):
-        if self.worker is not None or self.intro_dialog is not None:
+        if self.worker is not None or self.intro_dialog is not None or self.download_dialog is not None:
             self.reject()
             event.ignore()
         else:

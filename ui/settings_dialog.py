@@ -82,6 +82,8 @@ class SettingsDialog(QDialog):
             ai_provider=str(self.provider_combo.currentData()),
             temperature=self.temperature_spin.value(),
             user_agent=self.user_agent_edit.text().strip(),
+            web_search_provider=str(self.search_provider_combo.currentData()),
+            web_search_api_key=self.search_api_key_edit.text().strip(),
             request_timeout=self.timeout_spin.value(),
             connect_timeout=self.connect_timeout_spin.value(),
             read_timeout=self.read_timeout_spin.value(),
@@ -105,6 +107,7 @@ class SettingsDialog(QDialog):
             body_mode=str(body_mode),
             theme_mode=str(self.theme_mode_combo.currentData()),
             language=str(self.language_combo.currentData()),
+            news_event_date_check_enabled=self.news_date_check.isChecked(),
             date_mode="custom" if self.news_custom_radio.isChecked() else str(self.date_mode_combo.currentData()),
             start_date=self.start_date_edit.date().toString("yyyy-MM-dd"),
             end_date=self.end_date_edit.date().toString("yyyy-MM-dd"),
@@ -179,6 +182,16 @@ class SettingsDialog(QDialog):
         self.debug_ai_check = self._check(tr("show.ai.debug"), settings.debug_ai_enabled)
         self.release_mode_check = self._check(tr("release.mode"), settings.release_mode)
         self.user_agent_edit = QLineEdit(settings.user_agent)
+        self.search_provider_combo = QComboBox()
+        for key in ('duckduckgo', 'brave', 'wikipedia'):
+            self.search_provider_combo.addItem(tr('search.provider.'+key), key)
+        self.search_provider_combo.setCurrentIndex(max(0, self.search_provider_combo.findData(settings.web_search_provider.lower())))
+        self.search_api_key_edit = QLineEdit(settings.web_search_api_key)
+        self.search_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.search_api_key_edit.setPlaceholderText(tr('search.api_key.hint'))
+        self.search_api_key_edit.setEnabled(self.search_provider_combo.currentData() == 'brave')
+        self.search_provider_combo.currentIndexChanged.connect(
+            lambda: self.search_api_key_edit.setEnabled(self.search_provider_combo.currentData() == 'brave'))
         self.sqlite_edit = QLineEdit(settings.sqlite_path)
         self.output_edit = QLineEdit(settings.output_dir)
         self.sqlite_check = self._check("", settings.export_sqlite)
@@ -196,6 +209,8 @@ class SettingsDialog(QDialog):
         self.include_original_check = self._check(tr("include.original"), settings.include_original)
         self.theme_mode_combo = self._theme_mode_combo(settings.theme_mode)
         self.language_combo = self._language_combo(settings.language)
+        self.news_date_check = self._check(tr("news.event_date_check"), settings.news_event_date_check_enabled)
+        self.news_date_check.setToolTip(tr("news.event_date_check.hint"))
         self.date_mode_combo = self._date_mode_combo(settings.date_mode)
         self.start_date_edit = date_edit(settings.start_date, -6)
         self.end_date_edit = date_edit(settings.end_date, 0)
@@ -345,6 +360,11 @@ class SettingsDialog(QDialog):
 
     def _network_page(self) -> QWidget:
         page, layout = self._form_page(tr("network"))
+        layout.addRow(tr('search.provider'), self.search_provider_combo)
+        layout.addRow(tr('search.api_key'), self.search_api_key_edit)
+        hint = QLabel(tr('search.provider.hint'))
+        hint.setWordWrap(True)
+        layout.addRow(hint)
         layout.addRow("User-Agent", self.user_agent_edit)
         layout.addRow(tr("request.timeout"), self.timeout_spin)
         layout.addRow(tr("connect.timeout"), self.connect_timeout_spin)
@@ -377,6 +397,10 @@ class SettingsDialog(QDialog):
         layout.addRow(tr("date.preset"), self.date_mode_combo)
         layout.addRow(tr("start.date"), self.start_date_edit)
         layout.addRow(tr("end.date"), self.end_date_edit)
+        layout.addRow(self.news_date_check)
+        hint = QLabel(tr("news.event_date_check.hint"))
+        hint.setWordWrap(True)
+        layout.addRow(hint)
         return page
 
     def _advanced_page(self) -> QWidget:

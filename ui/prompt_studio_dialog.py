@@ -1,8 +1,6 @@
-import time
 from dataclasses import replace
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 from ui.widgets.combo_box import RoundedComboBox as QComboBox
 from PySide6.QtWidgets import QDialog
 from PySide6.QtWidgets import QDialogButtonBox
@@ -10,6 +8,7 @@ from PySide6.QtWidgets import QFileDialog
 from PySide6.QtWidgets import QHBoxLayout
 from PySide6.QtWidgets import QLabel
 from PySide6.QtWidgets import QListWidget
+from PySide6.QtWidgets import QListWidgetItem
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import QPlainTextEdit
 from PySide6.QtWidgets import QPushButton
@@ -43,8 +42,8 @@ class PromptStudioDialog(QDialog):
         super().__init__(parent)
         self.original_settings = settings
         self.presets = load_presets()
-        self.current_type = "summary"
-        self.setWindowTitle("Prompt Studio")
+        self.current_type = PROMPT_TYPES[0]
+        self.setWindowTitle(tr("prompt.studio"))
         self.resize(980, 680)
         self._build_ui()
         self._load_current_prompt()
@@ -62,6 +61,9 @@ class PromptStudioDialog(QDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        intro = QLabel(tr("prompt.guide"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
         top = QHBoxLayout()
         self.preset_combo = QComboBox()
 
@@ -87,11 +89,15 @@ class PromptStudioDialog(QDialog):
         footer.addWidget(self._button(tr("copy.rendered"), self._copy_rendered_prompt))
         footer.addWidget(self._button(tr("restore.default"), self._restore_default))
         layout.addLayout(footer)
+        self.type_list.blockSignals(True)
         self.type_list.setCurrentRow(0)
+        self.type_list.blockSignals(False)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel
         )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("prompt.apply"))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("cancel"))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -112,8 +118,11 @@ class PromptStudioDialog(QDialog):
         editor_box = QWidget()
         editor_layout = QVBoxLayout(editor_box)
         editor_layout.addWidget(QLabel(tr("template.editor")))
+        self.help_label = QLabel()
+        self.help_label.setWordWrap(True)
+        editor_layout.addWidget(self.help_label)
         self.editor = QPlainTextEdit()
-        self.editor.setFont(QFont("Consolas", 10))
+        self.editor.setPlaceholderText(tr("prompt.placeholder"))
         self.editor.textChanged.connect(self._update_char_count)
         editor_layout.addWidget(self.editor)
         splitter.addWidget(editor_box)
@@ -121,12 +130,15 @@ class PromptStudioDialog(QDialog):
         variables_layout = QVBoxLayout(variables_box)
         variables_layout.addWidget(QLabel(tr("variables")))
         self.variables_list = QListWidget()
+        self.variables_list.setWordWrap(True)
 
         for variable in VARIABLES:
-            self.variables_list.addItem("{" + variable + "}")
+            item = QListWidgetItem(tr("prompt.variable." + variable) + "\n{" + variable + "}")
+            item.setData(Qt.ItemDataRole.UserRole, "{" + variable + "}")
+            self.variables_list.addItem(item)
 
         self.variables_list.itemDoubleClicked.connect(
-            lambda item: self.editor.insertPlainText(item.text())
+            lambda item: self.editor.insertPlainText(item.data(Qt.ItemDataRole.UserRole))
         )
         variables_layout.addWidget(self.variables_list, 1)
         splitter.addWidget(variables_box)
@@ -148,6 +160,7 @@ class PromptStudioDialog(QDialog):
     def _load_current_prompt(self) -> None:
         self.editor.blockSignals(True)
         self.editor.setPlainText(self._prompt(self.current_type))
+        self.help_label.setText(tr("prompt.help." + self.current_type))
         self.editor.blockSignals(False)
         self._update_char_count()
 
@@ -162,7 +175,8 @@ class PromptStudioDialog(QDialog):
         self._load_current_prompt()
 
     def _prompt(self, prompt_type: str) -> str:
-        return str(getattr(self.original_settings, prompt_type + "_prompt", ""))
+        return (str(getattr(self.original_settings, prompt_type + "_prompt", ""))
+                or str(getattr(find_preset(self.preset_combo.currentText()), prompt_type)))
 
     def _save_current_prompt(self) -> None:
         field_name = self.current_type + "_prompt"
@@ -177,11 +191,11 @@ class PromptStudioDialog(QDialog):
         self._save_current_prompt()
         preset = PromptPreset(
             name=self.preset_combo.currentText() or "Custom",
-            summary=self.original_settings.summary_prompt,
-            filter=self.original_settings.filter_prompt,
+            summary=self._prompt("summary"),
+            filter=self._prompt("filter"),
         )
         save_preset(preset)
-        QMessageBox.information(self, "Prompt Studio", tr("preset.saved"))
+        QMessageBox.information(self, tr("prompt.studio"), tr("preset.saved"))
 
     def _import_preset(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -200,10 +214,13 @@ class PromptStudioDialog(QDialog):
             with open(path, "r", encoding="utf-8") as file:
                 data = json.load(file)
         except (OSError, json.JSONDecodeError) as exc:
-            QMessageBox.warning(self, "Prompt Studio", tr("import.failed", error=exc))
+            QMessageBox.warning(self, tr("prompt.studio"), tr("import.failed", error=exc))
             return
 
-        name = str(data.get("name", "Imported"))
+        if not isinstance(data, dict) or not all(isinstance(data.get(k), str) for k in ("name", "summary", "filter")):
+            QMessageBox.warning(self, tr("prompt.studio"), tr("prompt.invalid_template"))
+            return
+        name = data["name"]
         save_preset(
             PromptPreset(
                 name=name,
@@ -214,7 +231,7 @@ class PromptStudioDialog(QDialog):
         self.presets = load_presets()
         self.preset_combo.addItem(name)
         self.preset_combo.setCurrentText(name)
-        QMessageBox.information(self, "Prompt Studio", tr("prompt.imported"))
+        QMessageBox.information(self, tr("prompt.studio"), tr("prompt.imported"))
 
     def _export_preset(self) -> None:
         self._save_current_prompt()
@@ -231,14 +248,14 @@ class PromptStudioDialog(QDialog):
         saved_path = save_preset(
             PromptPreset(
                 name=self.preset_combo.currentText() or "Custom",
-                summary=self.original_settings.summary_prompt,
-                filter=self.original_settings.filter_prompt,
+                summary=self._prompt("summary"),
+                filter=self._prompt("filter"),
             )
         )
         import shutil
 
         shutil.copyfile(saved_path, path)
-        QMessageBox.information(self, "Prompt Studio", tr("prompt.exported"))
+        QMessageBox.information(self, tr("prompt.studio"), tr("prompt.exported"))
 
     def _restore_default(self) -> None:
         preset = default_preset()
@@ -248,17 +265,23 @@ class PromptStudioDialog(QDialog):
             filter_prompt=preset.filter,
         )
         self._load_current_prompt()
-        QMessageBox.information(self, "Prompt Studio", tr("default.restored"))
+        QMessageBox.information(self, tr("prompt.studio"), tr("default.restored"))
 
     def _test_prompt(self) -> None:
-        started_at = time.perf_counter()
-        rendered = self._render_current_prompt()
-        elapsed = round(time.perf_counter() - started_at, 3)
-        QMessageBox.information(
-            self,
-            tr("prompt.test"),
-            tr("prompt.rendered", elapsed=elapsed, rendered=rendered[:1200]),
-        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("test.prompt"))
+        dialog.resize(700, 440)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel(tr("prompt.preview.hint"))
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        preview = QPlainTextEdit(self._render_current_prompt())
+        preview.setReadOnly(True)
+        layout.addWidget(preview)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def _copy_rendered_prompt(self) -> None:
         from PySide6.QtWidgets import QApplication
@@ -269,12 +292,12 @@ class PromptStudioDialog(QDialog):
         article = Article(
             news=News(
                 source="NASA Science",
-                title="Sample Mars Mission Update",
+                title=tr("prompt.sample.title"),
                 published="Thu, 02 Jul 2026 10:00:00 GMT",
-                summary="A sample RSS summary for prompt testing.",
+                summary=tr("prompt.sample.summary"),
                 url="https://science.nasa.gov/sample",
             ),
-            body="NASA released a sample article body for testing Prompt Studio.",
+            body=tr("prompt.sample.body"),
             parser="Prompt Tester",
         )
 
