@@ -34,7 +34,7 @@ def default_logo():
 def _video_logo(path, preview, cancel_check):
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
-        raise ValueError('视频 Logo 需要 PATH 中的 ffmpeg')
+        raise ValueError('视频 Logo 需要 ffmpeg。Windows 便携包请完整解压并保留 _internal/ffmpeg/；源码运行请将 ffmpeg 加入 PATH。')
     count = 1 if preview else FPS*SECONDS
     filters = ('scale=240:240:force_original_aspect_ratio=decrease:flags=lanczos,'
                'setsar=1,format=rgba,pad=240:240:(ow-iw)/2:(oh-ih)/2:color=black@0,'
@@ -166,7 +166,7 @@ def generate(output, date_text, title='航天周报', subtitle='SPACEWEEKLY', lo
                    logo_motion=logo_motion, cancel_check=cancel_check)
     ffmpeg, ffprobe = shutil.which('ffmpeg'), shutil.which('ffprobe')
     if not ffmpeg or not ffprobe:
-        raise ValueError('请将 ffmpeg 和 ffprobe 加入 PATH')
+        raise ValueError('未找到 ffmpeg 或 ffprobe。Windows 便携包请完整解压并保留 _internal/ffmpeg/；源码运行请将两者加入 PATH。')
     with reserved_output(Path(output), '.intro.mp4') as (final, temporary):
         log_path = temporary.with_suffix('.log')
         process = None

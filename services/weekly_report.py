@@ -35,7 +35,7 @@ from services.cancellation import TaskCancelledError
 from services.feed_manager import FeedSource
 from services.feed_manager import enabled_feeds
 from services.prompt_manager import find_preset
-from services.prompt_manager import prompt_value
+from services.prompt_manager import prompt_value, render_prompt
 from services.news_dates import verify_news_dates
 from services.settings import AppSettings
 from services.settings import apply_settings
@@ -169,6 +169,7 @@ def generate_weekly(
         settings,
         api_calls,
         token,
+        summaries=ai_summaries,
     )
     logger.info(
         "AI 工作流完成：筛选 %s 篇，内容生成 %s 篇，API 调用 %s 次",
@@ -504,6 +505,7 @@ def _localize_selected_titles(
     settings: AppSettings,
     api_calls: int,
     cancel_token: CancellationToken,
+    summaries: dict[str, AISummary] | None = None,
 ) -> tuple[dict[str, str], int]:
     localized = {
         article.news.url: clean_ai_text(article.news.title)
@@ -513,26 +515,32 @@ def _localize_selected_titles(
     if not _ai_configured(settings):
         return localized, api_calls
 
-    targets = [
-        article
-        for article in articles
-        if _title_language_mismatch(article.news.title, settings.language)
-    ]
+    rule = prompt_value(settings.title_prompt, find_preset(settings.prompt_preset), "title")
+    targets = articles
 
-    for start in range(0, len(targets), 30):
+    for start in range(0, len(targets), 10):
         cancel_token.check()
-        batch = targets[start:start + 30]
+        batch = targets[start:start + 10]
         ids = {f"item_{index:03d}": article.news.title for index, article in enumerate(batch)}
         urls = {f"item_{index:03d}": article.news.url for index, article in enumerate(batch)}
         api_calls += 1
 
         try:
-            translated = translate_titles(ids, settings, cancel_token=cancel_token)
+            contexts = {}
+            for index, article in enumerate(batch):
+                summary = (summaries or {}).get(article.news.url)
+                contexts[f"item_{index:03d}"] = dict(
+                    body=article.body[:4000],
+                    summary=summary.summary if summary else article.news.summary,
+                    rule=render_prompt(rule, replace(article, body=article.body[:4000])),
+                )
+            translated = translate_titles(ids, settings, cancel_token=cancel_token,
+                                          custom_prompt=rule, article_contexts=contexts)
         except TaskCancelledError:
             raise
         except Exception as exc:
             logger.error(
-                "RSS 标题批量翻译失败，保留原始标题：%s",
+                "标题生成失败，保留原始标题：%s",
                 exc,
                 exc_info=True,
                 extra={"model": settings.deepseek_model},

@@ -6,7 +6,6 @@ from PySide6.QtCore import Signal
 from services.feed_manager import FeedSource
 from services.cancellation import CancellationToken
 from services.cancellation import TaskCancelledError
-from services.weekly_report import generate_weekly
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +36,8 @@ class ReportWorker(QThread):
 
     def run(self) -> None:
         try:
+            from services.weekly_report import generate_weekly
+
             generate_weekly(
                 feeds=self.feeds,
                 export_sqlite=self.sqlite_enabled,

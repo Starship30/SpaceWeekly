@@ -88,3 +88,9 @@ QListWidget#VideoDownloadResults::item { min-height: 76px; font-weight: 400; }
 QSlider#VideoPreviewSlider::groove:horizontal { background: $border; height: 4px; border-radius: 2px; }
 QSlider#VideoPreviewSlider::sub-page:horizontal { background: $accent; border-radius: 2px; }
 QSlider#VideoPreviewSlider::handle:horizontal { background: $panel_bg; border: 2px solid $accent; width: 12px; margin: -6px 0; border-radius: 7px; }
+
+QMenu { background: $panel_bg; color: $text; border: 1px solid $border_strong; border-radius: 8px; padding: 6px; }
+QMenu::item { padding: 8px 18px; border-radius: 5px; }
+QMenu::item:selected { background: $accent; color: $selection_text; }
+QMenu::item:disabled { color: $text_subtle; }
+QMenu::separator { height: 1px; background: $border; margin: 5px 8px; }

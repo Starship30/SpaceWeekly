@@ -117,14 +117,16 @@ def translate_titles(
     settings,
     *,
     cancel_token=None,
+    custom_prompt: str = "",
+    article_contexts: dict | None = None,
 ) -> dict[str, str]:
-    """Translate existing RSS titles in one batch for the selected language."""
+    """Translate RSS titles, or generate headlines from supplied article context."""
 
     if not titles:
         return {}
 
     provider = provider_config_from_settings(settings)
-    prompt = build_title_translation_prompt(titles, settings.language)
+    prompt = build_title_translation_prompt(titles, settings.language, custom_prompt, article_contexts)
 
     def validate(data: dict[str, object]) -> None:
         if set(data) != set(titles):
@@ -139,7 +141,7 @@ def translate_titles(
     data = request_json(
         prompt,
         provider,
-        module_name="title_translation",
+        module_name="title_generation" if custom_prompt else "title_translation",
         cancel_token=cancel_token,
         validator=validate,
     )

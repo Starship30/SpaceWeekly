@@ -7,7 +7,7 @@ from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget)
+    QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget, QMenu)
 
 from i18n import tr
 from services.cancellation import CancellationToken, TaskCancelledError
@@ -193,6 +193,7 @@ class VideoDownloadDialog(QDialog):
 
     def _button(self, key, slot):
         button = QPushButton(tr('video_download.'+key))
+        button.setAutoDefault(False)
         button.clicked.connect(slot)
         return button
 
@@ -234,7 +235,6 @@ class VideoDownloadDialog(QDialog):
         self.up_ids.setToolTip(tr('video_download.up_hint'))
         self.up_ids.editingFinished.connect(self._save_preferences)
         filters.addWidget(self.up_ids, 1)
-        filters.addWidget(self._button('add_up', self._add_up))
         self.order = QComboBox()
         for mode in ('asc', 'desc', 'relevance'):
             self.order.addItem(tr('video_download.order_'+mode), mode)
@@ -261,10 +261,6 @@ class VideoDownloadDialog(QDialog):
         self.date_hint.setWordWrap(True)
         self.date_hint.setObjectName('Eyebrow')
         date_row.addWidget(self.date_hint, 1)
-        self.demo = self._button('demo', self._demo)
-        self.demo.setEnabled(False)
-        self.demo.setToolTip(tr('video_download.demo_hint'))
-        date_row.addWidget(self.demo)
         layout.addLayout(date_row)
         search = QHBoxLayout()
         self.keyword = QComboBox()
@@ -273,8 +269,9 @@ class VideoDownloadDialog(QDialog):
         self.keyword.lineEdit().setPlaceholderText(tr('video_download.keyword'))
         self.keyword.lineEdit().returnPressed.connect(self._search)
         search.addWidget(self.keyword, 1)
-        search.addWidget(self._button('search', self._search))
-        search.addWidget(self._button('open_search', self._open_search))
+        self.search_button = self._button('search', self._search)
+        self.keyword.editTextChanged.connect(self._update_download)
+        search.addWidget(self.search_button)
         layout.addLayout(search)
         self._populate_tasks()
         self.results = QListWidget()
@@ -292,8 +289,8 @@ class VideoDownloadDialog(QDialog):
         self.url.textChanged.connect(self._invalidate)
         self.url.returnPressed.connect(self._parse)
         url_row.addWidget(self.url, 1)
-        url_row.addWidget(self._button('parse', self._parse))
-        url_row.addWidget(self._button('original', self._open_original))
+        self.parse_button = self._button('parse', self._parse)
+        url_row.addWidget(self.parse_button)
         layout.addLayout(url_row)
         self.details = QLabel(tr('video_download.select_hint'))
         self.details.setTextFormat(Qt.TextFormat.PlainText)
@@ -341,20 +338,34 @@ class VideoDownloadDialog(QDialog):
         self.status.setObjectName('Eyebrow')
         outer.addWidget(self.status)
         footer = QHBoxLayout()
-        self.open_file = self._button('open_file', self._open_file)
+        self.more_menu = QMenu(self)
+        self.more_menu.setToolTipsVisible(True)
+        self.demo = self.more_menu.addAction(tr('video_download.demo'), self._demo)
+        self.demo.setToolTip(tr('video_download.demo_hint'))
+        self.more_menu.addSeparator()
+        self.original_action = self.more_menu.addAction(tr('video_download.original'), self._open_original)
+        self.search_page_action = self.more_menu.addAction(tr('video_download.open_search'), self._open_search)
+        self.add_up_action = self.more_menu.addAction(tr('video_download.add_up'), self._add_up)
+        self.more_menu.addSeparator()
+        self.folder_action = self.more_menu.addAction(tr('video_download.open_folder'), self._open_folder)
+        self.open_file = self.more_menu.addAction(tr('video_download.open_file'), self._open_file)
         self.open_file.setEnabled(False)
-        footer.addWidget(self._button('open_folder', self._open_folder))
-        footer.addWidget(self.open_file)
+        self.more = QPushButton(tr('video_download.more'))
+        self.more.setAutoDefault(False)
+        self.more.setMenu(self.more_menu)
+        footer.addWidget(self.more)
         footer.addStretch()
         self.download = self._button('download', self._download)
         self.download.setObjectName('PrimaryButton')
         self.download.setEnabled(False)
         self.cancel = self._button('cancel', self._cancel)
         self.cancel.setEnabled(False)
+        self.cancel.hide()
         footer.addWidget(self.download)
         footer.addWidget(self.cancel)
         footer.addWidget(self._button('close', self.reject))
         outer.addLayout(footer)
+        self._update_download()
 
     def _populate_tasks(self, *_):
         previous = self.tasks.currentData()
@@ -394,7 +405,12 @@ class VideoDownloadDialog(QDialog):
         if item is None:
             return
         if item.get('video_type') == 'launch':
-            keyword = item.get('summary') or item.get('title', '')
+            queries = service.mission_search_keywords(item)
+            self.keyword.blockSignals(True)
+            self.keyword.clear()
+            self.keyword.addItems(queries)
+            self.keyword.blockSignals(False)
+            keyword = queries[0] if queries else ''
         else:
             words = item.get('keywords', [])
             keyword = ' '.join(str(word) for word in words if word) if isinstance(words, list) else words
@@ -409,6 +425,7 @@ class VideoDownloadDialog(QDialog):
         if hasattr(self, 'results') and self.worker is None:
             self._abort_thumbnails()
             self.results.clear()
+            self.url.clear()
             self._invalidate()
         try:
             window = self._task_range()
@@ -426,7 +443,11 @@ class VideoDownloadDialog(QDialog):
     def _search_options(self):
         ids = service.parse_up_ids(self.up_ids.text())
         state.save_preferences(self.workspace, ids, self.order.currentData())
-        return dict(keyword=self.keyword.currentText(), up_ids=ids,
+        keyword = self.keyword.currentText()
+        item = self.tasks.currentData()
+        queries = service.mission_search_keywords(item) if item and item.get('video_type') == 'launch' else []
+        fallbacks = [query for query in queries if query != keyword] if keyword in queries else []
+        return dict(keyword=keyword, up_ids=ids, prefer_up_ids=True, fallback_keywords=fallbacks,
                     order=self.order.currentData(), date_range=self._task_range())
 
     def _demo(self):
@@ -442,7 +463,7 @@ class VideoDownloadDialog(QDialog):
         try:
             ids = service.parse_up_ids(self.up_ids.text())
             state.save_preferences(self.workspace, ids, self.order.currentData())
-            options = dict(items=items, up_ids=ids, order=self.order.currentData())
+            options = dict(items=items, up_ids=ids, order=self.order.currentData(), prefer_up_ids=True)
         except (ValueError, OSError) as error:
             self._failed(error if isinstance(error, service.VideoDownloadError)
                          else service.VideoDownloadError('preferences'))
@@ -512,6 +533,22 @@ class VideoDownloadDialog(QDialog):
     def _update_download(self, *_):
         if not hasattr(self, 'download'):
             return
+        idle = self.worker is None
+        has_keyword = bool(self.keyword.currentText().strip())
+        has_url = bool(self.url.text().strip())
+        self.search_button.setEnabled(idle and has_keyword)
+        self.parse_button.setEnabled(idle and has_url)
+        self.parse_button.setText(tr('video_download.reparse' if self.info else 'video_download.parse'))
+        self.original_action.setEnabled(idle and has_url)
+        self.search_page_action.setEnabled(idle and has_keyword)
+        row = self.results.currentItem()
+        selected_video = row.data(Qt.ItemDataRole.UserRole) if row else None
+        self.add_up_action.setEnabled(idle and selected_video is not None and bool(selected_video.author_id))
+        folder = self.downloaded_file.parent if self.downloaded_file else (self.batch_directory or self.workspace/'video-downloads')
+        self.folder_action.setEnabled(folder.is_dir())
+        self.cancel.setVisible(not idle)
+        self.download.setToolTip(tr('video_download.confirm_rights' if self.info and not self.rights.isChecked()
+                                   else 'video_download.select_hint' if self.info is None else 'video_download.parsed'))
         self.demo.setEnabled(self.worker is None and self.rights.isChecked()
                              and self.use_task_date.isChecked()
                              and any(item.get('video_type') == 'launch' for item in self.snapshot_items))
@@ -540,6 +577,7 @@ class VideoDownloadDialog(QDialog):
         self.worker.failed.connect(self._failed)
         self.worker.cancelled.connect(self._cancelled)
         self.worker.finished.connect(self._finished)
+        self._update_download()
         self.worker.start()
 
     def _search(self):
@@ -547,6 +585,7 @@ class VideoDownloadDialog(QDialog):
             return
         self._abort_thumbnails()
         self.results.clear()
+        self.url.clear()
         self._invalidate()
         try:
             options = self._search_options()
@@ -559,8 +598,13 @@ class VideoDownloadDialog(QDialog):
     def _parse(self):
         if self.worker is not None:
             return
+        try:
+            url = service.normalize_video_url(self.url.text())
+        except service.VideoDownloadError as error:
+            self._failed(error)
+            return
         self._invalidate()
-        self._begin('parse', self.url.text())
+        self._begin('parse', url)
 
     def _download(self):
         if self.download.isEnabled():
@@ -569,9 +613,14 @@ class VideoDownloadDialog(QDialog):
             self._begin('download', (self.info, self.formats.currentData()))
 
     def _select_result(self, item, *_):
+        if self.worker is not None:
+            return
         if item is not None:
             video = item.data(Qt.ItemDataRole.UserRole)
             self.url.setText(video.url)
+        else:
+            self.url.clear()
+        self._update_download()
 
     def _result(self, value):
         action = self.worker.action
@@ -619,6 +668,8 @@ class VideoDownloadDialog(QDialog):
             self._thumbnail(info, row)
         self.status.setText(tr('video_download.search_done', count=len(value.items),
                                method=tr('video_download.method_'+value.method)))
+        if value.keyword:
+            self.status.setText(self.status.text()+'\n'+tr('video_download.used_query', keyword=value.keyword))
         if value.warning:
             self.status.setText(self.status.text()+'\n'+tr('video_download.search_partial')+'\n'+value.warning)
 
@@ -835,6 +886,8 @@ class VideoDownloadDialog(QDialog):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.downloaded_file)))
 
     def reject(self):
+        if not self._close_requested and self.worker is None:
+            self._save_preferences()
         self._close_requested = True
         self._restore_pending = False
         self._abort_thumbnails()

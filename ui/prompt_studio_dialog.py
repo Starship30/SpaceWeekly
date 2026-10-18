@@ -32,6 +32,7 @@ from i18n import tr
 PROMPT_LABELS = {
     "summary": "prompt.summary",
     "filter": "prompt.filter",
+    "title": "prompt.title",
 }
 
 
@@ -57,6 +58,7 @@ class PromptStudioDialog(QDialog):
             prompt_preset=self.preset_combo.currentText(),
             summary_prompt=self._prompt("summary"),
             filter_prompt=self._prompt("filter"),
+            title_prompt=self._prompt("title"),
         )
 
     def _build_ui(self) -> None:
@@ -171,6 +173,7 @@ class PromptStudioDialog(QDialog):
             self.original_settings,
             summary_prompt=preset.summary,
             filter_prompt=preset.filter,
+            title_prompt=preset.title,
         )
         self._load_current_prompt()
 
@@ -193,6 +196,7 @@ class PromptStudioDialog(QDialog):
             name=self.preset_combo.currentText() or "Custom",
             summary=self._prompt("summary"),
             filter=self._prompt("filter"),
+            title=self._prompt("title"),
         )
         save_preset(preset)
         QMessageBox.information(self, tr("prompt.studio"), tr("preset.saved"))
@@ -220,12 +224,16 @@ class PromptStudioDialog(QDialog):
         if not isinstance(data, dict) or not all(isinstance(data.get(k), str) for k in ("name", "summary", "filter")):
             QMessageBox.warning(self, tr("prompt.studio"), tr("prompt.invalid_template"))
             return
+        if "title" in data and not isinstance(data["title"], str):
+            QMessageBox.warning(self, tr("prompt.studio"), tr("prompt.invalid_template"))
+            return
         name = data["name"]
         save_preset(
             PromptPreset(
                 name=name,
                 summary=str(data.get("summary", "")),
                 filter=str(data.get("filter", "")),
+                title=str(data.get("title") or default_preset().title),
             )
         )
         self.presets = load_presets()
@@ -250,6 +258,7 @@ class PromptStudioDialog(QDialog):
                 name=self.preset_combo.currentText() or "Custom",
                 summary=self._prompt("summary"),
                 filter=self._prompt("filter"),
+                title=self._prompt("title"),
             )
         )
         import shutil
@@ -263,6 +272,7 @@ class PromptStudioDialog(QDialog):
             self.original_settings,
             summary_prompt=preset.summary,
             filter_prompt=preset.filter,
+            title_prompt=preset.title,
         )
         self._load_current_prompt()
         QMessageBox.information(self, tr("prompt.studio"), tr("default.restored"))

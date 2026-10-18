@@ -1,12 +1,13 @@
 """Small opener editor with one saved local template."""
 import json
+import logging
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QDate, QElapsedTimer, QSignalBlocker, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QImage, QPixmap
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QDateEdit, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QWidget)
+    QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from i18n import tr
 from services.cancellation import CancellationToken, TaskCancelledError, no_cancel
@@ -35,9 +36,31 @@ class IntroWorker(QThread):
         except TaskCancelledError:
             self.cancelled.emit()
         except Exception as error:
+            logging.getLogger(__name__).exception('Opener encoding failed')
             self.failed.emit(str(error))
         else:
             self.succeeded.emit(str(path))
+
+
+class IntroPreviewWorker(QThread):
+    ready = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, options, parent=None):
+        super().__init__(parent)
+        self.options = dict(options)
+        self.token = CancellationToken()
+
+    def run(self):
+        try:
+            card = video_intro.prepare(**self.options, cancel_check=self.token.check)
+        except TaskCancelledError:
+            pass
+        except Exception as error:
+            logging.getLogger(__name__).exception('Opener animation preview failed')
+            self.failed.emit(str(error))
+        else:
+            self.ready.emit(card)
 
 
 class VideoIntroDialog(QDialog):
@@ -46,6 +69,16 @@ class VideoIntroDialog(QDialog):
         self.output = Path(output)
         self.template = self.output/'intro-template.json'
         self.worker = None
+        self.preview_worker = None
+        self._preview_card = None
+        self._logo_full = False
+        self._preview_resume = False
+        self._pending_play = False
+        self._play_clock = QElapsedTimer()
+        self._play_offset = 0
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setInterval(33)
+        self._preview_timer.timeout.connect(self._tick_preview)
         self.result_path = None
         self._closing = False
         self._logo_key = object()
@@ -105,8 +138,22 @@ class VideoIntroDialog(QDialog):
         inputs.addWidget(note)
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview.setMinimumSize(640, 360)
+        self.preview.setMinimumSize(640, 320)
         inputs.addWidget(self.preview, 1)
+        playback = QHBoxLayout()
+        self.preview_play = QPushButton(tr('video.play'))
+        self.preview_play.setToolTip(tr('video.intro_preview_hint'))
+        self.preview_play.clicked.connect(self._toggle_preview)
+        playback.addWidget(self.preview_play)
+        self.preview_slider = QSlider(Qt.Orientation.Horizontal)
+        self.preview_slider.setObjectName('VideoPreviewSlider')
+        self.preview_slider.setRange(0, video_intro.SECONDS*video_intro.FPS)
+        self.preview_slider.setAccessibleName(tr('video.intro_preview_progress'))
+        self.preview_slider.valueChanged.connect(self._seek_preview)
+        playback.addWidget(self.preview_slider, 1)
+        self.preview_time = QLabel()
+        playback.addWidget(self.preview_time)
+        inputs.addLayout(playback)
         layout.addWidget(self.inputs, 1)
         self.progress = QProgressBar()
         self.progress.setObjectName('VideoProgress')
@@ -131,6 +178,7 @@ class VideoIntroDialog(QDialog):
         row.addWidget(self.generate)
         self.cancel = QPushButton(tr('video.cancel'))
         self.cancel.setEnabled(False)
+        self.cancel.hide()
         self.cancel.clicked.connect(self._cancel)
         row.addWidget(self.cancel)
         close = QPushButton(tr('video.close'))
@@ -145,6 +193,8 @@ class VideoIntroDialog(QDialog):
         self.date.dateChanged.connect(lambda: self.refresh.start(150))
         self.end_date.dateChanged.connect(lambda: self.refresh.start(150))
         self.logo_motion.currentIndexChanged.connect(lambda: self.refresh.start(150))
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False)
         self._load_template()
         self._preview()
 
@@ -167,28 +217,145 @@ class VideoIntroDialog(QDialog):
         key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size) if path else None
         if key != self._logo_key:
             self._logo_data = video_intro.load_logo(path, preview=True)
+            self._logo_full = not self._logo_data['animated']
             self._logo_key = key
         card = video_intro.prepare(**options, logo_data=self._logo_data)
         self.logo_motion.setEnabled(not card['logo_animated'])
         return card
 
     def _preview(self, update_status=True):
+        self._stop_preview()
+        self._preview_resume = False
         try:
-            frame = video_intro.render_frame(self._prepare_card(), 3)
-            image = QImage(frame.tobytes(), video_intro.W, video_intro.H, video_intro.W*4,
-                           QImage.Format.Format_RGBA8888).copy()
-            self.preview.setPixmap(QPixmap.fromImage(image).scaled(self.preview.size(),
-                Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self._preview_card = self._prepare_card()
+            with QSignalBlocker(self.preview_slider):
+                self.preview_slider.setValue(3*video_intro.FPS)
+            self._draw_preview()
+            self.preview_play.setEnabled(True)
+            self.preview_slider.setEnabled(True)
             if update_status:
                 self.status.setText(tr('video.intro_ready'))
         except (OSError, ValueError) as error:
+            logging.getLogger(__name__).exception('Opener preview failed (text_font=%s, number_font=%s, logo=%s)',
+                video_cards.FONT, video_cards.NUMBER_FONT, self.logo.text())
+            self._preview_card = None
+            self.preview_play.setEnabled(False)
+            self.preview_slider.setEnabled(False)
             self.preview.clear()
             self.status.setText(tr('video.preview_error', error=error))
 
+    def _draw_preview(self):
+        if self._preview_card is None:
+            return
+        t = self.preview_slider.value()/video_intro.FPS
+        frame = video_intro.render_frame(self._preview_card, t)
+        image = QImage(frame.tobytes(), video_intro.W, video_intro.H, video_intro.W*4,
+                       QImage.Format.Format_RGBA8888).copy()
+        self.preview.setPixmap(QPixmap.fromImage(image).scaled(self.preview.size(),
+            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.preview_time.setText(f'{t:.1f} / {video_intro.SECONDS:.1f} s')
+
+    def _seek_preview(self, *_):
+        self._preview_resume = True
+        self._play_offset = self.preview_slider.value()
+        if self._preview_timer.isActive():
+            self._play_clock.start()
+        if self._preview_card is not None and not self._logo_full and self.preview_worker is None and self.worker is None:
+            self._load_preview_animation(False)
+        else:
+            self._draw_preview()
+
+    def _stop_preview(self):
+        self._preview_timer.stop()
+        if hasattr(self, 'preview_play'):
+            self.preview_play.setText(tr('video.play'))
+
+    def _start_playback(self):
+        if not self._preview_resume or self.preview_slider.value() >= self.preview_slider.maximum():
+            with QSignalBlocker(self.preview_slider):
+                self.preview_slider.setValue(0)
+        self._preview_resume = True
+        self._play_offset = self.preview_slider.value()
+        self._play_clock.start()
+        self._draw_preview()
+        self.preview_play.setText(tr('video.pause'))
+        self._preview_timer.start()
+
+    def _toggle_preview(self):
+        if self.worker is not None or self.preview_worker is not None:
+            return
+        if self._preview_timer.isActive():
+            self._stop_preview()
+            return
+        if self.refresh.isActive():
+            self.refresh.stop()
+            self._preview()
+        if self._preview_card is None:
+            return
+        if not self._logo_full:
+            self._load_preview_animation(True)
+        else:
+            self._start_playback()
+
+    def _load_preview_animation(self, play):
+        self._play_after_load = play
+        self.cancel.setText(tr('video.intro_cancel_preview'))
+        self.status.setText(tr('video.intro_preview_loading'))
+        self.inputs.setEnabled(False)
+        self.save.setEnabled(False)
+        self.generate.setEnabled(False)
+        self.cancel.setEnabled(True)
+        self.cancel.show()
+        self._pending_play = False
+        self.preview_worker = IntroPreviewWorker(self.options(), self)
+        self.preview_worker.ready.connect(self._preview_loaded)
+        self.preview_worker.failed.connect(lambda error: self.status.setText(tr('video.preview_error', error=error)))
+        self.preview_worker.finished.connect(self._preview_finished)
+        self.preview_worker.start()
+
+    def _preview_loaded(self, card):
+        if self._closing:
+            return
+        self._logo_data = dict(frames=card['logo_frames'], ends=card['logo_ends'],
+                               animated=card['logo_animated'], loop=card['logo_loop'])
+        self._logo_full = True
+        self._preview_card = card
+        self._pending_play = self._play_after_load
+
+    def _preview_finished(self):
+        cancelled = self.preview_worker.token.is_cancelled
+        self.cancel.setText(tr('video.cancel'))
+        self.preview_worker.deleteLater()
+        self.preview_worker = None
+        self.inputs.setEnabled(True)
+        self.save.setEnabled(True)
+        self.generate.setEnabled(True)
+        self.cancel.setEnabled(False)
+        self.cancel.hide()
+        if self._closing:
+            super().reject()
+        elif cancelled:
+            self.status.setText(tr('video.cancelled'))
+        elif self._pending_play:
+            self.status.setText(tr('video.intro_ready'))
+            self._start_playback()
+        elif self._logo_full:
+            self.status.setText(tr('video.intro_ready'))
+            self._draw_preview()
+        self._pending_play = False
+
+    def _tick_preview(self):
+        value = min(self.preview_slider.maximum(), self._play_offset+round(self._play_clock.elapsed()*video_intro.FPS/1000))
+        with QSignalBlocker(self.preview_slider):
+            self.preview_slider.setValue(value)
+        self._draw_preview()
+        if value == self.preview_slider.maximum():
+            self._stop_preview()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'status'):
-            self._preview(update_status=False)
+        if hasattr(self, 'preview_slider'):
+            self._draw_preview()
 
     def _save_template(self):
         try:
@@ -221,19 +388,23 @@ class VideoIntroDialog(QDialog):
             QMessageBox.warning(self, tr('video.intro'), str(error))
 
     def _start(self):
-        if self.worker is not None:
+        if self.worker is not None or self.preview_worker is not None:
             return
         try:
             options = self.options()
             self._prepare_card()
         except (OSError, ValueError) as error:
+            logging.getLogger(__name__).exception('Opener preparation failed (text_font=%s, number_font=%s, logo=%s)',
+                video_cards.FONT, video_cards.NUMBER_FONT, self.logo.text())
             QMessageBox.warning(self, tr('video.intro'), str(error))
             return
         self.refresh.stop()
+        self._stop_preview()
         self.inputs.setEnabled(False)
         self.save.setEnabled(False)
         self.generate.setEnabled(False)
         self.cancel.setEnabled(True)
+        self.cancel.show()
         self.progress.setValue(0)
         self.status.setText(tr('video.working'))
         self.worker = IntroWorker(self.output, options, self)
@@ -257,11 +428,16 @@ class VideoIntroDialog(QDialog):
         self.save.setEnabled(True)
         self.generate.setEnabled(True)
         self.cancel.setEnabled(False)
+        self.cancel.hide()
         if self._closing:
             super().reject()
 
     def _cancel(self):
-        if self.worker is not None:
+        if self.preview_worker is not None:
+            self.preview_worker.token.cancel()
+            self.cancel.setEnabled(False)
+            self.status.setText(tr('video.intro_preview_canceling'))
+        elif self.worker is not None:
             self.worker.cancel()
             self.cancel.setEnabled(False)
             self.status.setText(tr('video.canceling'))
@@ -272,16 +448,18 @@ class VideoIntroDialog(QDialog):
 
     def reject(self):
         self.refresh.stop()
-        if self.worker is not None:
+        self._stop_preview()
+        if self.worker is not None or self.preview_worker is not None:
             self._closing = True
             self._cancel()
         else:
             super().reject()
 
     def closeEvent(self, event):
-        if self.worker is not None:
+        if self.worker is not None or self.preview_worker is not None:
             self.reject()
             event.ignore()
         else:
             self.refresh.stop()
+            self._stop_preview()
             event.accept()

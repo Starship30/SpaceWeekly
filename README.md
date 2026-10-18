@@ -8,9 +8,19 @@ It collects aerospace RSS feeds, Space.com web news and Spaceflight News API art
 generates content only for retained items, and exports Word/Markdown weekly
 reports.
 
+## Smaller Windows builds and startup
+
+The local V3.0.2 fast build keeps two top-level entries: SpaceWeekly.exe and _internal/. The download backend and its license are inside _internal; keep the entire folder together. The ZIP is 60.8 MiB instead of 91.5 MiB, and the same-batch startup median was 3.62 seconds instead of 11.22 seconds. The unpacked folder uses 114.9 MiB instead of 92.4 MiB because it keeps dependencies unpacked. This is a startup-versus-disk-space tradeoff. First cold launch is not guaranteed below five seconds. The published original v3.0.2 release remains unchanged. See [Windows packaging and verification](tools/PACKAGING.md).
+
+The local FFmpeg build additionally includes FFmpeg and ffprobe under `_internal/ffmpeg/` for downloads, cards and intro encoding. No external installation or PATH setup is required; keep the entire folder together. Its ZIP is 128.9 MiB and unpacked size is 304.2 MiB; startup median on this machine was 3.023 seconds (OS cache not cleared). This local build has not replaced the published release linked above.
+
+The first local FontFix build removed the requirement to install BankGothic, but still depended on system Chinese fonts. FontFix2 adds an OFL-licensed Noto Chinese fallback, validates that candidate fonts can actually load, and loads font bytes in memory. Video previews and encoding can therefore use bundled text and number fonts even when no system font candidates are available. Preview and encoding failures now record their traceback in the current Workspace's error logs. See [font source and license](assets/fonts/README.md). The local FontFix2 ZIP is 142.4 MiB (320.4 MiB unpacked); retain SpaceWeekly.exe and _internal together. It has not replaced the GitHub release.
+
 ## V3.0.2 Video search and downloads
 
-Open **Video assets → Video downloads** to search Bilibili or paste a BV/av/b23 link, inspect MP4 quality (highest downloadable quality selected by default) and download into the current Workspace's `video-downloads/`. Optional Bilibili QR login saves a Windows current-user encrypted session across windows and restarts; sign out deletes it. The download window reads JSON launch mission names, excludes news by default, supports a list of UP UIDs/space links and sorts retrieved videos oldest first. Mission searches default to the launch date and following day in UTC+8. After confirming usage rights, the All launches download Demo processes every JSON launch, tries up to three dated candidates and saves one permitted MP4 at the highest downloadable quality per task. Individual failures continue; cancel stops the batch and keeps completed videos. All videos in a batch share a folder named by the UTC+8 run date, with numbering for repeated batches; filenames use original video titles with collision numbering. The Windows ZIP includes SpaceWeekly.exe, yt-dlp.exe and QR support; extract the whole ZIP together. FFmpeg and ffprobe must be on PATH for merging and video encoding. Source users install `python -m pip install -r tools/requirements-video-download.txt`. See [3.0.2 release notes](RELEASE_NOTES_3.0.2.md). See [usage, implementation research and verification limits](tools/VIDEO_DOWNLOAD.md).
+The local FFmpegFix build also includes the FontFix2 fallback font and fixes bundled tool lookup when the working directory contains another ffmpeg.exe or ffprobe.exe. Windows builds require Python 3.12+; end users need no Python or FFmpeg installation. See [packaging and verification](tools/PACKAGING.md).
+
+Open **Video assets → Video downloads** to search Bilibili or paste a BV/av/b23 link, inspect MP4 quality (highest downloadable quality selected by default) and download into the current Workspace's `video-downloads/`. Optional Bilibili QR login saves a Windows current-user encrypted session across windows and restarts; sign out deletes it. The download window reads JSON launch mission names, excludes news by default, supports a list of UP UIDs/space links and sorts retrieved videos oldest first. Mission searches default to the launch date and following day in UTC+8. After confirming usage rights, the All launches download Demo processes every JSON launch, tries up to three dated candidates and saves one permitted MP4 at the highest downloadable quality per task. Individual failures continue; cancel stops the batch and keeps completed videos. All videos in a batch share a folder named by the UTC+8 run date, with numbering for repeated batches; filenames use original video titles with collision numbering. The Windows ZIP includes SpaceWeekly.exe, yt-dlp.exe and QR support; extract the whole ZIP together. Source users and the original published ZIP need FFmpeg and ffprobe on PATH; the local FFmpeg/FFmpegFix builds include both tools. Source users install `python -m pip install -r tools/requirements-video-download.txt`. See [3.0.2 release notes](RELEASE_NOTES_3.0.2.md). See [usage, implementation research and verification limits](tools/VIDEO_DOWNLOAD.md).
 
 ## V3.0.1 fixes (included in V3.0.2)
 
@@ -30,7 +40,7 @@ Event-date checking compares only retrieved announcements. AI matching and incom
 - Video assets creates news strips, launch cards and a minimal opener with custom name, date range, logo and saved template
 - Selected news and launches are numbered independently without gaps; chronological order is configurable
 - Opener logos support static motion presets, looping GIFs and videos that hold their final frame
-- Windows EXE includes the desktop video modules and Pillow; video encoding still requires FFmpeg and ffprobe on PATH
+- Windows EXE includes the desktop video modules and Pillow; the local FFmpeg build also bundles FFmpeg/ffprobe. Source users and the original published EXE need both tools on PATH.
 - The UXP panel is an experimental offline option. Premiere 26/27 MOGRT text integration is **not host-verified**; the failed CEP experiment remains stopped and is not installed by this release
 
 See [V3.0 release notes and validation limits](RELEASE_NOTES.md).
@@ -80,7 +90,7 @@ See [V3.0 release notes and validation limits](RELEASE_NOTES.md).
 - Stage 1 returns only `importance` and `reason`
 - Stage 2 returns only `summary`, `keywords`, and `category` for retained news
 - Selectable `High_only`, `High_Medium` (default), and `All` filter levels
-- RSS titles are preserved as source data and translated in batches when needed
+- RSS titles are preserved as source data; saved headline rules summarize selected articles in batches, with original titles retained on failure
 - Stage 2 also selects up to three categories from `categories.json`
 - Category IDs and Chinese/English labels are centralized and validated locally
 - Category statistics are available through `category_counts`
@@ -250,3 +260,5 @@ Install dependencies for development:
 ```bash
 pip install -r requirements.txt
 ```
+
+Local 3.0.2 UI update: saved launch background opacity, larger default news headlines, a simpler More menu for video downloads, saved preferred uploaders with public-search fallback, mission/rocket query variants, saved AI headline rules, and opener playback with seeking. See [video assets usage](tools/VIDEO_CARDS_UI.md) and [packaging verification](tools/PACKAGING.md).

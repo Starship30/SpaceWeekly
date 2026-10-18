@@ -4,3 +4,4 @@ python-docx
 PySide6
 requests
 Pillow
+tzdata; sys_platform == "win32"

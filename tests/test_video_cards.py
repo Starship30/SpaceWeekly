@@ -150,7 +150,10 @@ class VideoCardTests(unittest.TestCase):
 
     def test_shapes_masks_number_font_and_full_text(self):
         card = video.make_card(self.data['items'][0], 1)
-        self.assertEqual(video.ImageFont.truetype(str(video.NUMBER_FONT), 82).getname(), ('BankGothic', 'Bold'))
+        number_font = video.ImageFont.truetype(str(video.NUMBER_FONT), 82)
+        self.assertTrue(number_font.getname()[0])
+        if video.NUMBER_FONT.name.lower() == 'bankgothic-bold.ttf':
+            self.assertEqual(number_font.getname(), ('BankGothic', 'Bold'))
         for image, x, y, direction, boundary, *_ in card['layers']:
             visible, _, _ = video.reveal_text(image, x, y, direction, boundary, 0)
             self.assertFalse(visible.width and visible.height)

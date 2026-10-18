@@ -37,7 +37,6 @@ from ui.widgets.log_panel import LogPanel
 from ui.widgets.report_worker import ReportWorker
 from ui.widgets.status_bar import SpaceStatusBar
 from ui.widgets.startup_worker import StartupCheckWorker
-from translator.translator import Translator
 from utils.time import format_datetime
 
 logger = logging.getLogger(__name__)
@@ -140,6 +139,8 @@ class MainWindow(QMainWindow):
         logger.info("RSS 列表已刷新")
 
     def _test_launch_data(self) -> None:
+        from translator.translator import Translator
+
         settings = self.dashboard_panel.settings_snapshot(load_settings())
         if settings.launch_range == "custom" and settings.launch_start_date > settings.launch_end_date:
             QMessageBox.warning(self, tr("launch_test_title"), tr("date.range.invalid"))

@@ -124,6 +124,24 @@ class VideoDownloadTests(unittest.TestCase):
                 patch.object(sys, 'executable', str(self.root/'SpaceWeekly.exe')):
             self.assertEqual(video.backend_command(), [str(executable)])
 
+    def test_frozen_embedded_backend_and_sidecar_override(self):
+        embedded = self.root/'runtime'/'video-backend'/'yt-dlp.exe'
+        embedded.parent.mkdir(parents=True)
+        embedded.touch()
+        sidecar = self.root/'yt-dlp.exe'
+        with patch.object(sys, 'frozen', True, create=True), \
+                patch.object(sys, '_MEIPASS', str(self.root/'runtime'), create=True), \
+                patch.object(sys, 'executable', str(self.root/'SpaceWeekly.exe')), \
+                patch.object(video.shutil, 'which', return_value=None):
+            self.assertEqual(video.backend_command(), [str(embedded)])
+            sidecar.touch()
+            self.assertEqual(video.backend_command(), [str(sidecar)])
+            sidecar.unlink()
+            embedded.unlink()
+            with self.assertRaises(video.VideoDownloadError) as error:
+                video.backend_command()
+            self.assertEqual(error.exception.code, 'dependency')
+
     def test_platform_saving_permission_is_required_and_paid_is_rejected(self):
         for rights, allowed in [({'download': 1}, True), ({'download': 0}, False),
                                 ({'download': 1, 'pay': 1}, False), ({}, False)]:

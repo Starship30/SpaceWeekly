@@ -12,7 +12,7 @@ ffmpeg -version
 ffprobe -version
 ```
 
-FFmpeg/ffprobe 需要加入 PATH。模板使用本机已有字体 `C:/Windows/Fonts/msyhbd.ttc` 和 `C:/Windows/Fonts/bankgothic-bold.ttf`。缺失会报错；请安装有使用授权的字体，或调整 `FONT`/`NUMBER_FONT`。没有下载或分发字体。不需要 AE、Creative Cloud、UXP 或 CEP 才能生成视频。
+源码运行时 FFmpeg/ffprobe 需要加入 PATH；内置 FFmpeg 的 Windows 包免安装。字体从当前 Windows 的 Fonts 目录读取：正文优先微软雅黑粗体、微软雅黑、黑体、宋体；日期和编号优先 BankGothic、Arial Bold、Segoe UI Bold 或所选中文字体。候选字体必须实际可读，缺失或损坏时继续尝试，最后使用内置 Noto Sans CJK SC Bold。字体通过内存加载，不为每个字体对象保留磁盘句柄。不要求安装 BankGothic 或额外中文字体；随包字体为 OFL 开源字体，许可和来源见 [字体说明](../assets/fonts/README.md)。内置文件也缺失或不可读时显示具体路径，片头失败的完整调用栈写入当前 Workspace 的 logs/ 和 errors/。不需要 AE、Creative Cloud、UXP 或 CEP 才能生成视频。
 
 ## 生成与重生成
 
@@ -34,7 +34,7 @@ python -m tools.video_cards output/你的快照.premiere.json --item-id "该条�
 
 ## 新闻与发射字段
 
-复用原 protocol_version `1.0` 和 `items`。普通新闻仍用标题和摘要进入画面；来源、原日期、URL 和分类保留在快照中。标题一行，50–26px；过长报错，不截断。摘要固定 34px，一行滚动，连续空白归一为空格；超过 32768px 要求缩短。动画为底部蓝色横条滑入、文字从线条遮罩后滑出、按需滚动、退出。
+复用原 protocol_version `1.0` 和 `items`。普通新闻仍用标题和摘要进入画面；来源、原日期、URL 和分类保留在快照中。标题一行，默认上限 64px、最低 26px；过长报错，不截断。摘要固定 34px，一行滚动，连续空白归一为空格；超过 32768px 要求缩短。动画为底部蓝色横条滑入、文字从线条遮罩后滑出、按需滚动、退出。
 
 发射信息可作为同一 JSON 的可选根字段 `launches`。采集层从本次 LL2 响应直接抽取，导出关闭时不收集，不重复请求 LL2。中文模式且航天术语翻译开启时，在导出前翻译火箭、任务、轨道、载荷和地点，复用现有 Translator 和 Word 的缓存。未知词可依配置调用 AI，失败保留原文并记录字段原因；已是中文的值保留。导出/渲染器本身不调用 AI。
 

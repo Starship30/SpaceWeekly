@@ -9,7 +9,7 @@ from PySide6.QtGui import QDesktopServices, QImage, QPixmap
 from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider, QSplitter,
-    QVBoxLayout, QWidget, QScrollArea)
+    QVBoxLayout, QWidget, QScrollArea, QMenu)
 from PIL import Image, ImageDraw
 
 from i18n import tr
@@ -90,6 +90,7 @@ class VideoCardsDialog(QDialog):
 
     def _button(self, label, slot):
         button = QPushButton(tr(label))
+        button.setAutoDefault(False)
         button.clicked.connect(slot)
         return button
 
@@ -106,7 +107,16 @@ class VideoCardsDialog(QDialog):
         title.setObjectName('PanelTitle')
         header.addWidget(title)
         header.addStretch()
-        header.addWidget(self._button('video.add_launch', self._add_launch))
+        self.more_menu = QMenu(self)
+        self.more_menu.addAction(tr('video.add_launch'), self._add_launch)
+        self.save_snapshot_action = self.more_menu.addAction(tr('video.save_snapshot'), self._save_snapshot)
+        self.save_snapshot_action.setEnabled(False)
+        self.more_menu.addSeparator()
+        self.more_menu.addAction(tr('video.choose_output'), self._choose_output)
+        self.more = QPushButton(tr('video.more'))
+        self.more.setAutoDefault(False)
+        self.more.setMenu(self.more_menu)
+        header.addWidget(self.more)
         header.addWidget(self._button('video.intro', self._open_intro))
         header.addWidget(self._button('video_download.title', self._open_download))
         layout.addLayout(header)
@@ -116,7 +126,6 @@ class VideoCardsDialog(QDialog):
         self.source_edit.setPlaceholderText(tr('video.load_first'))
         top.addWidget(self.source_edit, 1)
         top.addWidget(self._button('video.open_snapshot', self._choose_snapshot))
-        top.addWidget(self._button('video.save_snapshot', self._save_snapshot))
         layout.addLayout(top)
         note = QLabel(tr('video.window_hint'))
         note.setObjectName('Eyebrow')
@@ -190,11 +199,21 @@ class VideoCardsDialog(QDialog):
             field.textChanged.connect(self._edit_changed)
             self.launch_fields[key] = field
             launch_form.addRow(tr('video.launch_'+key), field)
+        self.launch_opacity = QDoubleSpinBox()
+        self.launch_opacity.setRange(0, 100)
+        self.launch_opacity.setDecimals(0)
+        self.launch_opacity.setSuffix(' %')
+        self.launch_opacity.setValue(100)
+        self.launch_opacity.setToolTip(tr('video.launch_opacity_hint'))
+        self.launch_opacity.valueChanged.connect(self._edit_changed)
+        launch_form.addRow(tr('video.launch_opacity'), self.launch_opacity)
         self.launch_box.hide()
         form.addRow(self.launch_box)
         form_widget = QWidget()
         form_widget.setProperty('formGroup', True)
         form_widget.setLayout(form)
+        self.editor_panel = form_widget
+        self.editor_panel.setEnabled(False)
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
         form_scroll.setMinimumHeight(155)
@@ -222,6 +241,8 @@ class VideoCardsDialog(QDialog):
         self.slider.setRange(0, 120)
         self.slider.valueChanged.connect(self._draw_preview)
         self.time_label = QLabel()
+        self.play.setEnabled(False)
+        self.slider.setEnabled(False)
         playback.addWidget(self.play)
         playback.addWidget(self.slider, 1)
         playback.addWidget(self.time_label)
@@ -246,7 +267,6 @@ class VideoCardsDialog(QDialog):
         self.output_edit = QLineEdit(str(self.output_root))
         self.output_edit.setReadOnly(True)
         settings.addWidget(self.output_edit, 1)
-        settings.addWidget(self._button('video.choose_output', self._choose_output))
         layout.addLayout(settings)
         outer.addWidget(self.inputs, 1)
         self.progress_bar = QProgressBar()
@@ -264,12 +284,14 @@ class VideoCardsDialog(QDialog):
         outer.addWidget(self.log)
         footer = QHBoxLayout()
         self.open_output = self._button('video.open_output', self._open_output)
+        self.open_output.setEnabled(self.output_root.is_dir())
         footer.addWidget(self.open_output)
         footer.addStretch()
         self.generate_button = self._button('video.generate_selected', self._start)
         self.generate_button.setObjectName('PrimaryButton')
         self.cancel_button = self._button('video.cancel', self._cancel)
         self.cancel_button.setEnabled(False)
+        self.cancel_button.hide()
         footer.addWidget(self.generate_button)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self._button('video.close', self.reject))
@@ -299,6 +321,8 @@ class VideoCardsDialog(QDialog):
         data = dict(data, items=video_cards.sort_items(data['items'], self.sort_order.currentData()),
                     order_policy=f'video_type_then_published_{self.sort_order.currentData()}')
         self.source, self.data, self.index = Path(path), data, -1
+        self.editor_panel.setEnabled(True)
+        self.save_snapshot_action.setEnabled(True)
         self.manifest = None
         self.source_edit.setText(str(path))
         self.items.clear()
@@ -387,6 +411,7 @@ class VideoCardsDialog(QDialog):
         item = self.data['items'][self.index]
         if self.kind.currentData() == 'launch':
             item.setdefault('launch', {}).update({key: field.text() for key, field in self.launch_fields.items()})
+            item['launch']['background_opacity'] = int(self.launch_opacity.value())
         if item['title'] != self.title_edit.text():
             item['title'] = self.title_edit.text()
             item['title_origin'] = 'user_edit'
@@ -428,6 +453,7 @@ class VideoCardsDialog(QDialog):
         for key, field in self.launch_fields.items():
             value = item.get('launch', {}).get(key, '')
             field.setText(video_cards.launch_time_text(value) if key == 'time' else value)
+        self.launch_opacity.setValue(item.get('launch', {}).get('background_opacity', 100))
         self._type_changed()
         self._changing = False
         self._prepare_preview()
@@ -529,6 +555,7 @@ class VideoCardsDialog(QDialog):
             self.output_root = Path(directory)
             self.manifest = None
             self.output_edit.setText(directory)
+            self.open_output.setEnabled(True)
 
     def _start(self):
         if self.worker is not None or self.data is None:
@@ -552,6 +579,8 @@ class VideoCardsDialog(QDialog):
         self.inputs.setEnabled(False)
         self.generate_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
+        self.cancel_button.show()
+        self.open_output.setEnabled(True)
         self.progress_bar.setValue(0)
         self.status.setText(tr('video.working'))
         self.log.appendPlainText(tr('video.snapshot_saved', path=edited))
@@ -596,6 +625,7 @@ class VideoCardsDialog(QDialog):
         self.inputs.setEnabled(True)
         self.generate_button.setEnabled(self.data is not None and bool(self.selected_ids()))
         self.cancel_button.setEnabled(False)
+        self.cancel_button.hide()
         if self._close_requested:
             super().reject()
 

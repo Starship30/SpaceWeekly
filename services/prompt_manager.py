@@ -7,7 +7,8 @@ from models.article import Article
 from resources import resource_path
 
 PROMPTS_DIR = resource_path("prompts")
-PROMPT_TYPES = ["filter", "summary"]
+DEFAULT_TITLE_RULE = '根据文章内容概括一个简单明了的标题。保留关键事实、型号和任务名称，不夸张，不添加原文没有的信息。'
+PROMPT_TYPES = ["filter", "summary", "title"]
 VARIABLES = ["title", "body", "summary", "source", "published", "url"]
 
 
@@ -16,6 +17,7 @@ class PromptPreset:
     name: str
     summary: str
     filter: str
+    title: str = DEFAULT_TITLE_RULE
 
 
 def load_presets() -> list[PromptPreset]:
@@ -98,6 +100,7 @@ def _preset_from_dict(data: dict[str, object]) -> PromptPreset:
         name=str(data.get("name", "Custom")),
         summary=str(data.get("summary", "")),
         filter=str(data.get("filter", "")),
+        title=str(data.get("title") or DEFAULT_TITLE_RULE),
     )
 
 

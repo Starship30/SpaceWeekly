@@ -31,6 +31,7 @@ class VideoSearchResults:
     items: list[VideoInfo]
     method: str = 'api'
     warning: str = ''
+    keyword: str = ''
 
 
 @dataclass(frozen=True)

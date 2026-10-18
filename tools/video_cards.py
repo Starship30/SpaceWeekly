@@ -4,11 +4,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import math
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
+from functools import lru_cache
+from io import BytesIO
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
@@ -19,8 +23,38 @@ from utils.time import parse_datetime
 
 W, H, FPS = 1920, 1080, 30
 WHITE, BLUE = (230, 230, 230, 255), (40, 19, 153, 255)
-FONT = Path('C:/Windows/Fonts/msyhbd.ttc')
-NUMBER_FONT = Path('C:/Windows/Fonts/bankgothic-bold.ttf')
+BUNDLED_FONT = bundled_resource_path('assets', 'fonts', 'NotoSansCJKsc-Bold.otf')
+
+
+@lru_cache(maxsize=4)
+def _font_bytes(path):
+    return path.read_bytes()
+
+
+def _load_font(path, size):
+    path = Path(path)
+    try:
+        # FreeType must not retain one Windows file handle per font instance.
+        return ImageFont.truetype(BytesIO(_font_bytes(path)), size)
+    except OSError as error:
+        raise ValueError(f'无法加载字体（文件缺失、损坏或不可读）：{path}') from error
+
+
+def _font_path(*names):
+    directory = Path(os.environ.get('WINDIR') or 'C:/Windows') / 'Fonts'
+    for path in [*(directory / name for name in names), BUNDLED_FONT]:
+        try:
+            _load_font(path, 16)
+        except ValueError:
+            continue
+        logging.getLogger(__name__).info('Video font selected: %s', path)
+        return path
+    return BUNDLED_FONT
+
+
+FONT = _font_path('msyhbd.ttc', 'msyh.ttc', 'simhei.ttf', 'simsun.ttc')
+# BankGothic is optional; clean Windows installations use their existing bold font.
+NUMBER_FONT = _font_path('bankgothic-bold.ttf', 'arialbd.ttf', 'segoeuib.ttf', FONT.name)
 MASK_PADDING = 8
 TEXT_LEFT, TEXT_RIGHT = 258, 1830
 SCROLL_SPEED = 80  # pixels/second at 1080p; hold both ends before leaving.
@@ -61,6 +95,7 @@ def validate_snapshot(data: dict) -> dict:
             if not isinstance(item.get('launch'), dict) or any(
                     not isinstance(item['launch'].get(key), str) for key in ('orbit', 'payload', 'site', 'time')):
                 raise ValueError(f'第 {index} 条发射任务缺少轨道、载荷、地点或时间字符串')
+            launch_background_alpha(item)
         for key in ('id', 'title', 'summary', 'source', 'published', 'url'):
             if not isinstance(item.get(key), str):
                 raise ValueError(f'第 {index} 条缺少字符串 {key}')
@@ -133,7 +168,7 @@ def wrap_text(text: str, font, width: int) -> list[str]:
 def fit_text(text: str, width: int, height: int, maximum: int, minimum: int,
              font_path: Path = FONT) -> tuple[Image.Image, int, list[str]]:
     for size in range(maximum, minimum-1, -2):
-        font = ImageFont.truetype(str(font_path), size)
+        font = _load_font(font_path, size)
         lines = wrap_text(text, font, width)
         advance = size+10
         boxes = [font.getbbox(line) for line in lines]
@@ -156,10 +191,10 @@ def make_card(item: dict, ordinal: int) -> dict:
     heading, _, _ = fit_text('SPACEWEEKLY', 148, 30, 18, 18)
     title_text = re.sub(r'\s+', ' ', item['title']).strip()
     summary_text = re.sub(r'\s+', ' ', item['summary']).strip()
-    title, title_size, title_lines = fit_text(title_text, TEXT_RIGHT-TEXT_LEFT, 58, 50, 26)
+    title, title_size, title_lines = fit_text(title_text, TEXT_RIGHT-TEXT_LEFT, 72, 64, 26)
     if len(title_lines) != 1:
         raise ValueError('标题必须能在一行内完整显示，请缩短标题')
-    font = ImageFont.truetype(str(FONT), 34)
+    font = _load_font(FONT, 34)
     summary_width = max(4, math.ceil(font.getlength(summary_text))+8)
     if summary_width > 32768:
         raise ValueError('摘要超过单卡滚动上限（32768px），请缩短展示摘要')
@@ -237,7 +272,15 @@ def render_frame(card: dict, t: float, seconds: float) -> Image.Image:
     return canvas
 
 
+def launch_background_alpha(item):
+    value = item.get('launch', {}).get('background_opacity', 100)
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 100:
+        raise ValueError('发射卡背景不透明度须为 0 至 100 的数值')
+    return round(255*value/100)
+
+
 def make_launch_card(item, ordinal):
+    background_alpha = launch_background_alpha(item)
     layers = []
     def layer(text, x, y, width, height, maximum, minimum, direction, boundary, start, duration, end, font=FONT):
         image, size, lines = fit_text(text or '待确认', width, height, maximum, minimum, font)
@@ -254,7 +297,7 @@ def make_launch_card(item, ordinal):
         layer(label, 72, y, width, 44, 34, 34, 'right', 60, 2.1, .6, 2.85)
         text = launch_time_text(item['launch'][key]) if key == 'time' else item['launch'][key]
         layer(text, 72, y+54, width, 80, 38, 24, 'right', 60, 2.85, 1, 3.75)
-    return dict(video_type='launch', layers=layers, title_font_size=title_size, title_lines=title_lines,
+    return dict(video_type='launch', background_alpha=background_alpha, layers=layers, title_font_size=title_size, title_lines=title_lines,
                 summary_font_size=summary_size, summary_lines=summary_lines, scroll_distance=0)
 
 
@@ -268,7 +311,8 @@ def render_launch_frame(card, t, seconds):
            (558+slope*1100, 1100-102*slope), (456+slope*1100, 1100)]
     entry = smooth(t, 0, .53)
     exit = smooth(t, seconds-.8, .67)
-    for points, dy, color in [(panel, 1166*(1-entry)+1220*exit, BLUE),
+    background = BLUE[:3] + (card.get('background_alpha', 255),)
+    for points, dy, color in [(panel, 1166*(1-entry)+1220*exit, background),
                                (bar, -1066*(1-entry)-1150*exit, WHITE)]:
         draw.polygon([(round(x+slope*dy), round(y+dy)) for x, y in points], fill=color)
     line = smooth(t, .5, .55)*(1-smooth(t, seconds-1.3, .35))
@@ -292,7 +336,7 @@ def render_launch_frame(card, t, seconds):
 
 
 def verify_video(path: Path, frames: int, seconds: float, ffmpeg: str, ffprobe: str,
-                 encoding='png'):
+                 encoding='png', alpha_samples=((1200, 500, 0), (120, 970, 255))):
     info = json.loads(subprocess.check_output([ffprobe, '-v', 'error', '-select_streams', 'v:0',
         *(['-show_frames'] if encoding == 'png' else []),
         '-show_entries', 'stream=codec_name,width,height,pix_fmt,nb_frames:format=duration:frame=key_frame',
@@ -306,7 +350,7 @@ def verify_video(path: Path, frames: int, seconds: float, ffmpeg: str, ffprobe: 
     if encoding == 'png' and (len(info.get('frames', [])) != frames or
                                    any(frame.get('key_frame') != 1 for frame in info['frames'])):
         raise RuntimeError('PNG MOV 必须全部为独立关键帧，拒绝 Delta 帧')
-    for x, y, expected in [(1200, 500, 0), (120, 970, 255)]:
+    for x, y, expected in alpha_samples:
         alpha = subprocess.check_output([ffmpeg, '-v', 'error', '-ss', '4', '-i', str(path),
             '-frames:v', '1', '-vf', f'alphaextract,crop=2:2:{x}:{y}', '-pix_fmt', 'gray',
             '-f', 'rawvideo', 'pipe:1'], creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -348,7 +392,8 @@ def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel
                     if process.returncode != 0:
                         raise RuntimeError('FFmpeg 编码失败')
                     cancel_check()
-                    verify_video(temporary, frames, seconds, ffmpeg, ffprobe, encoding)
+                    samples = ((1200, 500, 0), (20, 500, card['background_alpha'])) if card.get('video_type') == 'launch' else ((1200, 500, 0), (120, 970, 255))
+                    verify_video(temporary, frames, seconds, ffmpeg, ffprobe, encoding, samples)
                     cancel_check()
                 except BaseException as error:
                     if process is not None and process.poll() is None:
@@ -425,7 +470,7 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
                              fraction=fraction, message=message, file=file))
     ffmpeg, ffprobe = shutil.which('ffmpeg'), shutil.which('ffprobe')
     if not ffmpeg or not ffprobe:
-        raise ValueError('请将 ffmpeg 和 ffprobe 加入 PATH')
+        raise ValueError('未找到 ffmpeg 或 ffprobe。Windows 便携包请完整解压并保留 _internal/ffmpeg/；源码运行请将两者加入 PATH。')
     for path in (FONT, NUMBER_FONT):
         if not path.is_file():
             raise ValueError(f'缺少字体文件：{path}')
@@ -527,6 +572,8 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
                           frames=frames, seconds=card_seconds, scroll_distance=card['scroll_distance'], title_font_size=card['title_font_size'],
                           summary_font_size=card['summary_font_size'], encoding=encoding,
                           video_type=item.get('video_type', 'news'))
+            if item.get('video_type') == 'launch':
+                record['background_opacity'] = item['launch'].get('background_opacity', 100)
             save_manifest(manifest_path, payload, cancel_check)
         except BaseException:
             # This path belongs to this attempt; older rendered versions remain intact.

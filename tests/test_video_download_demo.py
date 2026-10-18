@@ -188,7 +188,7 @@ class BatchDemoTests(unittest.TestCase):
 
     def test_all_launches_own_dates_failures_continue_and_folder_is_shared(self):
         started, finished = [], []
-        def run(keyword, window, workspace, *args, output_directory=None):
+        def run(keyword, window, workspace, *args, output_directory=None, **options):
             if keyword == 'earlier mission':
                 raise video.VideoDownloadError('date_no_match')
             path = output_directory/'original title.mp4'
@@ -212,7 +212,7 @@ class BatchDemoTests(unittest.TestCase):
         self.assertEqual(finished, results)
 
     def test_repeated_batches_number_dates_without_moving_completed_video(self):
-        def run(keyword, window, workspace, *args, output_directory=None):
+        def run(keyword, window, workspace, *args, output_directory=None, **options):
             path = output_directory/'original.mp4'
             path.write_bytes(keyword.encode())
             return path
@@ -229,7 +229,7 @@ class BatchDemoTests(unittest.TestCase):
         def complete(value):
             finished.append(value)
             token.cancel()
-        def run(keyword, window, workspace, *args, output_directory=None):
+        def run(keyword, window, workspace, *args, output_directory=None, **options):
             path = output_directory/'original.mp4'
             path.write_bytes(b'keep')
             return path
@@ -323,7 +323,7 @@ class DemoDialogTests(unittest.TestCase):
             return [outcome]
         timer.start()
         with patch.object(video,'demo_download_tasks',side_effect=run) as demo:
-            self.dialog.demo.click()
+            self.dialog.demo.trigger()
             self.dialog._demo()
             self.wait()
         timer.stop()
@@ -348,7 +348,7 @@ class DemoDialogTests(unittest.TestCase):
         self.dialog.rights.setChecked(True)
         self.assertTrue(self.dialog.demo.isEnabled())
         with patch.object(video,'demo_download',side_effect=video.VideoDownloadError('date_no_match')) as run:
-            self.dialog.demo.click()
+            self.dialog.demo.trigger()
             self.wait()
         self.assertEqual(run.call_count,2)
         self.assertEqual({call.args[0] for call in run.call_args_list}, {'mission','second mission'})
@@ -363,7 +363,7 @@ class DemoDialogTests(unittest.TestCase):
         saved = self.root/'original.mp4'
         saved.write_bytes(b'completed')
         self.dialog.snapshot_items.append(dict(video_type='launch',summary='second',published='2026-10-10'))
-        def run(keyword, window, workspace, *args, output_directory=None):
+        def run(keyword, window, workspace, *args, output_directory=None, **options):
             if keyword == 'second':
                 raise video.VideoDownloadError('date_no_match')
             return saved

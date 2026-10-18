@@ -8,12 +8,24 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root))
 from config import app_version
-binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root/'dist'/'SpaceWeekly.exe'
-with tempfile.TemporaryDirectory(prefix='spaceweekly-packaged-') as directory:
+binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root/'dist'/'SpaceWeekly'/'SpaceWeekly.exe'
+(root / 'build').mkdir(exist_ok=True)
+with tempfile.TemporaryDirectory(prefix='spaceweekly-packaged-', dir=root / 'build') as directory:
     marker = Path(directory) / 'started.txt'
     env = dict(os.environ, QT_QPA_PLATFORM=os.environ.get('QT_QPA_PLATFORM', 'windows'), APPDATA=directory)
-    result = subprocess.run([str(binary), '--smoke-test', str(marker)], env=env, cwd=directory, timeout=60)
-    assert result.returncode == 0, f'Packaged startup failed: {result.returncode}'
+    system_root = os.environ['SystemRoot']
+    env['PATH'] = os.pathsep.join([str(Path(system_root) / 'System32'), system_root])
+    env['WINDIR'] = str(Path(directory) / 'no-system-fonts')
+    env = {key: value for key, value in env.items() if key.casefold() != 'nodefaultcurrentdirectoryinexepath'}
+    for name in ('ffmpeg.exe', 'ffprobe.exe'):
+        (Path(directory) / name).write_bytes(b'invalid working-directory executable')
+    result = subprocess.run([str(binary), '--smoke-test', str(marker)], env=env, cwd=directory, timeout=120)
+    trace = marker.with_suffix(".trace")
+    phases = trace.read_text(encoding='utf-8') if trace.exists() else 'No Python smoke phase reached'
+    assert result.returncode == 0, f'Packaged startup failed: {result.returncode}; phases:\n{phases}'
+    assert 'bundled-fonts-selected' in phases and 'opener-encoded-420frames' in phases, 'Strict font/encoding smoke phases missing'
+    assert 'launch-opacity-encoded' in phases and 'simplified-video-controls-and-headline-rule' in phases, 'Video UX checks missing'
+    assert 'opener-playback-and-seek' in phases, 'Opener preview playback check missing'
     assert marker.exists(), 'Packaged Qt startup did not complete'
     assert marker.read_text(encoding='utf-8').strip() == app_version(), 'Packaged app version mismatch'
-print(f'Packaged V{app_version()} Qt startup, dashboard, video dialogs, downloads, highest quality, QR renderer, yt-dlp, writing rules, date parser and opener render passed')
+print(f'Packaged V{app_version()} Qt, video dialogs, opener font fallback/PNG logo, downloads, QR, yt-dlp, bundled FFmpeg/ffprobe, MP4 encoding/merge, alpha MOV, ProRes, Word, TLS, timezones and SVG passed without external tools on PATH')

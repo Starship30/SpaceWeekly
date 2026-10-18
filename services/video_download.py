@@ -148,6 +148,25 @@ def mission_date_range(item):
         raise VideoDownloadError('task_date') from None
 
 
+def mission_search_keywords(item):
+    """Keep specific mission names first; generic payload counts use rocket names."""
+    mission = str(item.get('summary') or '').strip()
+    rocket = str(item.get('title') or '').strip()
+    generic = re.fullmatch(r'(?:一箭)?(?:\d+|[一二三四五六七八九十百两]+)\s*(?:颗|枚|个)?(?:卫星|星|载荷)(?:发射)?(?:任务)?|\d+\s+(?:satellites?|payloads?)', mission, re.I)
+    if re.search(r'[\u3400-\u9fff]', rocket):
+        canonical = re.sub(r'([1-9一二三四五六七八九])(?:号)?[Ee]$', r'\1号E', rocket)
+        numbers = '一二三四五六七八九'
+        arabic = re.sub(r'(?<![一二三四五六七八九十])([一二三四五六七八九])(?![一二三四五六七八九十])',
+                       lambda m: str(numbers.index(m[1])+1), canonical)
+        chinese = re.sub(r'(?<!\d)([1-9])(?!\d)', lambda m: numbers[int(m[1])-1], canonical)
+        variants = [canonical, chinese if chinese != canonical else arabic,
+                    re.sub(r'号E$', '号', chinese), re.sub(r'号E$', '号', arabic)]
+    else:
+        variants = [rocket, re.sub(r'(?<=\d)[A-Za-z]$', '', rocket)]
+    values = ([mission] if mission and not generic else []) + variants + [mission]
+    return list(dict.fromkeys(value[:200] for value in values if value))[:4]
+
+
 def _validate_date_range(date_range):
     if (not isinstance(date_range, (tuple, list)) or len(date_range) != 2
             or not all(isinstance(v, int) and not isinstance(v, bool) for v in date_range)
@@ -382,7 +401,7 @@ def _up_search(session, keyword, up_ids, order, cancel_check, date_range=None):
 
 
 def search_videos(keyword: str, cancel_check: CancelCheck = no_cancel, cookies=None,
-                  up_ids=(), order='asc', date_range=None) -> VideoSearchResults:
+                  up_ids=(), order='asc', date_range=None, *, prefer_up_ids=False, fallback_keywords=()) -> VideoSearchResults:
     keyword = keyword.strip()
     if not keyword or len(keyword) > 200:
         raise VideoDownloadError('keyword')
@@ -391,13 +410,43 @@ def search_videos(keyword: str, cancel_check: CancelCheck = no_cancel, cookies=N
     up_ids = parse_up_ids(' '.join(up_ids))
     if date_range is not None:
         _validate_date_range(date_range)
+    if fallback_keywords:
+        queries = list(dict.fromkeys([keyword, *fallback_keywords]))[:4]
+        for query in queries:
+            cancel_check()
+            result = search_videos(query, cancel_check, cookies, up_ids, order, date_range,
+                                   prefer_up_ids=prefer_up_ids)
+            result.keyword = query
+            if result.items:
+                return result
+        return result
+    if up_ids and prefer_up_ids:
+        items, warnings, failures = {}, [], []
+        for ids in (up_ids, ()):
+            cancel_check()
+            try:
+                found = search_videos(keyword, cancel_check, cookies, ids, order, date_range)
+                for item in found.items:
+                    items.setdefault(item.id, item)
+                if found.warning:
+                    warnings.append(found.warning)
+            except VideoDownloadError as error:
+                failures.append(error)
+                warnings.append(error.code + ': ' + error.detail)
+        if not items and failures:
+            raise VideoDownloadError('search', '; '.join(warnings))
+        ordered = sort_search_items(list(items.values()), order)
+        ordered.sort(key=lambda item: item.author_id not in up_ids)
+        return VideoSearchResults(ordered, 'priority', '; '.join(dict.fromkeys(warnings)), keyword)
     with _anonymous_session(cookies) as session:
         try:
             _get(session, 'https://www.bilibili.com/', cancel_check)
         except (requests.RequestException, ValueError):
             pass  # The API can still work without visitor cookies.
         if up_ids:
-            return _up_search(session, keyword, up_ids, order, cancel_check, date_range)
+            result = _up_search(session, keyword, up_ids, order, cancel_check, date_range)
+            result.keyword = keyword
+            return result
         try:
             items, warning = [], ''
             # shortcut: five date-filtered pages; expand if mission searches need more coverage.
@@ -409,7 +458,7 @@ def search_videos(keyword: str, cancel_check: CancelCheck = no_cancel, cookies=N
             else:
                 warning = 'Date search reached the 5-page limit'
             unique = {item.id: item for item in items}
-            return VideoSearchResults(sort_search_items(list(unique.values()), order), warning=warning)
+            return VideoSearchResults(sort_search_items(list(unique.values()), order), warning=warning, keyword=keyword)
         except (requests.RequestException, ValueError, AttributeError) as error:
             api_error = safe_error(error)
         try:
@@ -418,17 +467,20 @@ def search_videos(keyword: str, cancel_check: CancelCheck = no_cancel, cookies=N
                 raise VideoDownloadError('search', 'Search page has no readable video cards '
                                          '(dynamic page, verification or no results)')
             return VideoSearchResults(sort_search_items(_date_items(items, date_range), order), 'page',
-                'Search-page dates can be incomplete' if date_range is not None else '')
+                'Search-page dates can be incomplete' if date_range is not None else '', keyword)
         except (requests.RequestException, ValueError) as error:
             raise VideoDownloadError('search', f'{api_error}; page: {safe_error(error)}') from None
 
 
 def backend_command() -> list[str]:
-    """Keep yt-dlp optional. Frozen builds use a separately updatable executable."""
+    """Use a sidecar override, then the embedded backend; keep source installs optional."""
     if getattr(sys, 'frozen', False):
-        bundled = Path(sys.executable).parent/'yt-dlp.exe'
-        if bundled.is_file():
-            return [str(bundled)]
+        candidates = [Path(sys.executable).parent/'yt-dlp.exe']
+        if hasattr(sys, '_MEIPASS'):
+            candidates.append(Path(sys._MEIPASS)/'video-backend'/'yt-dlp.exe')
+        for executable in candidates:
+            if executable.is_file():
+                return [str(executable)]
     elif importlib.util.find_spec('yt_dlp') is not None:
         return [sys.executable, '-m', 'yt_dlp']
     executable = shutil.which('yt-dlp')
@@ -849,12 +901,17 @@ def download_video(info: VideoInfo, selected: VideoFormat, workspace: Path,
 def demo_download(keyword, date_range, workspace, up_ids=(), order='asc', cookies=None,
                   cancel_check=no_cancel, on_progress=lambda event: None,
                   on_search=lambda value: None, on_video=lambda value: None,
-                  output_directory: Path | None = None):
+                  output_directory: Path | None = None, *, prefer_up_ids=False, fallback_keywords=()):
     """Try at most three dated candidates; save one permitted MP4 through the normal backend."""
     _validate_date_range(date_range)
     cancel_check()
     on_progress(DownloadProgress('searching'))
-    results = search_videos(keyword, cancel_check, cookies, up_ids, order, date_range)
+    options = {}
+    if prefer_up_ids:
+        options['prefer_up_ids'] = True
+    if fallback_keywords:
+        options['fallback_keywords'] = fallback_keywords
+    results = search_videos(keyword, cancel_check, cookies, up_ids, order, date_range, **options)
     on_search(results)
     if not results.items:
         raise VideoDownloadError('date_no_match', results.warning)
@@ -866,7 +923,7 @@ def demo_download(keyword, date_range, workspace, up_ids=(), order='asc', cookie
             info = parse_video(candidate.url, cancel_check, cookies)
             if not _date_items([info], date_range):
                 raise VideoDownloadError('date_no_match', 'Parsed publication date does not match')
-            if up_ids and info.author_id and info.author_id not in up_ids:
+            if up_ids and not prefer_up_ids and info.author_id and info.author_id not in up_ids:
                 raise VideoDownloadError('up_missing', 'Parsed uploader does not match')
             selected = preferred_format(info.formats)
             if selected is None:
@@ -886,7 +943,8 @@ def demo_download(keyword, date_range, workspace, up_ids=(), order='asc', cookie
 def demo_download_tasks(items, workspace, up_ids=(), order='asc', cookies=None,
                         cancel_check=no_cancel, on_progress=lambda event: None,
                         on_search=lambda value: None, on_video=lambda value: None,
-                        on_task_started=lambda value: None, on_task_finished=lambda value: None):
+                        on_task_started=lambda value: None, on_task_finished=lambda value: None,
+                        prefer_up_ids=False):
     """Run one dated download per launch; retain completed jobs when another fails or is cancelled."""
     tasks = [item for item in items if item.get('video_type') == 'launch']
     if not tasks:
@@ -904,13 +962,19 @@ def demo_download_tasks(items, workspace, up_ids=(), order='asc', cookies=None,
     outcomes = []
     for index, item in enumerate(tasks, 1):
         cancel_check()
-        keyword = str(item.get('summary') or item.get('title') or '').strip()
+        queries = mission_search_keywords(item)
+        keyword = queries[0] if queries else ''
         on_task_started((index, len(tasks), item, keyword, destination))
         outcome = dict(index=index, total=len(tasks), keyword=keyword, directory=destination, path=None, error=None)
         try:
             window = mission_date_range(item)
+            options = {}
+            if prefer_up_ids:
+                options['prefer_up_ids'] = True
+            if queries[1:]:
+                options['fallback_keywords'] = queries[1:]
             outcome['path'] = demo_download(keyword, window, workspace, up_ids, order, cookies,
-                                           cancel_check, on_progress, on_search, on_video, output_directory=destination)
+                                           cancel_check, on_progress, on_search, on_video, output_directory=destination, **options)
         except TaskCancelledError:
             raise
         except Exception as error:
