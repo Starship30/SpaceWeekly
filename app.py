@@ -88,8 +88,12 @@ def main() -> None:
         checked('opener-playback-and-seek')
         cards._add_launch()
         cards.launch_opacity.setValue(35)
+        cards.launch_fields['status'].setText('成功')
+        cards.launch_fields['recovery'].setText('TEST-01: 成功 (ASDS · ASOG)')
         cards._prepare_preview()
         assert cards._preview_card['background_alpha'] == 89, 'Launch opacity failed'
+        assert cards._preview_card['status_lines'] == ['发射成功', '回收成功'], 'Status badges missing'
+        assert cards._preview_card['badge_states'] == ['success', 'success'], 'Status badge colors failed'
         writing = PromptStudioDialog(settings)
         writing.type_list.setCurrentRow(2)
         assert writing.current_type == 'title' and writing.settings().title_prompt, 'Headline rule missing'
@@ -115,6 +119,26 @@ def main() -> None:
         checked("backend")
         import shutil
         import json
+        from exporters.premiere import export_premiere
+        from exporters.word import export_word
+        from exporters.markdown import export_markdown
+        from feeds.launches import _launch_to_article
+        from services.weekly_report import _export_context
+        from docx import Document
+        snapshot = export_premiere([], {}, _export_context(settings, {}), 'zh_CN',
+                                   launches=[cards.data['items'][cards.index]])
+        exported = video_cards.load_snapshot(snapshot)['items'][0]
+        assert exported['launch']['status'] == '成功'
+        assert exported['launch']['recovery'] == 'TEST-01: 成功 (ASDS · ASOG)'
+        assert video_cards.make_card(exported, 1)['status_lines'] == ['发射成功', '回收成功']
+        stage = dict(launcher=dict(serial_number='TEST-01'), landing=dict(attempt=True, success=True))
+        launch = _launch_to_article(dict(name='Fictional packaged fixture', status=dict(id=3),
+                                        rocket=dict(launcher_stage=[stage])))
+        word_report = export_word([], launches=[launch])
+        md_report = export_markdown([], launches=[launch])
+        for text in ('\n'.join(p.text for p in Document(word_report).paragraphs), md_report.read_text(encoding='utf-8')):
+            assert '回收状态' in text and 'TEST-01: 成功' in text
+        checked('ll2-status-json-and-reports')
         ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
         for tool in (ffmpeg, ffprobe):
             assert tool and Path(tool).parent == Path(sys._MEIPASS) / "ffmpeg", "Bundled media tool missing"
@@ -148,9 +172,19 @@ def main() -> None:
             movie = video_cards.encode_card(cards._preview_card, marker.parent / encoding, 360,
                                             ffmpeg, ffprobe, encoding=encoding)
             assert movie.is_file(), 'Semi-transparent launch encoding failed'
+            x, y = cards._preview_card['status_position']
+            sample = marker.parent / (encoding + '-badge.png')
+            _run_process([ffmpeg, '-v', 'error', '-ss', '5', '-i', str(movie),
+                '-vf', f'crop=1:1:{x+30}:{y+31},format=rgba', '-frames:v', '1', str(sample)],
+                no_cancel, lambda line: None, timeout=30)
+            from PIL import Image
+            with Image.open(sample) as image:
+                red, green, blue, alpha = image.convert('RGBA').getpixel((0, 0))
+                assert alpha > 250 and green > red+80, 'Encoded success badge missing'
         checked('launch-opacity-encoded')
+        checked('launch-status-badges-encoded')
         with BytesIO() as qr:
-            make_qr("SpaceWeekly 3.0.2 package check", image_factory=PilImage).save(qr, format="PNG")
+            make_qr("SpaceWeekly " + app_version() + " package check", image_factory=PilImage).save(qr, format="PNG")
             assert qr.getvalue().startswith(bytes([137, 80, 78, 71])), "Packaged QR renderer failed"
         checked("qr")
         from docx import Document
@@ -226,4 +260,12 @@ def _show_dependency_error(message: str) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+            import traceback
+            from pathlib import Path
+            Path(sys.argv[2]).with_suffix('.error').write_text(traceback.format_exc(), encoding='utf-8')
+            sys.exit(1)
+        raise

@@ -7,6 +7,7 @@ from datetime import timedelta
 from datetime import timezone
 
 from utils.time import _timezone
+from utils.launch_status import launch_status_text, recovery_text
 from models.article import Article
 from models.news import News
 
@@ -37,6 +38,8 @@ def get_launches(
         return []
 
     params = _query_params(limit, launch_range, start_date=start_date, end_date=end_date, display_timezone=display_timezone)
+    # Detailed lists include per-flight landings; avoid a second request per launch.
+    params["mode"] = "detailed"
 
     try:
         import requests
@@ -58,7 +61,7 @@ def get_launches(
         logger.warning("Launch Library 2 request failed: %s", exc)
         return []
 
-    results = payload.get("results", [])
+    results = payload.get("results", []) if isinstance(payload, dict) else None
 
     if not isinstance(results, list):
         _LAST_ERROR = "Unexpected Launch Library 2 response"
@@ -94,7 +97,8 @@ def _launch_video_item(item, display_timezone):
         source=SOURCE, published=net, url=url, categories=[], video_type='launch',
         launch=dict(orbit=_nested_text(item, 'mission', 'orbit', 'name'),
                     payload=_nested_text(item, 'mission', 'name'), site=_nested_text(item, 'pad', 'name'),
-                    time=display_time, display_timezone=display_timezone))
+                    time=display_time, display_timezone=display_timezone,
+                    status=launch_status_text(item.get("status")), recovery=recovery_text(item)))
 
 
 def last_error() -> str:
@@ -197,6 +201,10 @@ def _launch_to_article(item: dict) -> Article:
         status=status,
         url=url,
     )
+
+    status_lines = f"Status: {launch_status_text(item.get('status'))}\nRecovery: {recovery_text(item)}"
+    summary += "\n" + status_lines
+    body += "\nRecovery: " + recovery_text(item)
 
     return Article(
         news=News(

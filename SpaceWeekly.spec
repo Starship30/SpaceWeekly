@@ -70,6 +70,11 @@ datas = [
     (str(ROOT / "feeds.json"), "."),
 ]
 
+# This runtime loads its TLS distrust policy beside frozen ssl.py.
+ssl_policy = Path(sys.base_prefix) / 'Lib' / 'codex-rejected-cas.pem'
+if ssl_policy.is_file():
+    datas.append((str(ssl_policy), '.'))
+
 a = Analysis(
     ["app.py"],
     pathex=[str(ROOT)],

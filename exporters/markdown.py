@@ -4,6 +4,8 @@ from pathlib import Path
 
 from config import OUTPUT_DIR
 from i18n import tr
+from exporters.launches import launch_fields, launch_section_title
+from utils.time import BEIJING_TIMEZONE, format_datetime
 from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
@@ -18,6 +20,9 @@ def export_markdown(
     context: ExportContext | None = None,
     assessments: dict[str, NewsAssessment] | None = None,
     cancel_check=None,
+    launches: list[Article] | None = None,
+    launch_range: str = "next_week",
+    launch_timezone: str = BEIJING_TIMEZONE,
 ) -> Path:
     """Export the compact two-stage result to UTF-8 Markdown."""
 
@@ -29,6 +34,7 @@ def export_markdown(
         ai_summaries or {},
         context,
         assessments or {},
+        launches=launches, launch_range=launch_range, launch_timezone=launch_timezone,
     )
 
     with reserved_output(OUTPUT_DIR, ".md") as (output_path, temp_path):
@@ -44,6 +50,10 @@ def _build_markdown(
     summaries: dict[str, AISummary],
     context: ExportContext | None,
     assessments: dict[str, NewsAssessment],
+    *,
+    launches: list[Article] | None = None,
+    launch_range: str = "next_week",
+    launch_timezone: str = BEIJING_TIMEZONE,
 ) -> str:
     sorted_articles = _sort_articles(articles)
     separator = tr("label_separator")
@@ -63,6 +73,20 @@ def _build_markdown(
         lines.append(f"{source}{separator}{count}")
 
     lines.extend(["", "---", ""])
+    if launches is not None and launch_range != "disabled":
+        lines.extend([f"# {launch_section_title(launch_range)}", ""])
+        if not launches:
+            lines.extend([tr("launch_none"), ""])
+        for launch in launches:
+            fields = launch_fields(launch)
+            fields["time"] = format_datetime(fields["time"], launch_timezone)
+            lines.extend([f"## {clean_ai_text(fields['name'])}", ""])
+            for label, key in [("launch_time", "time"), ("rocket", "rocket"),
+                               ("launch_operator", "provider"), ("launch_site", "pad"),
+                               ("orbit", "orbit"), ("launch_status", "status"),
+                               ("recovery_status", "recovery"), ("mission_description", "mission_description")]:
+                lines.extend([f"{tr(label)}{separator}{clean_ai_text(fields[key])}", ""])
+            lines.extend([f"{tr('report_link')}{separator}{launch.news.url}", "", "---", ""])
 
     for section, section_articles in _group_by_importance(
         sorted_articles,

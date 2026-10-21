@@ -105,6 +105,11 @@ def export_premiere(
                           launch={key: fields[key] for key in ('orbit', 'payload', 'site', 'time')})
             if isinstance(fields.get('display_timezone'), str):
                 record['launch']['display_timezone'] = fields['display_timezone']
+            for key in ('status', 'recovery'):
+                if key in fields:
+                    if not isinstance(fields[key], str):
+                        raise ValueError(f'Premiere: invalid launch {key}')
+                    record['launch'][key] = fields[key]
             payload['launches'].append(record)
     with reserved_output(OUTPUT_DIR, ".premiere.json") as (output_path, temp_path):
         cancel_check()

@@ -2,6 +2,7 @@ from pathlib import Path
 
 from config import OUTPUT_DIR
 from i18n import tr
+from exporters.launches import launch_fields as _launch_fields, launch_section_title as _launch_section_title
 from models.ai_summary import AISummary
 from models.article import Article
 from models.export_context import ExportContext
@@ -98,7 +99,6 @@ def _add_launch(
         term_translator,
     )
     fields["orbit"] = _translated_term(fields["orbit"], "orbit", term_translator)
-    fields["status"] = _translated_term(fields["status"], "status", term_translator)
     fields["mission_description"] = _translated_description(
         fields["mission_description"],
         term_translator,
@@ -114,20 +114,9 @@ def _add_launch(
     _add_label(document, tr("launch_operator"), fields["provider"])
     _add_label(document, tr("launch_site"), fields["pad"])
     _add_label(document, tr("orbit"), fields["orbit"])
-    _add_label(document, tr("status"), fields["status"])
+    _add_label(document, tr("launch_status"), fields["status"])
+    _add_label(document, tr("recovery_status"), fields["recovery"])
     _add_label(document, tr("mission_description"), fields["mission_description"])
-
-
-def _launch_section_title(launch_range: str) -> str:
-    if launch_range == "past_week":
-        return tr("launch_section_past")
-
-    if launch_range == "custom":
-        return tr("launch_section_custom")
-    if launch_range == "past_30_days":
-        return tr("launch_section_past30")
-
-    return tr("launch_section_next")
 
 
 def _translated_term(
@@ -150,65 +139,6 @@ def _translated_description(value: str, translator) -> str:
         return value
 
     return translator.translate_description(value) or value
-
-
-def _launch_fields(launch: Article) -> dict[str, str]:
-    fields = {
-        "name": launch.news.title,
-        "time": launch.news.published,
-        "rocket": "",
-        "provider": "",
-        "pad": "",
-        "mission_name": "",
-        "mission_description": "",
-        "orbit": "",
-        "status": "",
-    }
-    labels = {
-        "Launch name:": "name",
-        "Launch time:": "time",
-        "Rocket:": "rocket",
-        "Launch service provider:": "provider",
-        "Launch pad:": "pad",
-        "Mission name:": "mission_name",
-        "Mission description:": "mission_description",
-        "Orbit:": "orbit",
-        "Status:": "status",
-        "Official or video link:": None,
-    }
-    multiline_field: str | None = None
-
-    for raw_line in launch.body.splitlines():
-        line = raw_line.strip()
-
-        if not line:
-            continue
-
-        matched = False
-
-        for label, key in labels.items():
-            if not line.startswith(label):
-                continue
-
-            matched = True
-            multiline_field = key if key == "mission_description" else None
-
-            if key is not None:
-                value = line[len(label):].strip()
-
-                if value:
-                    fields[key] = value
-
-            break
-
-        if matched:
-            continue
-
-        if multiline_field:
-            existing = fields[multiline_field]
-            fields[multiline_field] = f"{existing}\n{line}".strip()
-
-    return {key: value or tr("not_available") for key, value in fields.items()}
 
 
 def _setup_styles(document) -> None:

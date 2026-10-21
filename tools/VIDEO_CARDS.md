@@ -50,7 +50,9 @@ python -m tools.video_cards output/你的快照.premiere.json --item-id "该条�
     "payload": "虚构卫星任务",
     "site": "虚构发射场 A",
     "time": "2026/10/10 20:49",
-    "display_timezone": "Asia/Shanghai"
+    "display_timezone": "Asia/Shanghai",
+    "status": "成功",
+    "recovery": "虚构级段 A: 成功 (ASDS · 虚构地点)"
   }
 }
 ```
@@ -99,3 +101,10 @@ python -m unittest tests.test_video_cards tests.test_video_cards_dialog tests.te
 87 项测试通过，覆盖 UTF-8、ID/顺序、摘要滚动、字段验证、缓存、取消/失败清理、导出关闭行为、日期区间、组徽居中、动态素材时序和模板保存。部分编码/宿主接口用模拟对象；实际 FFmpeg/Qt 验证分别记录在 `output/video-assets-smoke/verification.json`、`output/video-intro-example/verification.json`、`output/video-intro-logo-trial/verification.json`。本轮后者包括六个 7 秒/420 帧/60 fps 片头、GIF/透明 MOV/普通 MP4 的解码与循环，以及 Qt 离屏界面检查，均不是 Premiere 宿主测试。
 
 当前不做背景素材选择、旁白、自动时间线编辑、自动拼接或渲染服务。现有 UXP 保留，CEP 不恢复，EXE 尚未重建。
+
+
+## LL2 状态字段
+
+发射条目新增可选字符串 `launch.status` 和 `launch.recovery`，协议仍为 1.0，原必需字段不变。新内容包从 LL2 2.3.0 的 detailed 列表中读取 `status`、`rocket.launcher_stage[].landing` 和可用的 `rocket.spacecraft_stage[].landing`。按 LL2 状态 ID 提供中英文名称；回收依据当前飞行的 `attempt` / `success` 布尔值，保留级段身份及方式/地点，不使用火箭历史累计回收数据作判断。未知新状态保留原名，缺失数据为未知。
+
+右上角面板在预览和 MOV 中共用渲染器。两种语言的短标签由快照 `language` 决定，结果从快照可编辑状态文本中的准确状态词生成；离线渲染不联网更新状态、不调用 AI。徽标为白色描边、深色半透明内底和彩色圆点；蓝色底板仍使用 `launch.background_opacity`，徽标独立保持清晰。视频仅显示两条简短状态，原始详细文本保留在 JSON 和周报。状态、快照语言都参与缓存指纹，清单记录状态，更新时保留旧 MOV。详细使用及验收限制见 [界面说明](VIDEO_CARDS_UI.md#ll2-发射与回收状态2026-10-22)。

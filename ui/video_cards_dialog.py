@@ -194,7 +194,7 @@ class VideoCardsDialog(QDialog):
         launch_form.setHorizontalSpacing(18)
         launch_form.setVerticalSpacing(12)
         self.launch_fields = {}
-        for key in ('orbit', 'payload', 'site', 'time'):
+        for key in ('orbit', 'payload', 'site', 'time', 'status', 'recovery'):
             field = QLineEdit()
             field.textChanged.connect(self._edit_changed)
             self.launch_fields[key] = field
@@ -487,7 +487,7 @@ class VideoCardsDialog(QDialog):
             self.slider.setValue(0)
             return
         try:
-            self._preview_card = video_cards.make_card(self.data['items'][self.index], ordinal)
+            self._preview_card = video_cards.make_card(self.data['items'][self.index], ordinal, self.data['language'])
             frames = video_cards.card_frames(self._preview_card, self.seconds.value())
             self._preview_seconds = frames/video_cards.FPS
             self.slider.setRange(0, int((frames-1)/video_cards.FPS*10))

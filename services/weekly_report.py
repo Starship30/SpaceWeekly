@@ -635,6 +635,9 @@ def _export_reports(
             context,
             assessments,
             cancel_check=cancel_token.check,
+            launches=launch_articles,
+            launch_range=settings.launch_range,
+            launch_timezone=settings.display_timezone,
         )
         logger.info("导出 Markdown")
 

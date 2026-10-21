@@ -95,6 +95,9 @@ def validate_snapshot(data: dict) -> dict:
             if not isinstance(item.get('launch'), dict) or any(
                     not isinstance(item['launch'].get(key), str) for key in ('orbit', 'payload', 'site', 'time')):
                 raise ValueError(f'第 {index} 条发射任务缺少轨道、载荷、地点或时间字符串')
+            for key in ('status', 'recovery'):
+                if key in item['launch'] and not isinstance(item['launch'][key], str):
+                    raise ValueError(f'第 {index} 条发射任务 {key} 必须为字符串')
             launch_background_alpha(item)
         for key in ('id', 'title', 'summary', 'source', 'published', 'url'):
             if not isinstance(item.get(key), str):
@@ -184,9 +187,9 @@ def fit_text(text: str, width: int, height: int, maximum: int, minimum: int,
     raise ValueError(f'文本超出区域：最低字号 {minimum} 仍放不下；请缩短快照中的文本，不会自动截断')
 
 
-def make_card(item: dict, ordinal: int) -> dict:
+def make_card(item: dict, ordinal: int, language: str = 'zh_CN') -> dict:
     if item.get('video_type') == 'launch':
-        return make_launch_card(item, ordinal)
+        return make_launch_card(item, ordinal, language)
     number, _, _ = fit_text(f'{ordinal:02d}', 148, 52, 82, 62, NUMBER_FONT)
     heading, _, _ = fit_text('SPACEWEEKLY', 148, 30, 18, 18)
     title_text = re.sub(r'\s+', ' ', item['title']).strip()
@@ -279,7 +282,79 @@ def launch_background_alpha(item):
     return round(255*value/100)
 
 
-def make_launch_card(item, ordinal):
+def launch_badge_labels(fields, language='zh_CN'):
+    english = language == 'en_US'
+    status = fields.get('status', '').strip().casefold()
+    label, state = ('Launch unknown' if english else '发射未知'), 'unknown'
+    for aliases, zh, en, result in [
+        (('成功', '发射成功', 'successful', 'launch successful'), '发射成功', 'Launch successful', 'success'),
+        (('失败', '发射失败', 'failed', 'launch failure'), '发射失败', 'Launch failed', 'failure'),
+        (('部分失败', '发射部分失败', 'partial failure', 'launch was a partial failure'), '发射部分失败', 'Partial failure', 'partial'),
+        (('待发射', 'go for launch'), '待发射', 'Awaiting launch', 'pending'),
+        (('待定', 'to be determined'), '发射待定', 'Launch TBD', 'pending'),
+        (('暂停', 'on hold'), '发射暂停', 'Launch on hold', 'pending'),
+        (('飞行中', 'in flight', 'launch in flight'), '飞行中', 'In flight', 'flight'),
+        (('待确认', 'to be confirmed'), '发射待确认', 'Launch TBC', 'pending'),
+        (('载荷已部署', 'payload deployed'), '载荷已部署', 'Payload deployed', 'flight'),
+    ]:
+        if status in aliases:
+            label, state = en if english else zh, result
+            break
+    results = []
+    aliases = {'成功': 'success', '回收成功': 'success', 'successful': 'success',
+               '失败': 'failure', '回收失败': 'failure', 'failed': 'failure',
+               '部分失败': 'partial', '回收部分失败': 'partial', 'partial failure': 'partial',
+               '结果待确认': 'pending', '回收待确认': 'pending', 'awaiting result': 'pending',
+               '不尝试回收': 'none', '不回收': 'none', 'no landing attempt': 'none'}
+    # These are the saved per-stage display fields; exact labels avoid matching names/locations.
+    for part in re.split(r'[;；\n]+', fields.get('recovery', '')):
+        text = re.split(r'[(（]', part.rsplit(':', 1)[-1].rsplit('：', 1)[-1], maxsplit=1)[0]
+        results.append(aliases.get(text.strip().casefold(), 'unknown'))
+    states = set(results)
+    if 'partial' in states or {'failure', 'success'} <= states:
+        recovery = 'partial'
+    elif 'failure' in states:
+        recovery = 'failure'
+    elif 'unknown' in states or 'pending' in states:
+        recovery = 'unknown' if states == {'unknown'} else 'pending'
+    elif 'success' in states:
+        recovery = 'success'
+    else:
+        recovery = 'none'
+    names = {'success': ('回收成功', 'Recovery successful'), 'failure': ('回收失败', 'Recovery failed'),
+             'partial': ('回收部分失败', 'Partial recovery failure'), 'pending': ('回收待确认', 'Recovery pending'),
+             'unknown': ('回收未知', 'Recovery unknown'), 'none': ('不回收', 'No recovery attempt')}
+    return [(label, state), (names[recovery][int(english)], recovery)]
+
+
+def make_status_badges(fields, language='zh_CN'):
+    labels = launch_badge_labels(fields, language)
+    colors = {'success': (45, 183, 26, 255), 'failure': (235, 72, 75, 255),
+              'partial': (242, 178, 51, 255), 'pending': (242, 178, 51, 255),
+              'flight': (56, 156, 235, 255), 'unknown': (135, 145, 157, 255),
+              'none': (135, 145, 157, 255)}
+    font = _load_font(FONT, 64)
+    badges = []
+    for text, state in labels:
+        width = math.ceil(font.getlength(text)/2)+78
+        image = Image.new('RGBA', (width*2, 124))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((2, 2, width*2-3, 121), 59, fill=(8, 12, 14, 185),
+                               outline=(245, 247, 250, 255), width=7)
+        draw.ellipse((20, 22, 100, 102), fill=colors[state])
+        box = font.getbbox(text)
+        draw.text((116, (124-(box[3]-box[1]))/2-box[1]), text, font=font, fill=(245, 247, 250, 255))
+        badges.append(image.resize((width, 62), Image.Resampling.LANCZOS))
+    panel = Image.new('RGBA', (sum(b.width for b in badges)+24, 62))
+    x = 0
+    for badge in badges:
+        panel.alpha_composite(badge, (x, 0))
+        x += badge.width+24
+    return dict(status_panel=panel, status_lines=[label for label, _ in labels],
+                badge_states=[state for _, state in labels], status_position=(W-48-panel.width, 48))
+
+
+def make_launch_card(item, ordinal, language='zh_CN'):
     background_alpha = launch_background_alpha(item)
     layers = []
     def layer(text, x, y, width, height, maximum, minimum, direction, boundary, start, duration, end, font=FONT):
@@ -290,14 +365,18 @@ def make_launch_card(item, ordinal):
     layer('LAUNCH MISSION', 48, 120, 370, 32, 25, 25, 'down', 104, .95, .35, 1.8)
     title_size, title_lines = layer(item['title'], 46, 174, 395, 60, 54, 30, 'up', 243, 1.4, .4, 2.05)
     summary_size, summary_lines = layer(item['summary'], 46, 260, 410, 66, 34, 22, 'down', 250, 1.4, .4, 2.2)
-    for i, (label, key) in enumerate([('目标轨道', 'orbit'), ('任务载荷', 'payload'),
-                                     ('发射地点', 'site'), ('发射时间', 'time')]):
+    english = language == 'en_US'
+    labels = [('Orbit', 'orbit'), ('Payload', 'payload'), ('Launch site', 'site'), ('Launch time', 'time')] if english else [
+        ('目标轨道', 'orbit'), ('任务载荷', 'payload'), ('发射地点', 'site'), ('发射时间', 'time')]
+    for i, (label, key) in enumerate(labels):
         y = 347+i*166
         width = math.floor(456+170*(y+54)/H-18-72)
         layer(label, 72, y, width, 44, 34, 34, 'right', 60, 2.1, .6, 2.85)
         text = launch_time_text(item['launch'][key]) if key == 'time' else item['launch'][key]
         layer(text, 72, y+54, width, 80, 38, 24, 'right', 60, 2.85, 1, 3.75)
-    return dict(video_type='launch', background_alpha=background_alpha, layers=layers, title_font_size=title_size, title_lines=title_lines,
+    return dict(video_type='launch', background_alpha=background_alpha,
+                **make_status_badges(item['launch'], language),
+                layers=layers, title_font_size=title_size, title_lines=title_lines,
                 summary_font_size=summary_size, summary_lines=summary_lines, scroll_distance=0)
 
 
@@ -332,6 +411,12 @@ def render_launch_frame(card, t, seconds):
             visible, px, py = reveal_text(image, x, y, direction, boundary, progress)
             if visible.width and visible.height:
                 canvas.alpha_composite(visible, (px, py))
+    progress = smooth(t, 1.1, .45)*(1-smooth(t, seconds-.8, .6))
+    if progress and card.get('status_panel') is not None:
+        panel = card['status_panel'].copy()
+        panel.putalpha(panel.getchannel('A').point(lambda alpha: round(alpha*progress)))
+        x, y = card['status_position']
+        canvas.alpha_composite(panel, (x, y+round(10*(1-progress))))
     return canvas
 
 
@@ -512,7 +597,7 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
             cards.append(None)
             continue
         try:
-            cards.append(make_card(item, ordinal))
+            cards.append(make_card(item, ordinal, data['language']))
         except ValueError as error:
             if item['id'] not in selected:
                 cards.append(None)
@@ -522,7 +607,7 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
     source = Path(__file__)
     if not source.is_file():
         source = bundled_resource_path('tools', 'video_cards.py')
-    signature = [sha_file(source), sha_file(FONT), sha_file(NUMBER_FONT), encoding]
+    signature = [sha_file(source), sha_file(FONT), sha_file(NUMBER_FONT), encoding, data['language']]
     fingerprints = [hashlib.sha256(json.dumps([item['id'], item['title'], item['summary'],
                     item.get('video_type', 'news'), item.get('launch'), i,
                     frames, signature], ensure_ascii=False).encode('utf-8')).hexdigest() if frames is not None else None
@@ -574,6 +659,8 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
                           video_type=item.get('video_type', 'news'))
             if item.get('video_type') == 'launch':
                 record['background_opacity'] = item['launch'].get('background_opacity', 100)
+                for key in ('status', 'recovery'):
+                    record[key] = item['launch'].get(key, '')
             save_manifest(manifest_path, payload, cancel_check)
         except BaseException:
             # This path belongs to this attempt; older rendered versions remain intact.

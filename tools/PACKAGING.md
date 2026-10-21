@@ -1,6 +1,6 @@
 # Windows 精简打包
 
-程序版本仍为 3.0.2，已发布的原版文件保持不变。精简构建调整打包范围，不裁掉应用功能。
+当前应用版本为 3.0.3。下方保留此前 3.0.2 各构建的历史记录，旧发布文件不替换。精简构建保留现有应用功能。
 
 Windows 构建使用 Python 3.12+，安装 requirements.txt、tools/requirements-video-download.txt 和 PyInstaller。3.12 起的工具查找行为用于防止工作目录中的同名程序覆盖包内工具；spec 会拒绝更旧的构建解释器。此要求仅针对 Windows 打包。
 将官方 yt-dlp 2026.08.19 的 yt-dlp.exe 与 LICENSE 放到 build/video-backend/，将 LICENSE 命名为 yt-dlp-LICENSE.txt。可用 SPACEWEEKLY_VIDEO_BACKEND 指定 EXE 的其他路径，许可文件需同目录。
@@ -19,6 +19,7 @@ Windows 构建使用 Python 3.12+，安装 requirements.txt、tools/requirements
 | ffprobe.exe | 192a1d6899059765ac8c39764fc3148d4e6049955956dc2029f81f4bd6a8972d |
 
 从项目根目录执行 python -m PyInstaller --noconfirm --clean SpaceWeekly.spec。
+受限构建环境可将 PYTHONUSERBASE 指向项目 build/ 下的独立目录，并设置 PYTHONNOUSERSITE=1、PYINSTALLER_CONFIG_DIR=项目 build/ 下的缓存目录，避免扫描个人 Python 目录；这些设置仅用于构建进程。
 使用 python tests/check_packaged.py 指定生成的 SpaceWeekly.exe 验收。
 
 打包保留 QWidget、QtNetwork、SVG、Pillow 图像格式、Word 导出和证书校验；排除本应用未使用的 NumPy/OpenBLAS、pyOpenSSL/cryptography、Qt QML/PDF/虚拟键盘与软件 OpenGL。账号会话仍用 Windows DPAPI 加密。若未来加入 OpenGL/QML/PDF 界面，需要恢复对应组件。
@@ -136,3 +137,20 @@ FFmpegFix 最终包验收结果：正式 EXE 和中文、空格路径下的解�
 离屏测试无法读取 Windows 字体时可能呈现方框；界面视觉验收改用原生 Windows 平台和正常系统字体。屏蔽系统字体只用于确认导出器确实使用内置 Noto 字体，不用该环境的界面截图判断字体效果。
 
 VideoUX Preview 最终包验收：正式 EXE 和中文/空格路径下的解压 EXE 均通过新增片头播放/拖动、半透明发射卡和完整片头检查。ZIP CRC 与全部解压文件 SHA-256 一致。ZIP 149,357,640 字节（142.4 MiB），解压 320.4 MiB，共 143 个文件，顶层仍为 SpaceWeekly.exe 与 _internal。SHA-256：`a3998aae8aefae466822742035626b4981bec8768cc57b6b889f16819b696765`。
+
+
+## 3.0.3 构建运行时 TLS 资源
+
+当前构建解释器的 ssl.py 会从自身旁边读取 codex-rejected-cas.pem，以保留运行时的证书拒绝策略。该文件在运行时存在时，spec 将原文件一并放入 _internal 根目录；普通 Python 发行版没有此文件时不添加。没有修改 ssl.py、禁用 TLS 校验或放宽信任策略。验收先比较该资源与构建解释器原文件的 SHA-256，再在实际 EXE 内创建开启主机名校验的 TLS 上下文。验收异常会写入明确的 .error 日志，避免无控制台模式的错误窗口被误当成超时。
+
+
+## 3.0.3 最终包验收（2026-10-22）
+
+- ZIP：`dist/v3.0.3/SpaceWeekly_v3.0.3_Windows_x64.zip`。
+- 下载大小 149,370,162 字节（142.5 MiB）；解压文件总大小 335,970,892 字节（320.4 MiB），144 个文件。程序目录顶层仍为 SpaceWeekly.exe 与 _internal 两项。
+- SHA-256：`2fa1fe47892d2efebad9aaa82d27c0accf5bd7eb398fe6e17b604ff4dd39f1f4`，同目录提供 SHA256SUMS.txt。
+- 正式 EXE 与中文/空格路径解压 EXE 均通过综合验收，含新增 LL2 状态周报、PR JSON、两种完整 12 秒 MOV 中的绿色徽标，以及内置字体/工具、片头播放拖动及完整编码、二维码、Word、TLS、时区和 SVG；移除外部工具 PATH，屏蔽系统字体，阻止当前目录同名工具覆盖。
+- ZIP CRC 与所有解压文件 SHA-256 一致；315 项 Python 测试通过。包内 yt-dlp 已经由仅绑定 127.0.0.1 的临时 HTTP 服务实际下载自制视频和音频，由包内 FFmpeg 合并成 H.264/AAC MP4 并完整解码通过。
+- 新增 1 个运行时 TLS 策略资源文件；未禁用证书验证。没有重新测量冷启动时间、使用真实账号扫码、批量下载整周任务或在 Premiere 宿主中复验。
+
+详细日志：build/v3.0.3-build.log、build/v3.0.3-tests.log、build/v3.0.3-smoke.log、build/v3.0.3-extracted-smoke.log、build/v3.0.3-media-backend.log、build/v3.0.3-package-result.json。既有 Workspace、原始 JSON 和旧素材不迁移、不删除；既有 GitHub 3.0.2 Release 附件保持不变。

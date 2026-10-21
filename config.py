@@ -9,7 +9,7 @@ OUTPUT_DIR = resource_path("output")
 
 def app_version() -> str:
     """Single source for the application version."""
-    return "3.0.2"
+    return "3.0.3"
 
 
 APP_EDITION = "AI Workflow Edition"

@@ -1,26 +1,26 @@
 # SpaceWeekly
 
-[Download V3.0.2 for Windows x64](https://github.com/Starship30/SpaceWeekly/releases/download/v3.0.2/SpaceWeekly_v3.0.2_Windows_x64.zip)
+[Published Windows releases](https://github.com/Starship30/SpaceWeekly/releases)
 
-SpaceWeekly V3.0.2 AI Workflow Edition is an AI Aerospace News Workspace.
+Current local build: **SpaceWeekly_v3.0.3_Windows_x64.zip**. See [3.0.3 release notes](RELEASE_NOTES_3.0.3.md).
+
+SpaceWeekly V3.0.3 AI Workflow Edition is an AI Aerospace News Workspace.
 
 It collects aerospace RSS feeds, Space.com web news and Spaceflight News API articles, screens news importance,
 generates content only for retained items, and exports Word/Markdown weekly
 reports.
 
-## Smaller Windows builds and startup
+## Windows V3.0.3
 
-The local V3.0.2 fast build keeps two top-level entries: SpaceWeekly.exe and _internal/. The download backend and its license are inside _internal; keep the entire folder together. The ZIP is 60.8 MiB instead of 91.5 MiB, and the same-batch startup median was 3.62 seconds instead of 11.22 seconds. The unpacked folder uses 114.9 MiB instead of 92.4 MiB because it keeps dependencies unpacked. This is a startup-versus-disk-space tradeoff. First cold launch is not guaranteed below five seconds. The published original v3.0.2 release remains unchanged. See [Windows packaging and verification](tools/PACKAGING.md).
+The portable ZIP includes FFmpeg/ffprobe, yt-dlp, QR support and an OFL-licensed Noto Chinese fallback font. Extract the complete folder and keep **SpaceWeekly.exe** and **_internal/** together; no external Python or FFmpeg installation is needed. The folder layout avoids extracting all dependencies on every startup. See [packaging and verification](tools/PACKAGING.md).
 
-The local FFmpeg build additionally includes FFmpeg and ffprobe under `_internal/ffmpeg/` for downloads, cards and intro encoding. No external installation or PATH setup is required; keep the entire folder together. Its ZIP is 128.9 MiB and unpacked size is 304.2 MiB; startup median on this machine was 3.023 seconds (OS cache not cleared). This local build has not replaced the published release linked above.
-
-The first local FontFix build removed the requirement to install BankGothic, but still depended on system Chinese fonts. FontFix2 adds an OFL-licensed Noto Chinese fallback, validates that candidate fonts can actually load, and loads font bytes in memory. Video previews and encoding can therefore use bundled text and number fonts even when no system font candidates are available. Preview and encoding failures now record their traceback in the current Workspace's error logs. See [font source and license](assets/fonts/README.md). The local FontFix2 ZIP is 142.4 MiB (320.4 MiB unpacked); retain SpaceWeekly.exe and _internal together. It has not replaced the GitHub release.
+LL2 detailed launch lists feed launch and per-stage recovery results into Word, Markdown and `.premiere.json`. The video assets window generates two compact top-right status badges with white outlines, dark translucent fills and colored dots. Green indicates success, red failure, amber pending/partial failure, blue in flight/deployed and gray unknown/no attempt. Saved status fields remain editable; unknown data never implies success. The UXP plugin still imports news directly; render launch MOVs in Video assets and import them into Premiere.
 
 ## V3.0.2 Video search and downloads
 
 The local FFmpegFix build also includes the FontFix2 fallback font and fixes bundled tool lookup when the working directory contains another ffmpeg.exe or ffprobe.exe. Windows builds require Python 3.12+; end users need no Python or FFmpeg installation. See [packaging and verification](tools/PACKAGING.md).
 
-Open **Video assets → Video downloads** to search Bilibili or paste a BV/av/b23 link, inspect MP4 quality (highest downloadable quality selected by default) and download into the current Workspace's `video-downloads/`. Optional Bilibili QR login saves a Windows current-user encrypted session across windows and restarts; sign out deletes it. The download window reads JSON launch mission names, excludes news by default, supports a list of UP UIDs/space links and sorts retrieved videos oldest first. Mission searches default to the launch date and following day in UTC+8. After confirming usage rights, the All launches download Demo processes every JSON launch, tries up to three dated candidates and saves one permitted MP4 at the highest downloadable quality per task. Individual failures continue; cancel stops the batch and keeps completed videos. All videos in a batch share a folder named by the UTC+8 run date, with numbering for repeated batches; filenames use original video titles with collision numbering. The Windows ZIP includes SpaceWeekly.exe, yt-dlp.exe and QR support; extract the whole ZIP together. Source users and the original published ZIP need FFmpeg and ffprobe on PATH; the local FFmpeg/FFmpegFix builds include both tools. Source users install `python -m pip install -r tools/requirements-video-download.txt`. See [3.0.2 release notes](RELEASE_NOTES_3.0.2.md). See [usage, implementation research and verification limits](tools/VIDEO_DOWNLOAD.md).
+Open **Video assets → Video downloads** to search Bilibili or paste a BV/av/b23 link, inspect MP4 quality (highest downloadable quality selected by default) and download into the current Workspace's `video-downloads/`. Optional Bilibili QR login saves a Windows current-user encrypted session across windows and restarts; sign out deletes it. The download window reads JSON launch mission names, excludes news by default, supports a list of UP UIDs/space links and sorts retrieved videos oldest first. Mission searches default to the launch date and following day in UTC+8. After confirming usage rights, the All launches download Demo processes every JSON launch, tries up to three dated candidates and saves one permitted MP4 at the highest downloadable quality per task. Individual failures continue; cancel stops the batch and keeps completed videos. All videos in a batch share a folder named by the UTC+8 run date, with numbering for repeated batches; filenames use original video titles with collision numbering. The V3.0.3 ZIP includes the download backend and FFmpeg under _internal; extract the whole ZIP together. Source users need FFmpeg and ffprobe on PATH. Source users install `python -m pip install -r tools/requirements-video-download.txt`. See [3.0.2 release notes](RELEASE_NOTES_3.0.2.md). See [usage, implementation research and verification limits](tools/VIDEO_DOWNLOAD.md).
 
 ## V3.0.1 fixes (included in V3.0.2)
 
@@ -262,3 +262,5 @@ pip install -r requirements.txt
 ```
 
 Local 3.0.2 UI update: saved launch background opacity, larger default news headlines, a simpler More menu for video downloads, saved preferred uploaders with public-search fallback, mission/rocket query variants, saved AI headline rules, and opener playback with seeking. See [video assets usage](tools/VIDEO_CARDS_UI.md) and [packaging verification](tools/PACKAGING.md).
+
+LL2 launch/recovery update (2026-10-22): detailed launch lists supply launch status and per-stage landing results to Word, Markdown and the Premiere JSON. Launch MOVs include a top-right status panel; both status fields can be edited and saved. Missing results stay unknown. See [video assets usage](tools/VIDEO_CARDS_UI.md).
