@@ -54,6 +54,8 @@ def generate_weekly(
     export_markdown_enabled: bool | None = None,
     export_word_enabled: bool | None = None,
     cancel_token: CancellationToken | None = None,
+    *, prepared: dict | None = None, collect_only: bool = False,
+    defer_exports: bool = False, result_callback=None,
 ) -> list[Article]:
     """Generate a report with separate AI screening and content stages."""
 
@@ -64,10 +66,12 @@ def generate_weekly(
     set_language(settings.language)
     logger.setLevel(logging.DEBUG if not settings.release_mode else logging.NOTSET)
     apply_settings(settings)
+    if prepared and prepared.get('source_scope') and prepared['source_scope']!=prepared_scope(settings):
+        raise ValueError('资料日期范围已变化；请重新采集或恢复原范围，未隐式刷新资料')
     logger.info("SpaceWeekly v%s", app_version())
     logger.info("AI Model: %s", settings.deepseek_model or "-")
 
-    if _ai_configured(settings):
+    if _ai_configured(settings) and not collect_only:
         settings = _resolve_runtime_model(settings, token)
 
     if export_sqlite:
@@ -84,49 +88,60 @@ def generate_weekly(
     date_range = _date_range(settings)
     web_feeds = [feed for feed in selected_feeds if SpaceComWebProvider.handles(feed.rss)]
     api_feeds = [feed for feed in selected_feeds if SpaceflightNewsProvider.handles(feed.rss)]
-    launch_video_items = [] if settings.export_premiere else None
-    rss_news, launch_articles = get_news(
-        [feed for feed in selected_feeds if feed not in web_feeds and feed not in api_feeds],
-        settings.rss_limit,
-        settings.launch_range,
-        token,
-        launch_start_date=settings.launch_start_date,
-        launch_end_date=settings.launch_end_date,
-        display_timezone=settings.display_timezone,
-        news_date_range=date_range,
-        **({"launch_video_items": launch_video_items} if launch_video_items is not None else {}),
-    )
-    news_list = _filter_news(rss_news, date_range)
-    logger.info("基础解析文章数量：%s", len(news_list))
-    parsed_articles = _parse_articles(news_list, token)
-    if web_feeds:
-        token.check()
-        try:
-            web_articles = SpaceComWebProvider().fetch(
-                limit=settings.rss_limit, cancel_check=token.check, date_range=date_range,
-            )
-        except SpaceComError as exc:
-            logger.warning("[Space.com] Provider failed, continuing other sources: %s", exc)
-            web_articles = []
-        token.check()
-        parsed_articles.extend(
-            article for article in web_articles
-            if _filter_news([article.news], date_range)
+    launch_video_items = [] if settings.export_premiere or collect_only or defer_exports else None
+    if prepared is None:
+        rss_news, launch_articles = get_news(
+            [feed for feed in selected_feeds if feed not in web_feeds and feed not in api_feeds],
+            settings.rss_limit,
+            settings.launch_range,
+            token,
+            launch_start_date=settings.launch_start_date,
+            launch_end_date=settings.launch_end_date,
+            display_timezone=settings.display_timezone,
+            news_date_range=date_range,
+            **({"launch_video_items": launch_video_items} if launch_video_items is not None else {}),
         )
-    if api_feeds:
-        token.check()
-        try:
-            api_articles = SpaceflightNewsProvider().fetch(
-                limit=settings.rss_limit, cancel_check=token.check, date_range=date_range,
+        news_list = _filter_news(rss_news, date_range)
+        logger.info("基础解析文章数量：%s", len(news_list))
+        parsed_articles = _parse_articles(news_list, token)
+        if web_feeds:
+            token.check()
+            try:
+                web_articles = SpaceComWebProvider().fetch(
+                    limit=settings.rss_limit, cancel_check=token.check, date_range=date_range,
+                )
+            except SpaceComError as exc:
+                logger.warning("[Space.com] Provider failed, continuing other sources: %s", exc)
+                web_articles = []
+            token.check()
+            parsed_articles.extend(
+                article for article in web_articles
+                if _filter_news([article.news], date_range)
             )
-        except SpaceflightNewsError as exc:
-            logger.warning("[SNAPI] Provider failed, continuing other sources: %s", exc)
-            api_articles = []
-        token.check()
-        parsed_articles.extend(api_articles)
-    if settings.news_dedup_enabled:
-        parsed_articles = _deduplicate_articles(parsed_articles, token)
-    logger.info("基础解析完成：%s 篇", len(parsed_articles))
+        if api_feeds:
+            token.check()
+            try:
+                api_articles = SpaceflightNewsProvider().fetch(
+                    limit=settings.rss_limit, cancel_check=token.check, date_range=date_range,
+                )
+            except SpaceflightNewsError as exc:
+                logger.warning("[SNAPI] Provider failed, continuing other sources: %s", exc)
+                api_articles = []
+            token.check()
+            parsed_articles.extend(api_articles)
+        if settings.news_dedup_enabled:
+            parsed_articles = _deduplicate_articles(parsed_articles, token)
+        logger.info("基础解析完成：%s 篇", len(parsed_articles))
+    else:
+        parsed_articles = prepared['articles']
+        launch_articles = prepared.get('launch_articles', [])
+        launch_video_items = prepared.get('launch_video_items', [])
+    if collect_only:
+        if result_callback:
+            result_callback(dict(articles=parsed_articles, launch_articles=launch_articles,
+                                 launch_video_items=launch_video_items or [], summaries={}, assessments={}, context=None,
+                                 source_scope=prepared_scope(settings)))
+        return parsed_articles
 
     preset = find_preset(settings.prompt_preset)
     assessments: dict[str, NewsAssessment] = {}
@@ -180,19 +195,43 @@ def generate_weekly(
     )
 
     context = _export_context(settings, localized_titles)
-    _export_reports(
-        selected_articles,
-        ai_summaries,
-        assessments,
-        context,
-        launch_articles,
-        settings,
-        markdown_enabled,
-        word_enabled,
-        token,
-        launch_video_items=launch_video_items,
-    )
+    if defer_exports:
+        translator = _launch_term_translator(settings, token)
+        if settings.language == 'zh_CN' and settings.aerospace_translation_enabled:
+            launch_articles, launch_video_items = _prepare_launch_research(
+                launch_articles, launch_video_items, settings, token, translator)
+        if launch_video_items:
+            launch_video_items = _localize_launch_video_items(launch_video_items, translator, token)
+        if result_callback:
+            result_callback(dict(articles=selected_articles, launch_articles=launch_articles,
+                                 launch_video_items=launch_video_items or [], summaries=ai_summaries,
+                                 assessments=assessments, context=context,source_scope=prepared_scope(settings)))
+    else:
+        _export_reports(
+            selected_articles,
+            ai_summaries,
+            assessments,
+            context,
+            launch_articles,
+            settings,
+            markdown_enabled,
+            word_enabled,
+            token,
+            launch_video_items=launch_video_items,
+        )
+
     return selected_articles
+
+
+def prepared_scope(settings):
+    from feeds.launches import _query_params
+    news=_date_range(settings)
+    launches=None
+    if settings.launch_range!='disabled':
+        params=_query_params(100,settings.launch_range,start_date=settings.launch_start_date,
+                             end_date=settings.launch_end_date,display_timezone=settings.display_timezone)
+        launches={k:params.get(k) for k in ('net__gte','net__lt')}
+    return dict(news=list(news) if news else None,launches=launches,timezone=settings.display_timezone)
 
 
 def get_news(

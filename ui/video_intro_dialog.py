@@ -1,3 +1,4 @@
+from ui.component import ProductionComponent
 """Small opener editor with one saved local template."""
 import json
 import logging
@@ -63,7 +64,7 @@ class IntroPreviewWorker(QThread):
             self.ready.emit(card)
 
 
-class VideoIntroDialog(QDialog):
+class VideoIntroDialog(ProductionComponent):
     def __init__(self, output, parent=None):
         super().__init__(parent)
         self.output = Path(output)
@@ -367,7 +368,7 @@ class VideoIntroDialog(QDialog):
             video_cards.save_manifest(self.template, dict(version=1, **options), no_cancel)
             self.status.setText(tr('video.intro_saved', path=self.template))
         except (OSError, ValueError) as error:
-            QMessageBox.warning(self, tr('video.intro'), str(error))
+            self.report_error( tr('video.intro'), str(error))
 
     def _load_template(self):
         if not self.template.exists():
@@ -385,7 +386,7 @@ class VideoIntroDialog(QDialog):
             self.logo.setText(data.get('logo_path') or '')
             self.logo_motion.setCurrentIndex(self.logo_motion.findData(data.get('logo_motion', 'fade')))
         except (OSError, ValueError) as error:
-            QMessageBox.warning(self, tr('video.intro'), str(error))
+            self.report_error( tr('video.intro'), str(error))
 
     def _start(self):
         if self.worker is not None or self.preview_worker is not None:
@@ -396,7 +397,7 @@ class VideoIntroDialog(QDialog):
         except (OSError, ValueError) as error:
             logging.getLogger(__name__).exception('Opener preparation failed (text_font=%s, number_font=%s, logo=%s)',
                 video_cards.FONT, video_cards.NUMBER_FONT, self.logo.text())
-            QMessageBox.warning(self, tr('video.intro'), str(error))
+            self.report_error( tr('video.intro'), str(error))
             return
         self.refresh.stop()
         self._stop_preview()

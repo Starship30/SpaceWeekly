@@ -8,9 +8,10 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QPalette
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication
 
-from resources import resource_path
+from resources import resource_path, bundled_resource_path
 
 
 THEME_SYSTEM = "system"
@@ -96,7 +97,14 @@ class ThemeManager(QObject):
         self.app = app
         self.app.setStyle("Fusion")
         font = QFont()
-        font.setFamilies(["Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei"])
+        families = ["Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei"]
+        fallback = self.app.property('spaceweeklyFallbackFonts')
+        if fallback is None:
+            path = bundled_resource_path('assets', 'fonts', 'NotoSansCJKsc-Bold.otf')
+            identifier = QFontDatabase.addApplicationFont(str(path)) if path.exists() else -1
+            fallback = QFontDatabase.applicationFontFamilies(identifier) if identifier >= 0 else []
+            self.app.setProperty('spaceweeklyFallbackFonts', fallback)
+        font.setFamilies(families + list(fallback))
         font.setPointSize(10)
         self.app.setFont(font)
         self.mode = THEME_SYSTEM

@@ -1,3 +1,4 @@
+from ui.component import ProductionComponent
 from dataclasses import replace
 
 from PySide6.QtCore import Qt
@@ -37,7 +38,7 @@ PROMPT_LABELS = {
 }
 
 
-class PromptStudioDialog(QDialog):
+class PromptStudioDialog(ProductionComponent):
     """Prompt editor and local tester."""
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
@@ -223,14 +224,14 @@ class PromptStudioDialog(QDialog):
             with open(path, "r", encoding="utf-8") as file:
                 data = json.load(file)
         except (OSError, json.JSONDecodeError) as exc:
-            QMessageBox.warning(self, tr("prompt.studio"), tr("import.failed", error=exc))
+            self.report_error( tr("prompt.studio"), tr("import.failed", error=exc))
             return
 
         if not isinstance(data, dict) or not all(isinstance(data.get(k), str) for k in ("name", "summary", "filter")):
-            QMessageBox.warning(self, tr("prompt.studio"), tr("prompt.invalid_template"))
+            self.report_error( tr("prompt.studio"), tr("prompt.invalid_template"))
             return
         if any(k in data and not isinstance(data[k], str) for k in ("title", "roundup")):
-            QMessageBox.warning(self, tr("prompt.studio"), tr("prompt.invalid_template"))
+            self.report_error( tr("prompt.studio"), tr("prompt.invalid_template"))
             return
         name = data["name"]
         save_preset(

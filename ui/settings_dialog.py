@@ -1,3 +1,4 @@
+from ui.component import ProductionComponent
 import sys
 from dataclasses import replace
 
@@ -48,7 +49,7 @@ from ui.theme import THEME_LIGHT
 from ui.theme import THEME_SYSTEM
 
 
-class SettingsDialog(QDialog):
+class SettingsDialog(ProductionComponent):
     """Sectioned settings dialog for user and advanced configuration."""
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
@@ -127,7 +128,7 @@ class SettingsDialog(QDialog):
             (self.launch_custom_radio, self.launch_start_date_edit, self.launch_end_date_edit),
         ]:
             if custom.isChecked() and start.date() > end.date():
-                QMessageBox.warning(self, tr("settings"), tr("date.range.invalid"))
+                self.report_error( tr("settings"), tr("date.range.invalid"))
                 return
         super().accept()
 
@@ -621,6 +622,9 @@ class SettingsDialog(QDialog):
             edit.setText(path)
 
     def _open_prompt_studio(self) -> None:
+        if hasattr(self, 'open_rules'):
+            self.open_rules()
+            return
         dialog = PromptStudioDialog(self.settings(), self)
 
         if dialog.exec():
@@ -630,6 +634,9 @@ class SettingsDialog(QDialog):
         TermEditorDialog(self.settings(), self).exec()
 
     def _reset_workspace(self) -> None:
+        if hasattr(self, 'open_workspace'):
+            self.open_workspace()
+            return
         dialog = FirstRunWizard(self)
 
         if dialog.exec():
@@ -662,6 +669,9 @@ class SettingsDialog(QDialog):
         self._model_timer.start()
 
     def _discover_models(self) -> None:
+        if hasattr(self,'discover_models'):
+            self.discover_models()
+            return
         if not self.api_key_edit.text().strip() or not self.base_url_edit.text().strip():
             self.model_status.setText(tr("models.key.required"))
             return
@@ -692,12 +702,15 @@ class SettingsDialog(QDialog):
         self.model_status.setText(tr("models.found", count=len(models)))
 
     def _test_connection(self) -> None:
+        if hasattr(self,'check_connection'):
+            self.check_connection()
+            return
         if not self.api_key_edit.text().strip():
-            QMessageBox.warning(self, tr("test.connection"), tr("missing.api.key"))
+            self.report_error( tr("test.connection"), tr("missing.api.key"))
             return
 
         if not self.base_url_edit.text().strip():
-            QMessageBox.warning(self, tr("test.connection"), tr("missing.model.config"))
+            self.report_error( tr("test.connection"), tr("missing.model.config"))
             return
 
         settings = self.settings()

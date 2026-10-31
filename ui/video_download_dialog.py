@@ -1,3 +1,4 @@
+from ui.component import ProductionComponent
 """Video search/download panel opened from the existing video assets window."""
 from datetime import datetime
 from pathlib import Path
@@ -172,7 +173,7 @@ class BilibiliLoginDialog(QDialog):
         event.ignore() if self.worker is not None else event.accept()
 
 
-class VideoDownloadDialog(QDialog):
+class VideoDownloadDialog(ProductionComponent):
     def __init__(self, workspace, snapshot_items=(), parent=None):
         super().__init__(parent)
         self.workspace = Path(workspace)

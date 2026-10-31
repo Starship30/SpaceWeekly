@@ -2,6 +2,8 @@
 
 Source checkpoint: **3.1.0demo** (weekly launch research, narration rules and optional resident Qwen TTS; no new EXE package).
 
+当前源码桌面采用 **资料 → 稿件 → 配音与画面 → 导出** 四页固定导航，可自由切换。新闻与发射范围独立保留，工具共用工作区及草稿状态。操作迁移与验收限制见 [桌面制作流程](tools/DESKTOP_WORKFLOW.md)。现有下载包仍是下述旧版，本轮未重新打包。
+
 [Published Windows releases](https://github.com/Starship30/SpaceWeekly/releases)
 
 Current local build: **SpaceWeekly_v3.0.3_Windows_x64_SearchFix.zip**. See [SearchFix notes](RELEASE_NOTES_3.0.3_SearchFix.md) and [3.0.3 release notes](RELEASE_NOTES_3.0.3.md).

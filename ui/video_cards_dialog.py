@@ -1,3 +1,4 @@
+from ui.component import ProductionComponent
 """Small desktop entry for the shared offline news-strip renderer."""
 import copy
 import hashlib
@@ -51,7 +52,7 @@ class VideoCardsWorker(QThread):
             self.finished_ok.emit(str(result))
 
 
-class VideoCardsDialog(QDialog):
+class VideoCardsDialog(ProductionComponent):
     def __init__(self, output_dir, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr('video.title'))
@@ -133,6 +134,7 @@ class VideoCardsDialog(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.editor_splitter = splitter
         list_box = QWidget()
         list_box.setObjectName('WorkspacePanel')
         list_box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -250,6 +252,7 @@ class VideoCardsDialog(QDialog):
         playback.addWidget(self.time_label)
         preview_layout.addLayout(playback)
         splitter.addWidget(preview_box)
+        self.editor_box, self.preview_box = editor_box, preview_box
         splitter.setSizes([230, 340, 650])
         layout.addWidget(splitter, 1)
         settings = QHBoxLayout()
@@ -312,7 +315,7 @@ class VideoCardsDialog(QDialog):
         try:
             data = video_cards.load_snapshot(Path(path))
         except (OSError, ValueError) as error:
-            QMessageBox.warning(self, tr('video.title'), str(error))
+            self.report_error( tr('video.title'), str(error))
             return
         self._set_data(data, Path(path))
 
@@ -368,6 +371,9 @@ class VideoCardsDialog(QDialog):
                        selected, 'launch-manual:'+identifier)
 
     def _open_intro(self):
+        if hasattr(self, 'open_intro'):
+            self.open_intro()
+            return
         if self.worker is not None:
             return
         from ui.video_intro_dialog import VideoIntroDialog
@@ -380,6 +386,9 @@ class VideoCardsDialog(QDialog):
             super().reject()
 
     def _open_download(self):
+        if hasattr(self, 'open_download'):
+            self.open_download()
+            return
         if self.worker is not None:
             return
         from ui.video_download_dialog import VideoDownloadDialog
@@ -549,7 +558,7 @@ class VideoCardsDialog(QDialog):
             video_cards.save_manifest(Path(filename), self.data, no_cancel)
             self.status.setText(tr('video.snapshot_saved', path=filename))
         except (OSError, ValueError) as error:
-            QMessageBox.warning(self, tr('video.title'), str(error))
+            self.report_error( tr('video.title'), str(error))
 
     def _choose_output(self):
         directory = QFileDialog.getExistingDirectory(self, tr('video.choose_output'), str(self.output_root))
@@ -574,7 +583,7 @@ class VideoCardsDialog(QDialog):
             edited = folder/'edited-snapshot.json'
             video_cards.save_manifest(edited, data, no_cancel)
         except (OSError, ValueError) as error:
-            QMessageBox.warning(self, tr('video.title'), str(error))
+            self.report_error( tr('video.title'), str(error))
             return
         self._stop_preview()
         self._refresh_timer.stop()

@@ -196,12 +196,12 @@ class ResidentTests(unittest.TestCase):
 
     def test_parent_window_close_unloads_an_idle_resident_model_first(self):
         from ui.main_window import MainWindow
-        dialog = SimpleNamespace(worker=None, tts_provider=SimpleNamespace(is_running=True), reject=Mock())
-        owner = SimpleNamespace(roundup_dialog=dialog, _close_after_roundup=False)
+        production=SimpleNamespace(request_leave=Mock())
+        production.guard=lambda action:action()
+        owner = SimpleNamespace(production=production, _closing=False)
         event = Mock()
         MainWindow.closeEvent(owner, event)
-        self.assertTrue(owner._close_after_roundup)
-        dialog.reject.assert_called_once()
+        production.request_leave.assert_called_once_with('close')
         event.ignore.assert_called_once()
 
     def test_failed_os_stop_is_not_reported_as_stopped(self):

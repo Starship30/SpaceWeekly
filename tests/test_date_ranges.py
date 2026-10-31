@@ -176,50 +176,6 @@ class DateRangeTests(unittest.TestCase):
             dialog.close()
             panel.close()
 
-    def test_main_window_dates_settings_and_start_validation(self):
-        import ui.main_window as main
-        app = QApplication.instance() or QApplication([])
-        base = replace(default_settings(), deepseek_api_key="", aerospace_translation_enabled=False)
-        with patch.object(main, "load_settings", return_value=base), \
-             patch.object(main, "load_feeds", return_value=[]), \
-             patch.object(main, "save_settings") as save, \
-             patch.object(main.MainWindow, "_connect_logging"), \
-             patch.object(main.MainWindow, "_start_startup_checks"), \
-             patch.object(main, "ReportWorker") as worker:
-            window = main.MainWindow()
-            panel = window.dashboard_panel
-            panel.date_mode_combo.setCurrentIndex(panel.date_mode_combo.findData("custom"))
-            panel.start_date_edit.setDate(QDate(2026, 10, 8))
-            panel.end_date_edit.setDate(QDate(2026, 10, 1))
-            with patch.object(main, "SettingsDialog") as dialog:
-                dialog.return_value.exec.return_value = 0
-                window._open_settings()
-                self.assertEqual(dialog.call_args.args[0].start_date, "2026-10-08")
-                self.assertEqual(dialog.call_args.args[0].date_mode, "custom")
-            with patch.object(main.QMessageBox, "warning") as warning:
-                window._start_report()
-                warning.assert_called_once()
-                save.assert_not_called()
-                worker.assert_not_called()
-            panel.end_date_edit.setDate(QDate(2026, 10, 10))
-            panel.launch_range_combo.setCurrentIndex(panel.launch_range_combo.findData("custom"))
-            panel.launch_start_date_edit.setDate(QDate(2026, 10, 2))
-            panel.launch_end_date_edit.setDate(QDate(2026, 10, 9))
-            with patch.object(main, "get_launches", return_value=[]) as launches, \
-                 patch.object(main, "launch_last_error", return_value=""), \
-                 patch.object(main.QMessageBox, "information"):
-                window._test_launch_data()
-                self.assertEqual(launches.call_args.kwargs["start_date"], "2026-10-02")
-                self.assertEqual(launches.call_args.kwargs["end_date"], "2026-10-09")
-            with patch.object(window.feed_panel, "save_state"):
-                window._start_report()
-            saved = save.call_args.args[0]
-            self.assertEqual((saved.start_date, saved.end_date), ("2026-10-08", "2026-10-10"))
-            self.assertEqual(saved.launch_range, "custom")
-            worker.return_value.start.assert_called_once()
-            window.worker = None
-            window.close()
-
     def test_disabled_news_skips_all_sources_but_keeps_launches(self):
         import services.weekly_report as report
         from feeds.spaceflightnews import ARTICLES_URL, SpaceflightNewsProvider

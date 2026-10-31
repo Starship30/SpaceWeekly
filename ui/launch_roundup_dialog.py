@@ -1,3 +1,4 @@
+from ui.component import ProductionComponent
 """Weekly launch roundup: explicit data, script editing, optional speech, handoff."""
 from copy import deepcopy
 import json
@@ -35,8 +36,10 @@ class RoundupWorker(QThread):
             self.error = str(error)
 
 
-class LaunchRoundupDialog(QDialog):
+class LaunchRoundupDialog(ProductionComponent):
     tts_state_changed = Signal(str)
+    job_changed = Signal()
+    draft_changed = Signal()
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -79,6 +82,7 @@ class LaunchRoundupDialog(QDialog):
     def _button(self, layout, text, action):
         button = QPushButton(text)
         button.setAutoDefault(False)
+        button.setProperty('roundupAction', getattr(action, '__name__', ''))
         button.clicked.connect(lambda _checked=False: self._guard(action))
         layout.addWidget(button)
         return button
@@ -87,13 +91,17 @@ class LaunchRoundupDialog(QDialog):
         try:
             action()
         except (OSError, ValueError, KeyError, RuntimeError, StopIteration) as error:
-            QMessageBox.warning(self, '每周发射综述', str(error))
+            if getattr(self,'workflow_embedded',False):
+                self.status.setText(str(error))
+                if hasattr(self,'inline_error'):self.inline_error(str(error))
+            else:QMessageBox.warning(self, '每周发射综述', str(error))
 
     def _build(self):
         outer = QVBoxLayout(self)
         self.tabs = QTabWidget()
         outer.addWidget(self.tabs)
         data_page = QWidget()
+        self.data_page = data_page
         layout = QVBoxLayout(data_page)
         dates = QHBoxLayout()
         self.start, self.end = QDateEdit(), QDateEdit()
@@ -135,6 +143,7 @@ class LaunchRoundupDialog(QDialog):
         self.tabs.addTab(data_page, '1 · 日期、任务与统计')
 
         script_page = QWidget()
+        self.script_page = script_page
         layout = QVBoxLayout(script_page)
         actions = QHBoxLayout()
         self.target = QComboBox()
@@ -166,7 +175,8 @@ class LaunchRoundupDialog(QDialog):
         reading_layout = QVBoxLayout(reading_page)
         reading_layout.addWidget(QLabel('朗读文字单独保存；留空沿用原稿。人工编辑仍需复核事实。'))
         reading_layout.addWidget(self.narration_edit)
-        reading_layout.addWidget(QLabel('实际送入TTS的文本（含发音替换，只读预览）'))
+        self.reading_input_label=QLabel('实际送入TTS的文本（含发音替换，只读预览）')
+        reading_layout.addWidget(self.reading_input_label)
         self.reading_preview = QPlainTextEdit()
         self.reading_preview.setReadOnly(True)
         self.reading_preview.setMaximumHeight(90)
@@ -203,12 +213,14 @@ class LaunchRoundupDialog(QDialog):
         self.tabs.addTab(script_page, '2 · 结构化稿件与编辑')
 
         voice_page = QWidget()
+        self.voice_page = voice_page
         layout = QVBoxLayout(voice_page)
         hint = QLabel('语音为可选功能：使用独立 Python 环境和已下载的 CustomVoice 权重。打开此窗口不会下载或加载模型。\n'
                       '配置说明见 tools/ROUNDUP.md；0.6B 不提供风格指令。试听和批量生成都按完整段落进行。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         form = QFormLayout()
+        self.voice_form = form
         self.python, self.model = QLineEdit(), QLineEdit()
         self.speaker = QComboBox()
         self.speaker.setEditable(True)
@@ -254,11 +266,12 @@ class LaunchRoundupDialog(QDialog):
         self._button(actions, '强制重新生成选中段', self._audio_one)
         self._button(actions, '卸载语音模型', self._unload_voice)
         layout.addLayout(actions)
-        actions = QHBoxLayout()
-        self._button(actions, '导出稿件与快照（含可用配音）', lambda: self._export(False))
-        self._button(actions, '导出配音与画面素材包', lambda: self._export(True))
-        layout.addLayout(actions)
-        layout.addWidget(QLabel('完整当前配音齐备后才生成整段旁白和 SRT。字幕精度为段落级，不是逐字对齐。'))
+        self.export_controls = QWidget()
+        export_layout = QVBoxLayout(self.export_controls)
+        self._button(export_layout, '导出稿件与快照（含可用配音）', lambda: self._export(False))
+        self._button(export_layout, '导出配音与画面素材包', lambda: self._export(True))
+        export_layout.addWidget(QLabel('完整当前配音齐备后才生成整段旁白和 SRT。字幕精度为段落级，不是逐字对齐。'))
+        layout.addWidget(self.export_controls)
         layout.addStretch()
         self.tabs.addTab(voice_page, '3 · 可选配音、试听与导出')
         footer = QHBoxLayout()
@@ -279,7 +292,9 @@ class LaunchRoundupDialog(QDialog):
         self.model.setText(voice['model'])
         self.speaker.setCurrentText(voice['speaker'])
         self.style.setText(voice.get('style', ''))
-        self.device.setCurrentText(voice.get('device', 'cpu'))
+        device=voice.get('device','cpu')
+        if self.device.findText(device)<0:self.device.addItem(device)
+        self.device.setCurrentText(device)
         self.timeout.setValue(int(voice.get('timeout', 600)))
         self.pause.setValue(float(self.draft['pause_seconds']))
         self.pronunciations.setPlainText(json.dumps(self.draft['pronunciations'], ensure_ascii=False, indent=2))
@@ -288,8 +303,12 @@ class LaunchRoundupDialog(QDialog):
         self._voice_dirty = False
         self._show_tasks()
         self._show_segments()
+        self.draft_changed.emit()
 
     def _show_tasks(self):
+        current=self.tasks.currentRow()
+        selected_id=self.tasks.item(current,0).toolTip().split('\n')[0] if current>=0 and self.tasks.item(current,0) else None
+        scroll=self.tasks.verticalScrollBar().value()
         self.date_label.setText(roundup.timezone_label(self.draft) + '起日')
         self.tasks.horizontalHeaderItem(5).setText(roundup.timezone_label(self.draft))
         self._loading = True
@@ -320,6 +339,10 @@ class LaunchRoundupDialog(QDialog):
         self.tasks.resizeColumnsToContents()
         self.tasks.setColumnWidth(2, min(320, self.tasks.columnWidth(2)))
         self._loading = False
+        if selected_id:
+            row=next((n for n,s in enumerate(self.draft['selection']) if s['id']==selected_id),-1)
+            if row>=0:self.tasks.setCurrentCell(row,2)
+        self.tasks.verticalScrollBar().setValue(scroll)
         self._show_stats()
 
     def _selection_changed(self, *_):
@@ -580,6 +603,9 @@ class LaunchRoundupDialog(QDialog):
         self._start_job('polish', lambda data, token: polish_segments(data, ids, self.settings, token), deepcopy(self.draft))
 
     def _writing_rules(self):
+        if hasattr(self, 'open_rules'):
+            self.open_rules()
+            return
         from ui.prompt_studio_dialog import PromptStudioDialog
         from services.settings import save_settings
         from services.prompt_manager import PROMPT_TYPES
@@ -602,14 +628,21 @@ class LaunchRoundupDialog(QDialog):
             return
         path, _ = QFileDialog.getOpenFileName(self, '打开综述草稿', self.settings.output_dir, 'JSON (*.json)')
         if path:
-            draft = roundup.load_draft(path)
-            changed = roundup.changed_tasks(draft, load_existing(Path(self.settings.output_dir)))
-            self.draft = draft
-            self._show_draft()
-            self.status.setText(('保留草稿原快照。当前资料有变化：' + ', '.join(changed) if changed else '已打开草稿；保留原快照')
-                                + '。可点击“同步已保存资料（本地）”采用新核对结果，人工编辑保留。')
+            self.open_draft(path)
+
+    def open_draft(self,path):
+        if self.worker is not None:raise ValueError('请等待当前任务结束后打开草稿')
+        draft = roundup.load_draft(path)
+        changed = roundup.changed_tasks(draft, load_existing(Path(self.settings.output_dir)))
+        self.draft = draft
+        self._show_draft()
+        self.status.setText(('保留草稿原快照。当前资料有变化：' + ', '.join(changed) if changed else '已打开草稿；保留原快照')
+                            + '。可点击“同步已保存资料（本地）”采用新核对结果，人工编辑保留。')
 
     def _show_json(self, data):
+        if hasattr(self, 'inspect_data'):
+            self.inspect_data(data)
+            return
         dialog = QDialog(self)
         dialog.setWindowTitle('资料与出处（只读引用）')
         dialog.resize(850, 600)
@@ -738,7 +771,7 @@ class LaunchRoundupDialog(QDialog):
 
     def _export(self, visuals):
         self._sync()
-        output = QFileDialog.getExistingDirectory(self, '导出到目录（自动新建独立成果文件夹）', self.settings.output_dir)
+        output = self.export_directory() if hasattr(self, 'export_directory') else QFileDialog.getExistingDirectory(self, '导出到目录（自动新建独立成果文件夹）', self.settings.output_dir)
         if output:
             self._start_job('export', lambda data, token: export_package(data, output, token, visuals=visuals), deepcopy(self.draft))
 
@@ -749,15 +782,38 @@ class LaunchRoundupDialog(QDialog):
         self._job_kind = kind
         self.worker = RoundupWorker(action, payload, self)
         self.worker.finished.connect(self._finished)
-        self.tabs.setEnabled(False)
+        self._busy_inputs(True)
         self.cancel.setEnabled(True)
         self.status.setText('处理中：' + kind + '；可取消。语音加载/编码可能需要较长时间。')
         self.worker.start()
+        self.job_changed.emit()
+
+    def _busy_inputs(self, busy):
+        if not getattr(self, 'workflow_embedded', False):
+            self.tabs.setEnabled(not busy)
+            return
+        for page in (self.data_page, self.script_page, self.voice_page, self.export_controls):
+            for kind in (QPlainTextEdit, QLineEdit):
+                for widget in page.findChildren(kind):
+                    widget.setReadOnly(busy or widget in (self.names, self.reading_preview))
+            for widget in page.findChildren(QPushButton):
+                if widget.property('roundupAction') not in ('_task_sources', '_segment_sources', '_stop_playback'):
+                    widget.setEnabled(not busy)
+            for kind in (QDateEdit, QComboBox, QDoubleSpinBox, QSpinBox):
+                for widget in page.findChildren(kind):
+                    widget.setEnabled(not busy)
+        loading, self._loading = self._loading, True
+        for row in range(self.tasks.rowCount()):
+            for column in (0, 1, 4):
+                cell = self.tasks.item(row, column)
+                flag = Qt.ItemFlag.ItemIsEditable if column == 4 else Qt.ItemFlag.ItemIsUserCheckable
+                cell.setFlags(cell.flags() & ~flag if busy else cell.flags() | flag)
+        self._loading = loading
 
     def _finished(self):
         worker, kind = self.worker, self._job_kind
         self.worker = None
-        self.tabs.setEnabled(True)
+        self._busy_inputs(False)
         self.cancel.setEnabled(False)
         try:
             if kind in ('audio', 'materials'):
@@ -803,10 +859,12 @@ class LaunchRoundupDialog(QDialog):
             elif kind == 'unload':
                 self.status.setText('语音模型已卸载；下次生成时按需加载')
             elif kind == 'export':
+                self.last_export_path=str(worker.value)
                 self.status.setText('已导出：' + str(worker.value) + '（无完整配音时不生成整段WAV/SRT）')
         except Exception as error:
             self.status.setText(str(error))
         finally:
+            self.job_changed.emit()
             worker.deleteLater()
             if self._close_after and not self.tts_provider.is_running:
                 super().reject()
