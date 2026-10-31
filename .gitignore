@@ -11,9 +11,13 @@ logs/
 errors/
 build/
 dist/
+cache/
 
 # VS Code
 .vscode/
 
 # Workspace video downloads
 video-downloads/
+
+# Per-workspace launch evidence and manual review records
+translator/launch_research.json

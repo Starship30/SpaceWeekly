@@ -37,7 +37,7 @@ def get_cached_translation(original: str) -> dict[str, object] | None:
     with _CACHE_LOCK:
         for source, entry in load_translation_cache().items():
             if source.casefold() == folded:
-                return dict(entry)
+                return dict(entry, status=entry.get('status', 'unverified'))
 
     return None
 
@@ -61,6 +61,7 @@ def cache_translation(
             "source_url": str(source_url or "").strip(),
             "confidence": round(max(0.0, min(1.0, float(confidence))), 2),
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "candidate",
         }
         _write_cache(entries)
 

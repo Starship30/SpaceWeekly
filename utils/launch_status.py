@@ -1,4 +1,5 @@
 """LL2 status labels; null results never imply a successful landing."""
+import re
 from i18n import tr
 
 _STATUS_NAMES = {
@@ -24,10 +25,25 @@ def launch_status_text(value) -> str:
     return tr('launch_state.unknown')
 
 
+def recovery_states(text: str) -> list[str]:
+    """Read saved exact result labels, ignoring stage identities and locations."""
+    aliases = {'成功': 'success', '回收成功': 'success', 'successful': 'success',
+               '失败': 'failure', '回收失败': 'failure', 'failed': 'failure',
+               '部分失败': 'partial', '回收部分失败': 'partial', 'partial failure': 'partial',
+               '结果待确认': 'pending', '回收待确认': 'pending', 'awaiting result': 'pending',
+               '不尝试回收': 'none', '不回收': 'none', 'no landing attempt': 'none'}
+    results = []
+    for part in re.split(r'[;；\n]+', text):
+        value = re.split(r'[(（]', part.rsplit(':', 1)[-1].rsplit('：', 1)[-1], maxsplit=1)[0]
+        if value.strip():
+            results.append(aliases.get(value.strip().casefold(), 'unknown'))
+    return results
+
+
 def recovery_text(item: dict) -> str:
     rocket = item.get('rocket')
     if not isinstance(rocket, dict):
-        return tr('launch_state.unknown')
+        return ''
     rows = []
     for key, vehicle, label in [('launcher_stage', 'launcher', 'recovery_stage'),
                                 ('spacecraft_stage', 'spacecraft', 'recovery_spacecraft')]:
@@ -61,4 +77,5 @@ def recovery_text(item: dict) -> str:
             if details:
                 result += ' (' + ' · '.join(details) + ')'
             rows.append(' '.join(identity.split()) + ': ' + result)
-    return '; '.join(rows) or tr('launch_state.unknown')
+    text = '; '.join(rows)
+    return text if any(state != 'unknown' for state in recovery_states(text)) else ''

@@ -67,6 +67,11 @@ def main() -> None:
         settings.deepseek_api_key = ""
         settings.web_search_api_key = ""
         dialog = SettingsDialog(settings)
+        search_index = dialog.search_provider_combo.findData('deepseek')
+        assert search_index >= 0, 'DeepSeek Search option missing'
+        dialog.search_provider_combo.setCurrentIndex(search_index)
+        dialog.web_search_check.setChecked(True)
+        assert dialog.settings().web_search_provider == 'deepseek' and dialog.settings().web_search_enabled
         dialog.show()
         app.processEvents()
         dialog.close()
@@ -90,10 +95,13 @@ def main() -> None:
         cards.launch_opacity.setValue(35)
         cards.launch_fields['status'].setText('成功')
         cards.launch_fields['recovery'].setText('TEST-01: 成功 (ASDS · ASOG)')
+        payload_description = '用于地球观测的虚构测试卫星，详细信息保存在内容包。' * 10
+        cards.launch_fields['payload'].setText(payload_description)
         cards._prepare_preview()
         assert cards._preview_card['background_alpha'] == 89, 'Launch opacity failed'
         assert cards._preview_card['status_lines'] == ['发射成功', '回收成功'], 'Status badges missing'
         assert cards._preview_card['badge_states'] == ['success', 'success'], 'Status badge colors failed'
+        assert video_cards.launch_badge_labels({'status': '成功'}) == [('发射成功', 'success')], 'Empty recovery badge was not hidden'
         writing = PromptStudioDialog(settings)
         writing.type_list.setCurrentRow(2)
         assert writing.current_type == 'title' and writing.settings().title_prompt, 'Headline rule missing'
@@ -122,7 +130,7 @@ def main() -> None:
         from exporters.premiere import export_premiere
         from exporters.word import export_word
         from exporters.markdown import export_markdown
-        from feeds.launches import _launch_to_article
+        from feeds.launches import _launch_to_article, _launch_video_item
         from services.weekly_report import _export_context
         from docx import Document
         snapshot = export_premiere([], {}, _export_context(settings, {}), 'zh_CN',
@@ -130,6 +138,32 @@ def main() -> None:
         exported = video_cards.load_snapshot(snapshot)['items'][0]
         assert exported['launch']['status'] == '成功'
         assert exported['launch']['recovery'] == 'TEST-01: 成功 (ASDS · ASOG)'
+        assert exported['launch']['payload'] == payload_description, 'Full payload description lost'
+        raw = dict(mission=dict(name='Fictional mission', description='Fictional payload description'))
+        item = _launch_video_item(raw, 'UTC')
+        assert item['summary'] == 'Fictional mission' and item['launch']['payload'] == 'Fictional payload description'
+        checked('launch-payload-description')
+        from dataclasses import replace
+        from translator.translator import Translator
+        from services.weekly_report import _localize_launch_video_items
+        from services.cancellation import CancellationToken
+        from services.video_download import sort_search_items
+        payload_ai = Translator(settings=replace(settings, language='en_US'), mode='ai',
+                                ai_callable=lambda *_: 'test satellite', web_search=False)
+        short = _localize_launch_video_items([item], payload_ai, CancellationToken())
+        assert short[0]['launch']['payload'] == 'test satellite', 'Payload phrase generation failed'
+        raw_video = VideoInfo('raw', 'Original video', 'https://www.bilibili.com/video/BV1Q8HP69EJh')
+        sub_video = VideoInfo('sub', '[中字] video', raw_video.url)
+        assert sort_search_items([sub_video, raw_video], 'relevance') == [raw_video, sub_video]
+        checked('payload-summary-and-subtitle-priority')
+        from utils.text import mission_display_name
+        from translator.search import create_search_provider, DeepSeekSearchProvider
+        assert isinstance(create_search_provider(replace(settings, web_search_provider='deepseek')),
+                          DeepSeekSearchProvider)
+        named = Translator(mode='hybrid', ai_callable=lambda *_: '西光肆号01星', web_search=False)
+        assert named.summarize_payload('Xiguang-4 01', 'Earth observation satellite.') == '西光肆号01星'
+        assert mission_display_name('Bandwagon 5（拼车任务）') == 'Bandwagon 5'
+        checked('deepseek-search-and-verified-mission-names')
         assert video_cards.make_card(exported, 1)['status_lines'] == ['发射成功', '回收成功']
         stage = dict(launcher=dict(serial_number='TEST-01'), landing=dict(attempt=True, success=True))
         launch = _launch_to_article(dict(name='Fictional packaged fixture', status=dict(id=3),
@@ -138,6 +172,11 @@ def main() -> None:
         md_report = export_markdown([], launches=[launch])
         for text in ('\n'.join(p.text for p in Document(word_report).paragraphs), md_report.read_text(encoding='utf-8')):
             assert '回收状态' in text and 'TEST-01: 成功' in text
+        launch = _launch_to_article(dict(name='No recovery fixture', status=dict(id=3), rocket={}))
+        word_report = export_word([], launches=[launch])
+        md_report = export_markdown([], launches=[launch])
+        for text in (str([p.text for p in Document(word_report).paragraphs]), md_report.read_text(encoding='utf-8')):
+            assert '回收状态' not in text, 'Missing recovery appeared in report'
         checked('ll2-status-json-and-reports')
         ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
         for tool in (ffmpeg, ffprobe):
@@ -169,10 +208,16 @@ def main() -> None:
             assert stream["pix_fmt"] == "rgba" or stream["pix_fmt"].startswith("yuva")
         checked("alpha-mov-prores")
         for encoding in ('png', 'prores'):
-            movie = video_cards.encode_card(cards._preview_card, marker.parent / encoding, 360,
+            card = cards._preview_card
+            if encoding == 'prores':
+                exported['launch']['recovery'] = ''
+                card = video_cards.make_card(exported, 1)
+                assert card['status_lines'] == ['发射成功'], 'Empty recovery badge appeared'
+                assert card['status_position'][0] + card['status_panel'].width == video_cards.W-48
+            movie = video_cards.encode_card(card, marker.parent / encoding, 360,
                                             ffmpeg, ffprobe, encoding=encoding)
             assert movie.is_file(), 'Semi-transparent launch encoding failed'
-            x, y = cards._preview_card['status_position']
+            x, y = card['status_position']
             sample = marker.parent / (encoding + '-badge.png')
             _run_process([ffmpeg, '-v', 'error', '-ss', '5', '-i', str(movie),
                 '-vf', f'crop=1:1:{x+30}:{y+31},format=rgba', '-frames:v', '1', str(sample)],

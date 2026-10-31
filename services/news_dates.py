@@ -32,7 +32,7 @@ def _organization(url):
     return next((d for d in OFFICIAL_DOMAINS if host == d or host.endswith('.'+d)), host)
 
 
-def publication_evidence(html, url):
+def publication_evidence(html, url, *, require_publication=True):
     """Use publication metadata, never modification dates or dates in the article body."""
     soup = BeautifulSoup(html, 'html.parser')
     values = []
@@ -70,7 +70,7 @@ def publication_evidence(html, url):
             values.append(f'{match[1]}-{int(match[2]):02d}-{int(match[3]):02d}')
     parsed = [parse_datetime(v) for v in values]
     parsed = [v.astimezone(timezone.utc).date().isoformat() for v in parsed if v is not None]
-    if not parsed or len(set(parsed)) != 1:
+    if len(set(parsed)) > 1 or require_publication and not parsed:
         raise ValueError('缺少明确的原始发布时间，或发布时间元数据冲突')
     title = soup.title.get_text(' ', strip=True) if soup.title else ''
     for node in soup.select('script, style, nav, header, footer, aside'):
@@ -79,15 +79,16 @@ def publication_evidence(html, url):
     text = ' '.join(body.get_text(' ', strip=True).split())[:7000]
     if len(text) < 50:
         raise ValueError('公告正文不足，不能确认事件')
-    return dict(url=url, title=title, published=parsed[0], text=text)
+    return dict(url=url, title=title, published=parsed[0] if parsed else '', text=text)
 
 
-def _fetch_evidence(url, settings, token):
-    for _ in range(4):
+def _fetch_evidence(url, settings, token, *, max_redirects=3, require_publication=True):
+    for _ in range(max_redirects + 1):
         token.check()
         if not _official_url(url):
             raise ValueError('公告不是已知官方 HTTPS 来源')
-        with requests.get(url, headers={'User-Agent': settings.user_agent}, timeout=(10, 15),
+        timeout = max(1, min(15, int(getattr(settings, 'web_search_timeout', 10))))
+        with requests.get(url, headers={'User-Agent': settings.user_agent}, timeout=(min(10, timeout), timeout),
                           stream=True, allow_redirects=False) as response:
             if response.is_redirect:
                 url = urljoin(url, response.headers.get('Location', ''))
@@ -105,7 +106,8 @@ def _fetch_evidence(url, settings, token):
             encoding = response.encoding
             if not encoding or encoding.lower() == 'iso-8859-1':
                 encoding = 'utf-8'
-            return publication_evidence(bytes(content).decode(encoding, errors='replace'), url)
+            return publication_evidence(bytes(content).decode(encoding, errors='replace'), url,
+                                        require_publication=require_publication)
     raise ValueError('公告重定向过多')
 
 

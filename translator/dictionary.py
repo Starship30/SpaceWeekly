@@ -11,7 +11,15 @@ DEFAULT_DICTIONARY = {
     "Falcon 9": {"translation": "猎鹰9号", "type": "rocket"},
     "Starship": {"translation": "星舰", "type": "rocket"},
     "Soyuz": {"translation": "联盟号", "type": "rocket"},
-    "Gravity-1": {"translation": "引力-1", "type": "rocket"},
+    "Gravity-1": {"translation": "引力-1", "type": "rocket", "aliases": ["引力一号"],
+                  "source_url": "https://orienspace.com/productPage"},
+    "Orienspace": {"translation": "东方空间", "type": "organization",
+                   "source_url": "https://www.orienspace.com/aboutPage"},
+    "Jiuquan": {"translation": "酒泉", "type": "location"},
+    "Taiyuan": {"translation": "太原", "type": "location"},
+    "Xichang": {"translation": "西昌", "type": "location"},
+    "Wenchang": {"translation": "文昌", "type": "location"},
+    "Haiyang": {"translation": "海阳", "type": "location"},
     "Low Earth Orbit": {"translation": "近地轨道", "type": "orbit"},
     "Sun-Synchronous Orbit": {"translation": "太阳同步轨道", "type": "orbit"},
     "Geostationary Transfer Orbit": {
@@ -27,9 +35,11 @@ def load_dictionary() -> dict[str, dict[str, str]]:
 
     if path.exists():
         entries = _read_entries(path, {})
-        entries.update(
-            {key: dict(value) for key, value in DEFAULT_DICTIONARY.items()}
-        )
+        for key, value in DEFAULT_DICTIONARY.items():
+            entries.setdefault(key, dict(value))
+            if entries[key]['translation'] == value['translation']:
+                for field, default in value.items():
+                    entries[key].setdefault(field, default)
         return entries
 
     legacy = resource_path("config", "aerospace_terms.json")
@@ -40,6 +50,11 @@ def load_dictionary() -> dict[str, dict[str, str]]:
         bundled = bundled_resource_path("translator", "dictionary.json")
         entries = _read_entries(bundled, DEFAULT_DICTIONARY)
 
+    for key, value in DEFAULT_DICTIONARY.items():
+        entries.setdefault(key, dict(value))
+        if entries[key]['translation'] == value['translation']:
+            for field, default in value.items():
+                entries[key].setdefault(field, default)
     save_dictionary(entries)
     return entries
 
@@ -108,6 +123,7 @@ def confirm_pending_term(
     dictionary[term] = {
         "translation": confirmed_translation,
         "type": str(term_type or entry.get("type", "term")).strip() or "term",
+        "human_status": "confirmed",
     }
     save_dictionary(dictionary)
     pending.pop(term, None)
@@ -220,7 +236,8 @@ def _normalize_entries(
             term_type = "term"
 
         if term and (translation or allow_empty):
-            normalized[term] = {"translation": translation, "type": term_type}
+            normalized[term] = dict(raw_entry) if isinstance(raw_entry, dict) else {}
+            normalized[term].update(translation=translation, type=term_type)
 
     return normalized
 

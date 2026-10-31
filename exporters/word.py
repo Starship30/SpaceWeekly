@@ -10,7 +10,7 @@ from models.news_assessment import NewsAssessment
 from utils.time import BEIJING_TIMEZONE
 from utils.time import format_datetime
 from utils.output_files import reserved_output
-from utils.text import clean_ai_text
+from utils.text import clean_ai_text, mission_display_name
 
 IMPORTANCE_LEVELS = ["High", "Medium", "Low"]
 
@@ -85,24 +85,9 @@ def _add_launch(
 ) -> None:
     fields = _launch_fields(launch)
     fields["time"] = format_datetime(fields["time"], launch_timezone)
-    fields["name"] = _translated_term(fields["name"], "mission", term_translator)
-    fields["rocket"] = _translated_term(fields["rocket"], "rocket", term_translator)
-    fields["provider"] = _translated_term(
-        fields["provider"],
-        "organization",
-        term_translator,
-    )
-    fields["pad"] = _translated_term(fields["pad"], "location", term_translator)
-    fields["mission_name"] = _translated_term(
-        fields["mission_name"],
-        "mission",
-        term_translator,
-    )
-    fields["orbit"] = _translated_term(fields["orbit"], "orbit", term_translator)
-    fields["mission_description"] = _translated_description(
-        fields["mission_description"],
-        term_translator,
-    )
+    # Launch localization is prepared before export; this legacy argument performs no I/O.
+    fields["name"] = mission_display_name(fields["name"])
+    fields["mission_name"] = mission_display_name(fields["mission_name"])
     title = fields["mission_name"]
 
     if title == tr("not_available"):
@@ -115,30 +100,9 @@ def _add_launch(
     _add_label(document, tr("launch_site"), fields["pad"])
     _add_label(document, tr("orbit"), fields["orbit"])
     _add_label(document, tr("launch_status"), fields["status"])
-    _add_label(document, tr("recovery_status"), fields["recovery"])
+    if fields["recovery"]:
+        _add_label(document, tr("recovery_status"), fields["recovery"])
     _add_label(document, tr("mission_description"), fields["mission_description"])
-
-
-def _translated_term(
-    value: str,
-    term_type: str,
-    translator,
-) -> str:
-    if translator is None or value in {"Not available", tr("not_available")}:
-        return value
-
-    return translator.translate_term(value, term_type, allow_ai=True) or value
-
-
-def _translated_description(value: str, translator) -> str:
-    if (
-        translator is None
-        or value in {"Not available", tr("not_available")}
-        or value == "No mission description available."
-    ):
-        return value
-
-    return translator.translate_description(value) or value
 
 
 def _setup_styles(document) -> None:

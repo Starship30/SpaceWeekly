@@ -1,8 +1,10 @@
 # SpaceWeekly
 
+Source checkpoint: **3.1.0demo** (weekly launch research, narration rules and optional resident Qwen TTS; no new EXE package).
+
 [Published Windows releases](https://github.com/Starship30/SpaceWeekly/releases)
 
-Current local build: **SpaceWeekly_v3.0.3_Windows_x64.zip**. See [3.0.3 release notes](RELEASE_NOTES_3.0.3.md).
+Current local build: **SpaceWeekly_v3.0.3_Windows_x64_SearchFix.zip**. See [SearchFix notes](RELEASE_NOTES_3.0.3_SearchFix.md) and [3.0.3 release notes](RELEASE_NOTES_3.0.3.md).
 
 SpaceWeekly V3.0.3 AI Workflow Edition is an AI Aerospace News Workspace.
 
@@ -11,6 +13,10 @@ generates content only for retained items, and exports Word/Markdown weekly
 reports.
 
 ## Windows V3.0.3
+
+新增工具栏 **每周发射综述**：读取工作区发射快照，按显示时区（默认北京时间）完整自然日统计与编辑分段稿件；整稿、单段重写和选段润色共用可编辑的国家/公司口播规则。可选独立本地 Qwen3-TTS 配音，导出 WAV、PNG MOV、清单及段落级 SRT。参见 [操作、独立语音环境与验证范围](tools/ROUNDUP.md)。
+
+发射中文资料支持按 LL2 ID 核对正式名称和公告原句，未确认时保留原文；现有术语编辑器可查看出处、人工纠正和标记下次重新核对。见 [资料核对与验证范围](tools/LAUNCH_RESEARCH.md)。
 
 The portable ZIP includes FFmpeg/ffprobe, yt-dlp, QR support and an OFL-licensed Noto Chinese fallback font. Extract the complete folder and keep **SpaceWeekly.exe** and **_internal/** together; no external Python or FFmpeg installation is needed. The folder layout avoids extracting all dependencies on every startup. See [packaging and verification](tools/PACKAGING.md).
 
@@ -26,7 +32,7 @@ Open **Video assets → Video downloads** to search Bilibili or paste a BV/av/b2
 
 - News and launch MOV assets use separate `news` and `launches` folders, with `.news.mov` / `.launch.mov` filenames. Old files and manifests remain readable.
 - The optional event-date check is enabled by default. It compares each retained report against dated official announcements from another organization, before database saves, summaries and exports. Unconfirmed in-range reports are retained and marked for review in the log; only evidenced out-of-range events are excluded. News searches do not fall back to Wikipedia; rate limits or verification pages pause further searches for the current batch. Turning it off keeps publication-date filtering. Search and configured AI are required and add time/API cost.
-- The Network settings page exposes the existing DuckDuckGo / Brave search provider and masked Brave API key. A search key is separate from the AI key.
+- The Network settings page offers DuckDuckGo, DeepSeek Search, Brave and terminology-only Wikipedia. Enable online name verification for translation. DeepSeek Search can reuse the AI key only for direct official DeepSeek connections; other search services require their own key.
 - Publication-only filtering excludes RSS entries with only an update date and compares timezone-aware dates as UTC calendar days.
 - Prompt Studio is now **AI writing rules**: choose a step, describe requirements, preview with a fictional example, then apply. Preview runs locally without an AI call. Opening the editor preserves existing summary rules.
 

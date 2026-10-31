@@ -1,6 +1,16 @@
 import re
 
 
+def mission_display_name(value: str) -> str:
+    original = str(value or "").strip()
+    cleaned = original
+    while True:
+        reduced = re.sub(r'\([^()（）]*\)|（[^()（）]*）', '', cleaned)
+        if reduced == cleaned:
+            return ' '.join(cleaned.split()) or original
+        cleaned = reduced
+
+
 def clean_ai_text(value: object) -> str:
     """Normalize common whitespace and quote artifacts in AI-generated prose."""
 

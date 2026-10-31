@@ -74,4 +74,16 @@ class PromptStudioTests(unittest.TestCase):
             d._import_preset()
         warning.assert_called_once();save.assert_not_called()
 
+    def test_roundup_rules_edit_save_and_restore_without_changing_news_rules(self):
+        d = self.dialog(roundup_prompt='我的综述规则', summary_prompt='我的新闻摘要')
+        d.type_list.setCurrentRow(prompt_manager.PROMPT_TYPES.index('roundup'))
+        self.assertEqual(d.editor.toPlainText(), '我的综述规则')
+        d.editor.setPlainText('机构分组，短句口播')
+        self.assertEqual(d.settings().roundup_prompt, '机构分组，短句口播')
+        self.assertEqual(d.settings().summary_prompt, '我的新闻摘要')
+        with patch('ui.prompt_studio_dialog.QMessageBox.information'):
+            d._save_preset()
+        self.assertEqual(prompt_manager.find_preset(d.preset_combo.currentText()).roundup, '机构分组，短句口播')
+        self.assertIn('本地预览', d._render_current_prompt())
+
 if __name__ == '__main__': unittest.main()

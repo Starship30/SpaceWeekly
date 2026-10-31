@@ -20,6 +20,8 @@ from services.cancellation import TaskCancelledError, no_cancel
 from resources import bundled_resource_path
 from utils.output_files import reserved_output
 from utils.time import parse_datetime
+from utils.launch_status import recovery_states
+from utils.text import mission_display_name
 
 W, H, FPS = 1920, 1080, 30
 WHITE, BLUE = (230, 230, 230, 255), (40, 19, 153, 255)
@@ -113,7 +115,8 @@ def validate_snapshot(data: dict) -> dict:
         if not isinstance(item.get('categories'), list) or any(
                 not isinstance(x, str) or not x.strip() for x in item['categories']):
             raise ValueError(f'第 {index} 条 categories 必须是字符串列表')
-    return data
+    return dict(data, items=[dict(item, summary=mission_display_name(item['summary']))
+                            if item.get('video_type') == 'launch' else item for item in data['items']])
 
 
 def card_ordinals(items, selected_ids=None):
@@ -185,6 +188,25 @@ def fit_text(text: str, width: int, height: int, maximum: int, minimum: int,
                 draw.text((2, 2-top+i*advance), line, font=font, fill=WHITE)
             return image, size, lines
     raise ValueError(f'文本超出区域：最低字号 {minimum} 仍放不下；请缩短快照中的文本，不会自动截断')
+
+
+def fit_payload_text(text: str, width: int, height: int, maximum: int, minimum: int,
+                     font_path: Path = FONT) -> tuple[Image.Image, int, list[str]]:
+    """Keep the full description in the snapshot, eliding only its rendered text."""
+    text = ' '.join(text.split())
+    try:
+        return fit_text(text, width, height, maximum, minimum, font_path)
+    except ValueError:
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            try:
+                fit_text(text[:middle].rstrip() + '…', width, height, maximum, minimum, font_path)
+            except ValueError:
+                high = middle - 1
+            else:
+                low = middle
+        return fit_text(text[:low].rstrip() + '…', width, height, maximum, minimum, font_path)
 
 
 def make_card(item: dict, ordinal: int, language: str = 'zh_CN') -> dict:
@@ -300,23 +322,15 @@ def launch_badge_labels(fields, language='zh_CN'):
         if status in aliases:
             label, state = en if english else zh, result
             break
-    results = []
-    aliases = {'成功': 'success', '回收成功': 'success', 'successful': 'success',
-               '失败': 'failure', '回收失败': 'failure', 'failed': 'failure',
-               '部分失败': 'partial', '回收部分失败': 'partial', 'partial failure': 'partial',
-               '结果待确认': 'pending', '回收待确认': 'pending', 'awaiting result': 'pending',
-               '不尝试回收': 'none', '不回收': 'none', 'no landing attempt': 'none'}
-    # These are the saved per-stage display fields; exact labels avoid matching names/locations.
-    for part in re.split(r'[;；\n]+', fields.get('recovery', '')):
-        text = re.split(r'[(（]', part.rsplit(':', 1)[-1].rsplit('：', 1)[-1], maxsplit=1)[0]
-        results.append(aliases.get(text.strip().casefold(), 'unknown'))
-    states = set(results)
+    states = set(recovery_states(fields.get('recovery', '')))
+    if not states or states == {'unknown'}:
+        return [(label, state)]
     if 'partial' in states or {'failure', 'success'} <= states:
         recovery = 'partial'
     elif 'failure' in states:
         recovery = 'failure'
     elif 'unknown' in states or 'pending' in states:
-        recovery = 'unknown' if states == {'unknown'} else 'pending'
+        recovery = 'pending'
     elif 'success' in states:
         recovery = 'success'
     else:
@@ -345,7 +359,7 @@ def make_status_badges(fields, language='zh_CN'):
         box = font.getbbox(text)
         draw.text((116, (124-(box[3]-box[1]))/2-box[1]), text, font=font, fill=(245, 247, 250, 255))
         badges.append(image.resize((width, 62), Image.Resampling.LANCZOS))
-    panel = Image.new('RGBA', (sum(b.width for b in badges)+24, 62))
+    panel = Image.new('RGBA', (sum(b.width for b in badges)+24*(len(badges)-1), 62))
     x = 0
     for badge in badges:
         panel.alpha_composite(badge, (x, 0))
@@ -357,8 +371,8 @@ def make_status_badges(fields, language='zh_CN'):
 def make_launch_card(item, ordinal, language='zh_CN'):
     background_alpha = launch_background_alpha(item)
     layers = []
-    def layer(text, x, y, width, height, maximum, minimum, direction, boundary, start, duration, end, font=FONT):
-        image, size, lines = fit_text(text or '待确认', width, height, maximum, minimum, font)
+    def layer(text, x, y, width, height, maximum, minimum, direction, boundary, start, duration, end, font=FONT, fit=fit_text):
+        image, size, lines = fit(text or '待确认', width, height, maximum, minimum, font)
         layers.append((image, x, y, direction, boundary, start, duration, end))
         return size, lines
     layer(f'{ordinal:02d}', 46, 38, 148, 52, 82, 62, 'up', 97, .70, .35, 1.55, NUMBER_FONT)
@@ -373,7 +387,7 @@ def make_launch_card(item, ordinal, language='zh_CN'):
         width = math.floor(456+170*(y+54)/H-18-72)
         layer(label, 72, y, width, 44, 34, 34, 'right', 60, 2.1, .6, 2.85)
         text = launch_time_text(item['launch'][key]) if key == 'time' else item['launch'][key]
-        layer(text, 72, y+54, width, 80, 38, 24, 'right', 60, 2.85, 1, 3.75)
+        layer(text, 72, y+54, width, 80, 38, 24, 'right', 60, 2.85, 1, 3.75, fit=fit_payload_text if key == 'payload' else fit_text)
     return dict(video_type='launch', background_alpha=background_alpha,
                 **make_status_badges(item['launch'], language),
                 layers=layers, title_font_size=title_size, title_lines=title_lines,

@@ -198,6 +198,8 @@ class VideoCardsDialog(QDialog):
             field = QLineEdit()
             field.textChanged.connect(self._edit_changed)
             self.launch_fields[key] = field
+            if key == 'payload':
+                field.setToolTip(tr('video.launch_payload_hint'))
             launch_form.addRow(tr('video.launch_'+key), field)
         self.launch_opacity = QDoubleSpinBox()
         self.launch_opacity.setRange(0, 100)

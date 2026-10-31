@@ -14,6 +14,7 @@ from services.cancellation import CancellationToken, TaskCancelledError
 from services import video_download as service
 from services import video_download_state as state
 from utils.time import parse_datetime
+from utils.text import mission_display_name
 from ui.widgets.combo_box import RoundedComboBox as QComboBox
 
 
@@ -381,7 +382,7 @@ class VideoDownloadDialog(QDialog):
         self.tasks.clear()
         for item in items:
             # The exporter's summary is the mission; title is the rocket name.
-            name = item.get('summary') if item.get('video_type') == 'launch' else item.get('title')
+            name = mission_display_name(item.get('summary')) if item.get('video_type') == 'launch' else item.get('title')
             name = name or item.get('title', '')
             date = parse_datetime(item.get('published', ''))
             label = str(item.get('published', ''))[:10]

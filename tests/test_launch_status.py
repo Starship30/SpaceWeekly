@@ -68,12 +68,36 @@ class LaunchStatusTests(unittest.TestCase):
                 (False, True, '不尝试回收'), (None, None, '未知'), (1, 1, '未知'),
                 ('true', 'false', '未知')]:
             landing.update(attempt=attempt, success=success)
-            self.assertEqual(recovery_text(raw), f'TEST-01: {expected} (ASDS · ASOG)')
+            self.assertEqual(recovery_text(raw), '' if expected == '未知' else f'TEST-01: {expected} (ASDS · ASOG)')
         raw['rocket']['launcher_stage'][0]['landing'] = None
-        self.assertEqual(recovery_text(raw), 'TEST-01: 未知')
+        self.assertEqual(recovery_text(raw), '')
         for raw in ({}, dict(rocket=None), dict(rocket=dict(launcher_stage=[])),
                     dict(rocket=dict(launcher_stage='bad'))):
-            self.assertEqual(recovery_text(raw), '未知')
+            self.assertEqual(recovery_text(raw), '')
+
+    def test_no_recovery_omits_reports_badge_and_legacy_unknown(self):
+        from docx import Document
+        raw = raw_launch()
+        raw['rocket']['launcher_stage'] = []
+        for language, recovery_label in [('zh_CN', '回收状态'), ('en_US', 'Recovery status')]:
+            set_language(language)
+            article = launches._launch_to_article(raw)
+            item = launches._launch_video_item(raw, 'UTC')
+            self.assertNotIn('Recovery:', article.body)
+            self.assertNotIn('Recovery:', article.news.summary)
+            self.assertEqual(item['launch']['recovery'], '')
+            with patch.object(word, 'OUTPUT_DIR', self.root), patch.object(markdown, 'OUTPUT_DIR', self.root):
+                doc = word.export_word([], launches=[article], launch_range='past_week')
+                md = markdown.export_markdown([], launches=[article], launch_range='past_week')
+            for text in ('\n'.join(p.text for p in Document(doc).paragraphs), md.read_text(encoding='utf-8')):
+                self.assertNotIn(recovery_label, text)
+            for value in ['', '未知', 'Unknown', 'TEST-01: 未知 (ASDS)', 'TEST-01: Unknown']:
+                item['launch']['recovery'] = value
+                card = video.make_card(item, 1, language)
+                self.assertEqual(len(card['status_lines']), 1)
+                self.assertEqual(card['status_position'][0] + card['status_panel'].width, video.W-48)
+            article.body += '\nRecovery: Unknown'
+            self.assertEqual(word._launch_fields(article)['recovery'], '')
 
     def test_multiple_boosters_and_spacecraft_keep_separate_results(self):
         raw = raw_launch()
@@ -139,7 +163,8 @@ class LaunchStatusTests(unittest.TestCase):
         with patch('services.weekly_report.export_markdown') as export:
             _export_reports([], {}, {}, _export_context(settings, {}), articles, settings,
                             True, False, CancellationToken())
-        self.assertEqual(export.call_args.kwargs['launches'], articles)
+            self.assertEqual(export.call_args.kwargs['launches'][0].news, articles[0].news)
+            self.assertEqual(export.call_args.kwargs['launches'][0].body, articles[0].body)
         with patch.object(markdown, 'OUTPUT_DIR', self.root):
             path = markdown.export_markdown([], launches=articles, launch_range='disabled')
         self.assertNotIn('TEST-01', path.read_text(encoding='utf-8'))
@@ -158,7 +183,7 @@ class LaunchStatusTests(unittest.TestCase):
         for key in ['status', 'recovery']:
             item['launch'].pop(key)
         video.validate_snapshot(snapshot(item))
-        self.assertEqual(video.make_card(item, 1)['status_lines'], ['发射未知', '回收未知'])
+        self.assertEqual(video.make_card(item, 1)['status_lines'], ['发射未知'])
         for key in ['status', 'recovery']:
             for value in [None, False, 3, []]:
                 broken = copy.deepcopy(item); broken['launch'][key] = value
@@ -195,7 +220,11 @@ class LaunchStatusTests(unittest.TestCase):
                  ('未知长文本 '*1000, '回收未知', 'unknown')]
         for value, label, state in cases:
             with self.subTest(value=value[:40]):
-                self.assertEqual(video.launch_badge_labels(dict(status='成功', recovery=value))[1], (label, state))
+                labels = video.launch_badge_labels(dict(status='成功', recovery=value))
+                if state == 'unknown':
+                    self.assertEqual(labels, [('发射成功', 'success')])
+                else:
+                    self.assertEqual(labels[1], (label, state))
         for value, expected in [('失败', 'failure'), ('部分失败', 'partial'), ('飞行中', 'flight'),
                                 ('载荷已部署', 'flight'), ('未知', 'unknown')]:
             self.assertEqual(video.launch_badge_labels(dict(status=value))[0][1], expected)

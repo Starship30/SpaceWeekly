@@ -1,7 +1,8 @@
 """Read the existing launch Article fields for both report formats."""
 from i18n import tr
 from models.article import Article
-from utils.launch_status import launch_status_text
+from utils.launch_status import launch_status_text, recovery_states
+from utils.text import mission_display_name
 
 
 def launch_section_title(launch_range: str) -> str:
@@ -74,6 +75,19 @@ def launch_fields(launch: Article) -> dict[str, str]:
             existing = fields[multiline_field]
             fields[multiline_field] = f"{existing}\n{line}".strip()
 
+    for key in ('name', 'mission_name'):
+        fields[key] = mission_display_name(fields[key])
+    context = launch.launch_data
+    if context:
+        from services.launch_research import confirmed_values
+        fields.update(context.get('display', {}))
+        values = confirmed_values(context.get('research', {}), context)
+        if values.get('chinese_name'):
+            fields['mission_name'] = values['chinese_name']
+            fields['name'] = fields['rocket'] + ' | ' + values['chinese_name']
+        if values.get('summary'):
+            fields['mission_description'] = values['summary']
     fields["status"] = launch_status_text(fields["status"])
-    fields["recovery"] = fields["recovery"] or tr("launch_state.unknown")
-    return {key: value or tr("not_available") for key, value in fields.items()}
+    if not any(state != "unknown" for state in recovery_states(fields["recovery"])):
+        fields["recovery"] = ""
+    return {key: value if key == "recovery" else value or tr("not_available") for key, value in fields.items()}

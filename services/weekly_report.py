@@ -37,12 +37,13 @@ from services.feed_manager import enabled_feeds
 from services.prompt_manager import find_preset
 from services.prompt_manager import prompt_value, render_prompt
 from services.news_dates import verify_news_dates
+from services.launch_research import LaunchResearchService, confirmed_values
 from services.settings import AppSettings
 from services.settings import apply_settings
 from services.settings import load_settings
 from translator.translator import Translator
 from utils.time import parse_datetime
-from utils.text import clean_ai_text
+from utils.text import clean_ai_text, mission_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -628,6 +629,12 @@ def _export_reports(
 ) -> None:
     cancel_token.check()
 
+    launch_translator = (_launch_term_translator(settings, cancel_token) if word_enabled or markdown_enabled or
+                         settings.export_premiere and launch_video_items else None)
+    if settings.language == 'zh_CN' and settings.aerospace_translation_enabled and (markdown_enabled or word_enabled or settings.export_premiere):
+        launch_articles, launch_video_items = _prepare_launch_research(
+            launch_articles, launch_video_items, settings, cancel_token, launch_translator)
+
     if markdown_enabled:
         export_markdown(
             articles,
@@ -641,8 +648,6 @@ def _export_reports(
         )
         logger.info("导出 Markdown")
 
-    launch_translator = (_launch_term_translator(settings, cancel_token) if word_enabled or
-                         settings.export_premiere and launch_video_items else None)
     if word_enabled:
         cancel_token.check()
         export_word(
@@ -653,7 +658,7 @@ def _export_reports(
             launches=launch_articles,
             launch_range=settings.launch_range,
             launch_timezone=settings.display_timezone,
-            launch_term_translator=launch_translator,
+            launch_term_translator=None,
             cancel_check=cancel_token.check,
         )
         logger.info("导出 Word")
@@ -672,17 +677,33 @@ def _export_reports(
 
 def _localize_launch_video_items(items, translator, cancel_token):
     cancel_token.check()
-    if translator is None:
-        return items
     localized = []
     for item in items:
         cancel_token.check()
         record = dict(item, launch=dict(item['launch']))
+        context = record.get('launch_context')
+        if context and getattr(getattr(translator, 'settings', None), 'language', 'zh_CN') == 'zh_CN':
+            values = confirmed_values(context.get('research', {}), context)
+            record['summary'] = values.get('chinese_name') or context['english_name']
+            if values.get('summary'):
+                record['launch']['description_zh'] = values['summary']
+        if translator is None:
+            record['summary'] = mission_display_name(record['summary'])
+            localized.append(record)
+            continue
         for target, key, term_type in [(record, 'title', 'rocket'), (record, 'summary', 'mission'),
-                (record['launch'], 'orbit', 'orbit'), (record['launch'], 'payload', 'mission'),
+                (record['launch'], 'orbit', 'orbit'),
                 (record['launch'], 'site', 'location')]:
             cancel_token.check()
+            if context and key == 'summary':
+                continue
+            if getattr(getattr(translator, 'settings', None), 'language', 'zh_CN') == 'en_US':
+                continue
             original = target[key]
+            if context:
+                from translator.dictionary import dictionary_replace
+                target[key] = dictionary_replace(original)[0]
+                continue
             if not re.search(r'[A-Za-z]', original) or re.search(r'[\u3400-\u9fff]', original):
                 continue
             result = translator.translate_term_result(original, term_type, allow_ai=True)
@@ -690,18 +711,60 @@ def _localize_launch_video_items(items, translator, cancel_token):
             target[key] = result.translation if result.success and result.translation else original
             if not result.success:
                 logger.warning('发射视频翻译回退：%s %s；%s', item['id'], key, result.error_message)
+        original = record['launch']['payload']
+        if original and not (context and getattr(getattr(translator, 'settings', None), 'language', 'zh_CN') == 'zh_CN'):
+            record['launch']['payload'] = translator.summarize_payload(item['summary'], original) or original
+            cancel_token.check()
+        record['summary'] = mission_display_name(record['summary'])
         localized.append(record)
     return localized
+
+
+def _prepare_launch_research(articles, items, settings, token, translator):
+    """One content-stage lookup shared by Word, Markdown and offline snapshots."""
+    service = LaunchResearchService(settings, token)
+    contexts = {}
+    for context in [a.launch_data for a in articles] + [i.get('launch_context') for i in items or []]:
+        token.check()
+        if not context or not context.get('ll2_id') or context['ll2_id'] in contexts:
+            continue
+        context = dict(context)
+        try:
+            context['research'] = service.review(context)
+        except TaskCancelledError:
+            raise
+        except (OSError, ValueError) as error:
+            logger.warning('发射资料缓存不可用 %s：%s', context['ll2_id'], error)
+        if not confirmed_values(context.get('research', {}), context):
+            logger.warning('发射任务待核对 %s %s：%s', context['ll2_id'], context['english_name'],
+                           context.get('research', {}).get('reason', '无可用证据'))
+        contexts[context['ll2_id']] = context
+    prepared = []
+    for article in articles:
+        token.check()
+        context = contexts.get((article.launch_data or {}).get('ll2_id'))
+        if context:
+            from exporters.launches import launch_fields
+            display = {}
+            fields = launch_fields(article)
+            if translator is not None:
+                from translator.dictionary import dictionary_replace
+                for key, kind in [('rocket', 'rocket'), ('provider', 'organization'), ('pad', 'location'), ('orbit', 'orbit')]:
+                    token.check()
+                    display[key] = dictionary_replace(fields[key])[0]
+            context = dict(context, display=display)
+            article = replace(article, launch_data=context)
+        prepared.append(article)
+    videos = None if items is None else [dict(i, launch_context=contexts.get(
+        i.get('launch_context', {}).get('ll2_id'), i.get('launch_context', {}))) for i in items]
+    return prepared, videos
 
 
 def _launch_term_translator(
     settings: AppSettings,
     cancel_token: CancellationToken,
 ):
-    if (
-        not settings.aerospace_translation_enabled
-        or settings.language != "zh_CN"
-    ):
+    if not settings.aerospace_translation_enabled:
         return None
 
     return Translator(

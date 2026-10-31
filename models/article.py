@@ -11,3 +11,5 @@ class Article:
     body: str
 
     parser: str
+
+    launch_data: dict | None = None

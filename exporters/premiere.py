@@ -12,6 +12,7 @@ from models.article import Article
 from models.export_context import ExportContext
 from services.cancellation import CancelCheck, no_cancel
 from utils.output_files import reserved_output
+from utils.text import mission_display_name
 
 PROTOCOL_VERSION = "1.0"
 
@@ -110,6 +111,12 @@ def export_premiere(
                     if not isinstance(fields[key], str):
                         raise ValueError(f'Premiere: invalid launch {key}')
                     record['launch'][key] = fields[key]
+            if isinstance(fields.get('description_zh'), str):
+                record['launch']['description_zh'] = fields['description_zh']
+            record['summary'] = mission_display_name(record['summary'])
+            if isinstance(launch.get('launch_context'), dict):
+                from copy import deepcopy
+                record['launch_context'] = deepcopy(launch['launch_context'])
             payload['launches'].append(record)
     with reserved_output(OUTPUT_DIR, ".premiere.json") as (output_path, temp_path):
         cancel_check()

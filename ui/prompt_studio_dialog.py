@@ -33,6 +33,7 @@ PROMPT_LABELS = {
     "summary": "prompt.summary",
     "filter": "prompt.filter",
     "title": "prompt.title",
+    "roundup": "prompt.roundup",
 }
 
 
@@ -42,7 +43,7 @@ class PromptStudioDialog(QDialog):
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
         self.original_settings = settings
-        self.presets = load_presets()
+        self.presets = load_presets() or [default_preset()]
         self.current_type = PROMPT_TYPES[0]
         self.setWindowTitle(tr("prompt.studio"))
         self.resize(980, 680)
@@ -59,6 +60,7 @@ class PromptStudioDialog(QDialog):
             summary_prompt=self._prompt("summary"),
             filter_prompt=self._prompt("filter"),
             title_prompt=self._prompt("title"),
+            roundup_prompt=self._prompt("roundup"),
         )
 
     def _build_ui(self) -> None:
@@ -162,6 +164,7 @@ class PromptStudioDialog(QDialog):
     def _load_current_prompt(self) -> None:
         self.editor.blockSignals(True)
         self.editor.setPlainText(self._prompt(self.current_type))
+        self.variables_list.setEnabled(self.current_type != 'roundup')
         self.help_label.setText(tr("prompt.help." + self.current_type))
         self.editor.blockSignals(False)
         self._update_char_count()
@@ -174,6 +177,7 @@ class PromptStudioDialog(QDialog):
             summary_prompt=preset.summary,
             filter_prompt=preset.filter,
             title_prompt=preset.title,
+            roundup_prompt=preset.roundup,
         )
         self._load_current_prompt()
 
@@ -197,6 +201,7 @@ class PromptStudioDialog(QDialog):
             summary=self._prompt("summary"),
             filter=self._prompt("filter"),
             title=self._prompt("title"),
+            roundup=self._prompt("roundup"),
         )
         save_preset(preset)
         QMessageBox.information(self, tr("prompt.studio"), tr("preset.saved"))
@@ -224,7 +229,7 @@ class PromptStudioDialog(QDialog):
         if not isinstance(data, dict) or not all(isinstance(data.get(k), str) for k in ("name", "summary", "filter")):
             QMessageBox.warning(self, tr("prompt.studio"), tr("prompt.invalid_template"))
             return
-        if "title" in data and not isinstance(data["title"], str):
+        if any(k in data and not isinstance(data[k], str) for k in ("title", "roundup")):
             QMessageBox.warning(self, tr("prompt.studio"), tr("prompt.invalid_template"))
             return
         name = data["name"]
@@ -234,6 +239,7 @@ class PromptStudioDialog(QDialog):
                 summary=str(data.get("summary", "")),
                 filter=str(data.get("filter", "")),
                 title=str(data.get("title") or default_preset().title),
+                roundup=str(data.get("roundup") or default_preset().roundup),
             )
         )
         self.presets = load_presets()
@@ -259,6 +265,7 @@ class PromptStudioDialog(QDialog):
                 summary=self._prompt("summary"),
                 filter=self._prompt("filter"),
                 title=self._prompt("title"),
+                roundup=self._prompt("roundup"),
             )
         )
         import shutil
@@ -273,6 +280,7 @@ class PromptStudioDialog(QDialog):
             summary_prompt=preset.summary,
             filter_prompt=preset.filter,
             title_prompt=preset.title,
+            roundup_prompt=preset.roundup,
         )
         self._load_current_prompt()
         QMessageBox.information(self, tr("prompt.studio"), tr("default.restored"))
@@ -299,6 +307,8 @@ class PromptStudioDialog(QDialog):
         QApplication.clipboard().setText(self._render_current_prompt())
 
     def _render_current_prompt(self) -> str:
+        if self.current_type == 'roundup':
+            return self.editor.toPlainText() + '\n\n' + tr('prompt.roundup.preview')
         article = Article(
             news=News(
                 source="NASA Science",

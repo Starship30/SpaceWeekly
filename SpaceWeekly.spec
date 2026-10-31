@@ -58,6 +58,7 @@ datas = [
     (str(VIDEO_BACKEND), "video-backend"),
     (str(VIDEO_BACKEND.with_name("yt-dlp-LICENSE.txt")), "video-backend"),
     (str(ROOT / "tools" / "video_cards.py"), "tools"),
+    (str(ROOT / "tools" / "qwen_tts_worker.py"), "tools"),
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "language"), "language"),
     (str(ROOT / "prompts"), "prompts"),
@@ -93,7 +94,7 @@ a = Analysis(
     runtime_hooks=[str(ROOT / "tools" / "packaging" / name)
                    for name in ("runtime_tzdata.py", "runtime_ffmpeg.py")],
     # Pillow/requests probe these optional packages; SpaceWeekly does not use them.
-    excludes=["numpy", "OpenSSL", "cryptography"],
+    excludes=["numpy", "torch", "qwen_tts", "soundfile", "OpenSSL", "cryptography"],
     noarchive=False,
 )
 # The interface uses raster QWidget painting, not QML, PDF rendering or OpenGL.

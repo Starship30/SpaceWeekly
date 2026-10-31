@@ -7,6 +7,9 @@ from PySide6.QtWidgets import QPushButton
 from PySide6.QtWidgets import QTableWidget
 from PySide6.QtWidgets import QTableWidgetItem
 from PySide6.QtWidgets import QVBoxLayout
+from PySide6.QtWidgets import QPlainTextEdit
+from PySide6.QtCore import Qt
+import json
 
 from i18n import tr
 from translator.dictionary import add_pending_term
@@ -16,6 +19,7 @@ from translator.dictionary import load_pending_terms
 from translator.dictionary import remove_pending_term
 from translator.dictionary import save_dictionary
 from translator.translator import Translator
+from services.launch_research import load_launch_research, confirm_launch, request_recheck
 
 
 class TermEditorDialog(QDialog):
@@ -36,6 +40,10 @@ class TermEditorDialog(QDialog):
             QHeaderView.ResizeMode.Stretch
         )
         self._load_rows()
+        self.launch_table = QTableWidget(0, 5)
+        self.launch_table.setHorizontalHeaderLabels(['LL2 ID', '英文任务名', '中文名（可纠正）', '中文简介（可纠正）', '资料 / 人工状态'])
+        self.launch_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._load_launches()
         self._build_layout()
 
     def _build_layout(self) -> None:
@@ -55,6 +63,14 @@ class TermEditorDialog(QDialog):
 
         actions.addStretch(1)
         layout.addLayout(actions)
+        layout.addWidget(self.launch_table)
+        launch_actions = QHBoxLayout()
+        for label, handler in [('查看发射资料与出处', self._show_launch), ('人工确认任务资料', self._confirm_launch),
+                               ('重新核对任务（下次生成）', self._recheck_launch)]:
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            launch_actions.addWidget(button)
+        layout.addLayout(launch_actions)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -64,7 +80,8 @@ class TermEditorDialog(QDialog):
         layout.addWidget(buttons)
 
     def _load_rows(self) -> None:
-        for source, entry in load_dictionary().items():
+        self.original_entries = load_dictionary()
+        for source, entry in self.original_entries.items():
             self._append_row(source, entry["translation"], entry["type"])
 
         for source, entry in load_pending_terms().items():
@@ -75,6 +92,70 @@ class TermEditorDialog(QDialog):
                 entry.get("type", "term"),
                 pending=True,
             )
+
+    def _load_launches(self):
+        try:
+            self.launch_records = load_launch_research()
+        except (OSError, ValueError) as error:
+            self.launch_records = {}
+            QMessageBox.warning(self, tr('terms.editor'), str(error))
+        self.launch_table.setRowCount(0)
+        for identifier, record in self.launch_records.items():
+            row = self.launch_table.rowCount()
+            self.launch_table.insertRow(row)
+            values = record.get('manual', {}) if record.get('human_status') == 'confirmed' else record
+            evidence = str(record.get('evidence_status') or 'unverified')
+            human = str(record.get('human_status') or 'unreviewed')
+            state = {'supported': '有证据', 'pending': '待核对', 'conflict': '来源冲突'}.get(evidence, '未核实')
+            state += ' / ' + ('人工确认' if human == 'confirmed' else '未人工确认')
+            if record.get('needs_review') or record.get('recheck_requested'):
+                state += ' / 待重新核对'
+            for column, value in enumerate([identifier, record.get('english_name', ''), values.get('chinese_name', ''),
+                                             values.get('summary', ''), state]):
+                cell = QTableWidgetItem(str(value or ''))
+                cell.setToolTip(str(value or ''))
+                if column not in (2, 3):
+                    cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.launch_table.setItem(row, column, cell)
+
+    def _launch_selection(self):
+        row = self.launch_table.currentRow()
+        return (row, self.launch_table.item(row, 0).text()) if row >= 0 else (-1, '')
+
+    def _show_launch(self):
+        row, identifier = self._launch_selection()
+        if row < 0:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('发射资料与出处 — ' + identifier)
+        dialog.resize(850, 600)
+        layout = QVBoxLayout(dialog)
+        view = QPlainTextEdit()
+        view.setReadOnly(True)
+        view.setPlainText(json.dumps(self.launch_records[identifier], ensure_ascii=False, indent=2))
+        layout.addWidget(view)
+        dialog.exec()
+
+    def _confirm_launch(self):
+        row, identifier = self._launch_selection()
+        if row < 0:
+            return
+        try:
+            confirm_launch(identifier, self.launch_table.item(row, 2).text(), self.launch_table.item(row, 3).text())
+            self._load_launches()
+        except (OSError, ValueError, KeyError) as error:
+            QMessageBox.warning(self, tr('terms.editor'), str(error))
+
+    def _recheck_launch(self):
+        row, identifier = self._launch_selection()
+        if row < 0:
+            return
+        try:
+            request_recheck(identifier)
+            self._load_launches()
+            QMessageBox.information(self, tr('terms.editor'), '已标记。下次生成包含该 LL2 任务的内容时重新核对；需开启联网核对。人工纠正不会被自动覆盖。')
+        except (OSError, ValueError, KeyError) as error:
+            QMessageBox.warning(self, tr('terms.editor'), str(error))
 
     def _append_row(
         self,
@@ -179,9 +260,13 @@ class TermEditorDialog(QDialog):
 
             if source and translation and source not in self.pending_sources:
                 entries[source] = {
+                    **self.original_entries.get(source, {}),
                     "translation": translation,
                     "type": self._cell_text(row, 2) or "term",
                 }
+                if (source not in self.original_entries
+                        or self.original_entries[source].get('translation') != translation):
+                    entries[source]['human_status'] = 'confirmed'
 
         save_dictionary(entries)
         self.accept()

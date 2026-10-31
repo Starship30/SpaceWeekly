@@ -72,24 +72,28 @@ class LaunchExportTests(unittest.TestCase):
         with patch('services.weekly_report.export_premiere') as export:
             _export_reports([], {}, {}, _export_context(settings, {}), [], settings,
                             False, False, CancellationToken(), launch_video_items=rows)
-        self.assertEqual(export.call_args.kwargs['launches'], rows)
+        exported = export.call_args.kwargs['launches']
+        self.assertEqual(exported[0]['id'], rows[0]['id'])
+        self.assertEqual(exported[0]['summary'], rows[0]['summary'])
+        self.assertEqual(exported[0]['published'], rows[0]['published'])
 
     def test_launch_translation_reuses_word_translator_and_cache(self):
         raw = copy.deepcopy(RAW)
         raw['rocket']['configuration']['full_name'] = 'Falcon 9'
         raw['mission']['name'] = 'Fictional satellite mission'
+        raw['mission']['description'] = 'A fictional weather satellite.'
         raw['mission']['orbit']['name'] = 'Low Earth Orbit'
         raw['pad']['name'] = 'Fictional launch site'
         rows = [_launch_video_item(raw, 'Asia/Shanghai')]
         original = copy.deepcopy(rows)
         translations = {'Falcon 9': '猎鹰9号', 'Fictional satellite mission': '虚构卫星任务',
-                        'Low Earth Orbit': '近地轨道', 'Fictional launch site': '虚构发射场'}
+                        'Low Earth Orbit': '近地轨道', 'Fictional launch site': '虚构发射场',
+                        'A fictional weather satellite.': '一颗虚构的气象卫星。'}
         settings = replace(default_settings(), export_premiere=True)
-        ai = Mock(side_effect=lambda text, *_: translations[text])
+        ai = Mock(side_effect=lambda text, kind, *_: '气象卫星' if kind == 'payload' else translations[text])
         translator = Translator(settings=settings, mode='hybrid', ai_callable=ai, web_search=False)
         def word(*args, **kwargs):
-            self.assertIs(kwargs['launch_term_translator'], translator)
-            translator.translate_term('Falcon 9', 'rocket')
+            self.assertIsNone(kwargs['launch_term_translator'])
         with patch('translator.translator.exact_dictionary_translation', return_value=''), \
              patch('translator.translator.dictionary_replace', return_value=('', False)), \
              patch('translator.translator.get_cached_translation', return_value=None), \
@@ -101,18 +105,19 @@ class LaunchExportTests(unittest.TestCase):
             _export_reports([], {}, {}, _export_context(settings, {}), [], settings,
                             False, True, CancellationToken(), launch_video_items=rows)
         factory.assert_called_once()
-        self.assertEqual(ai.call_count, 4)  # Shared mission/payload and Word rocket are cached.
+        ai.assert_not_called()  # Context-aware launch names require event evidence, never isolated guessing.
         translated = export.call_args.kwargs['launches'][0]
-        self.assertEqual((translated['title'], translated['summary']), ('猎鹰9号', '虚构卫星任务'))
-        self.assertEqual(translated['launch']['payload'], '虚构卫星任务')
+        self.assertEqual((translated['title'], translated['summary']), ('猎鹰9号', 'Fictional satellite mission'))
+        self.assertEqual(translated['launch']['payload'], raw['mission']['description'])
         self.assertEqual(translated['launch']['orbit'], '近地轨道')
-        self.assertEqual(translated['launch']['site'], '虚构发射场')
+        self.assertEqual(translated['launch']['site'], 'Fictional launch site')
         self.assertEqual((translated['id'], translated['published'], translated['url']),
                          (rows[0]['id'], rows[0]['published'], rows[0]['url']))
         self.assertEqual(rows, original)
 
     def test_translation_failure_fallback_and_cancellation(self):
         rows = [_launch_video_item(RAW, 'Asia/Shanghai')]
+        rows[0].pop('launch_context')  # Legacy snapshots keep their content-stage fallback.
         rows[0]['title'] = 'Unknown rocket'
         translator = Mock()
         translator.translate_term_result.return_value = TranslationResult(

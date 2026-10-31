@@ -28,6 +28,7 @@ import requests
 from models.video_download import DownloadProgress, VideoFormat, VideoInfo, VideoSearchResults
 from services.cancellation import CancelCheck, TaskCancelledError, no_cancel
 from utils.time import parse_datetime
+from utils.text import mission_display_name
 
 logger = logging.getLogger(__name__)
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -150,7 +151,7 @@ def mission_date_range(item):
 
 def mission_search_keywords(item):
     """Keep specific mission names first; generic payload counts use rocket names."""
-    mission = str(item.get('summary') or '').strip()
+    mission = mission_display_name(item.get('summary') or '')
     rocket = str(item.get('title') or '').strip()
     generic = re.fullmatch(r'(?:一箭)?(?:\d+|[一二三四五六七八九十百两]+)\s*(?:颗|枚|个)?(?:卫星|星|载荷)(?:发射)?(?:任务)?|\d+\s+(?:satellites?|payloads?)', mission, re.I)
     if re.search(r'[\u3400-\u9fff]', rocket):
@@ -214,30 +215,43 @@ def parse_up_ids(value: str) -> list[str]:
     return ids
 
 
-def sort_search_items(items, order='asc'):
-    if order == 'relevance':
-        return items
+def sort_search_items(items, order='asc', *, preferred_up_ids=()):
     def key(item):
         date = parse_datetime(item.published)
         stamp = item.published_timestamp or (date.timestamp() if date else 0)
         return (not bool(stamp), -stamp if order == 'desc' else stamp)
-    return sorted(items, key=key)
+    ordered = items if order == 'relevance' else sorted(items, key=key)
+    return sorted(ordered, key=lambda item: (
+        bool(re.search(r'中字|中文字幕|中英字幕|中英双字', item.title)),
+        item.author_id not in preferred_up_ids))
 
 
 
 def _get(session, url: str, cancel_check: CancelCheck, **kwargs) -> str:
-    cancel_check()
-    with session.get(url, timeout=(5, 12), stream=True, **kwargs) as response:
-        response.raise_for_status()
-        chunks, length = [], 0
-        for chunk in response.iter_content(65536):
+    for attempt in range(2):
+        cancel_check()
+        try:
+            with session.get(url, timeout=(5, 12), stream=True, **kwargs) as response:
+                response.raise_for_status()
+                chunks, length = [], 0
+                for chunk in response.iter_content(65536):
+                    cancel_check()
+                    length += len(chunk)
+                    if length > 6*1024*1024:
+                        raise VideoDownloadError('search', 'Response exceeds 6 MB')
+                    chunks.append(chunk)
             cancel_check()
-            length += len(chunk)
-            if length > 6*1024*1024:
-                raise VideoDownloadError('search', 'Response exceeds 6 MB')
-            chunks.append(chunk)
-    cancel_check()
-    return b''.join(chunks).decode('utf-8')
+            return b''.join(chunks).decode('utf-8')
+        except requests.exceptions.SSLError:
+            raise
+        except (requests.Timeout, requests.ConnectionError):
+            cancel_check()
+            if attempt:
+                raise
+            logger.warning('Retrying video GET after transient network failure: %s', urlsplit(url).path)
+            for _ in range(3):
+                cancel_check()
+                time.sleep(.1)
 
 
 def _search_items(rows: list, limit=20) -> list[VideoInfo]:
@@ -435,8 +449,7 @@ def search_videos(keyword: str, cancel_check: CancelCheck = no_cancel, cookies=N
                 warnings.append(error.code + ': ' + error.detail)
         if not items and failures:
             raise VideoDownloadError('search', '; '.join(warnings))
-        ordered = sort_search_items(list(items.values()), order)
-        ordered.sort(key=lambda item: item.author_id not in up_ids)
+        ordered = sort_search_items(list(items.values()), order, preferred_up_ids=up_ids)
         return VideoSearchResults(ordered, 'priority', '; '.join(dict.fromkeys(warnings)), keyword)
     with _anonymous_session(cookies) as session:
         try:
@@ -576,7 +589,7 @@ def _run_process(command: list[str], cancel_check: CancelCheck,
         while True:
             cancel_check()
             if timeout and time.monotonic()-started > timeout:
-                raise VideoDownloadError('timeout')
+                raise VideoDownloadError('timeout', f'Backend exceeded {timeout:g} seconds; ' + '\n'.join(errors))
             try:
                 line = lines.get(timeout=.1)
             except Empty:
@@ -592,11 +605,13 @@ def _run_process(command: list[str], cancel_check: CancelCheck,
         while process.poll() is None:
             cancel_check()
             if timeout and time.monotonic()-started > timeout:
-                raise VideoDownloadError('timeout')
+                raise VideoDownloadError('timeout', f'Backend exceeded {timeout:g} seconds; ' + '\n'.join(errors))
             time.sleep(.05)
         cancel_check()
         if process.returncode:
-            raise VideoDownloadError('backend', '\n'.join(errors) or f'Exit {process.returncode}')
+            detail = '\n'.join(errors) or f'Exit {process.returncode}'
+            code = 'platform' if re.search(r'\bHTTP(?:\s+Error|Error)\s*:?\s*(403|412|429)\b', detail) else 'backend'
+            raise VideoDownloadError(code, detail)
     finally:
         try:
             _stop_process(process, job)
@@ -619,9 +634,18 @@ def _common_args() -> list[str]:
 def _check_saving_allowed(url: str, cancel_check: CancelCheck, cookies=None) -> None:
     identifier = urlsplit(url).path.split('/')[-1]
     query = {'bvid': identifier} if identifier.startswith('BV') else {'aid': identifier[2:]}
-    with _anonymous_session(cookies) as session:
-        payload = json.loads(_get(session, 'https://api.bilibili.com/x/web-interface/view',
-                                  cancel_check, params=query))
+    try:
+        with _anonymous_session(cookies) as session:
+            payload = json.loads(_get(session, 'https://api.bilibili.com/x/web-interface/view',
+                                      cancel_check, params=query))
+    except json.JSONDecodeError:
+        raise VideoDownloadError('permission', 'Saving-permission response is not JSON') from None
+    except requests.Timeout as error:
+        raise VideoDownloadError('timeout', 'Saving-permission request: ' + safe_error(error)) from None
+    except requests.RequestException as error:
+        status = error.response.status_code if error.response is not None else None
+        code = 'platform' if status in (403, 412, 429) else 'network'
+        raise VideoDownloadError(code, 'Saving-permission request: ' + safe_error(error)) from None
     data = payload.get('data') if isinstance(payload, dict) else None
     if not isinstance(payload, dict) or payload.get('code') != 0 or not isinstance(data, dict):
         raise VideoDownloadError('permission', 'Unable to confirm platform saving permission')
@@ -677,7 +701,7 @@ def _backend_url(url, cookies):
     return url.replace('https://www.bilibili.com/', 'https://bilibili.com/') if cookies else url
 
 
-def parse_video(url: str, cancel_check: CancelCheck = no_cancel, cookies=None) -> VideoInfo:
+def parse_video(url: str, cancel_check: CancelCheck = no_cancel, cookies=None, *, timeout=90) -> VideoInfo:
     url = resolve_video_url(url, cancel_check)
     payloads = []
 
@@ -688,7 +712,7 @@ def parse_video(url: str, cancel_check: CancelCheck = no_cancel, cookies=None) -
     auth_args, auth_input = _auth_options(cookies)
     _run_process(backend_command()+_common_args()+auth_args+
                  ['--dump-single-json', '--skip-download', _backend_url(url, cookies)],
-                 cancel_check, collect, timeout=90, **auth_input)
+                 cancel_check, collect, timeout=timeout, **auth_input)
     if len(payloads) != 1 or not isinstance(payloads[0], dict):
         raise VideoDownloadError('backend', 'Missing video metadata')
     data = payloads[0]
@@ -916,11 +940,22 @@ def demo_download(keyword, date_range, workspace, up_ids=(), order='asc', cookie
     if not results.items:
         raise VideoDownloadError('date_no_match', results.warning)
     errors = []
+    retry_available = True
     for candidate in results.items[:3]:
         cancel_check()
-        on_progress(DownloadProgress('parsing'))
+        phase = 'parsing'
+        on_progress(DownloadProgress(phase))
         try:
-            info = parse_video(candidate.url, cancel_check, cookies)
+            try:
+                info = parse_video(candidate.url, cancel_check, cookies)
+            except VideoDownloadError as error:
+                if error.code != 'timeout' or not retry_available:
+                    raise
+                retry_available = False
+                cancel_check()
+                logger.warning('Demo metadata timeout; retrying once: video=%s', candidate.id)
+                on_progress(DownloadProgress('retrying'))
+                info = parse_video(candidate.url, cancel_check, cookies, timeout=180)
             if not _date_items([info], date_range):
                 raise VideoDownloadError('date_no_match', 'Parsed publication date does not match')
             if up_ids and not prefer_up_ids and info.author_id and info.author_id not in up_ids:
@@ -928,15 +963,17 @@ def demo_download(keyword, date_range, workspace, up_ids=(), order='asc', cookie
             selected = preferred_format(info.formats)
             if selected is None:
                 raise VideoDownloadError('ffmpeg')
+            cancel_check()
+            on_video((info, selected))
+            phase = 'downloading'
+            return download_video(info, selected, workspace, cancel_check, on_progress, cookies,
+                                  output_directory=output_directory)
         except VideoDownloadError as error:
-            if error.code == 'dependency':
-                raise
-            errors.append(f'{candidate.title[:80]}: {error.code}: {error.detail}')
-            continue
-        cancel_check()
-        on_video((info, selected))
-        return download_video(info, selected, workspace, cancel_check, on_progress, cookies,
-                              output_directory=output_directory)
+            detail = f'{phase} {candidate.id} {candidate.title[:80]}: {error.code}: {error.detail}'
+            logger.warning('Demo candidate failed: %s', safe_error(detail))
+            if error.code in ('dependency', 'platform', 'path'):
+                raise VideoDownloadError(error.code, detail) from None
+            errors.append(detail)
     raise VideoDownloadError('demo_candidates', '; '.join(errors))
 
 
@@ -965,6 +1002,7 @@ def demo_download_tasks(items, workspace, up_ids=(), order='asc', cookies=None,
         queries = mission_search_keywords(item)
         keyword = queries[0] if queries else ''
         on_task_started((index, len(tasks), item, keyword, destination))
+        logger.info('Video Demo task %s/%s: %s', index, len(tasks), safe_error(keyword))
         outcome = dict(index=index, total=len(tasks), keyword=keyword, directory=destination, path=None, error=None)
         try:
             window = mission_date_range(item)
@@ -979,6 +1017,8 @@ def demo_download_tasks(items, workspace, up_ids=(), order='asc', cookies=None,
             raise
         except Exception as error:
             outcome['error'] = error if isinstance(error, VideoDownloadError) else VideoDownloadError('operation', str(error))
+            logger.warning('Video Demo task failed: %s; %s: %s', safe_error(keyword),
+                           outcome['error'].code, outcome['error'].detail)
         outcomes.append(outcome)
         on_task_finished(outcome)
     return outcomes

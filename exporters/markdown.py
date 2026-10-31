@@ -85,7 +85,8 @@ def _build_markdown(
                                ("launch_operator", "provider"), ("launch_site", "pad"),
                                ("orbit", "orbit"), ("launch_status", "status"),
                                ("recovery_status", "recovery"), ("mission_description", "mission_description")]:
-                lines.extend([f"{tr(label)}{separator}{clean_ai_text(fields[key])}", ""])
+                if key != "recovery" or fields[key]:
+                    lines.extend([f"{tr(label)}{separator}{clean_ai_text(fields[key])}", ""])
             lines.extend([f"{tr('report_link')}{separator}{launch.news.url}", "", "---", ""])
 
     for section, section_articles in _group_by_importance(

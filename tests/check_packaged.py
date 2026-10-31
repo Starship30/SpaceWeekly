@@ -35,6 +35,9 @@ with tempfile.TemporaryDirectory(prefix='spaceweekly-packaged-', dir=root / 'bui
     assert 'launch-opacity-encoded' in phases and 'simplified-video-controls-and-headline-rule' in phases, 'Video UX checks missing'
     assert 'opener-playback-and-seek' in phases, 'Opener preview playback check missing'
     assert 'll2-status-json-and-reports' in phases and 'launch-status-badges-encoded' in phases, 'LL2 status checks missing'
+    assert 'launch-payload-description' in phases, 'LL2 payload description check missing'
+    assert 'payload-summary-and-subtitle-priority' in phases, 'Payload summary or subtitle priority missing'
+    assert 'deepseek-search-and-verified-mission-names' in phases, 'DeepSeek search or mission cleanup missing'
     assert marker.exists(), 'Packaged Qt startup did not complete'
     assert marker.read_text(encoding='utf-8').strip() == app_version(), 'Packaged app version mismatch'
 print(f'Packaged V{app_version()} Qt, video dialogs, opener font fallback/PNG logo, downloads, QR, yt-dlp, bundled FFmpeg/ffprobe, MP4 encoding/merge, alpha MOV, ProRes, Word, TLS, timezones and SVG passed without external tools on PATH')

@@ -83,6 +83,7 @@ class SettingsDialog(QDialog):
             temperature=self.temperature_spin.value(),
             user_agent=self.user_agent_edit.text().strip(),
             web_search_provider=str(self.search_provider_combo.currentData()),
+            web_search_enabled=self.web_search_check.isChecked(),
             web_search_api_key=self.search_api_key_edit.text().strip(),
             request_timeout=self.timeout_spin.value(),
             connect_timeout=self.connect_timeout_spin.value(),
@@ -182,16 +183,19 @@ class SettingsDialog(QDialog):
         self.debug_ai_check = self._check(tr("show.ai.debug"), settings.debug_ai_enabled)
         self.release_mode_check = self._check(tr("release.mode"), settings.release_mode)
         self.user_agent_edit = QLineEdit(settings.user_agent)
+        self.web_search_check = self._check(tr('search.translation.enabled'), settings.web_search_enabled)
         self.search_provider_combo = QComboBox()
-        for key in ('duckduckgo', 'brave', 'wikipedia'):
+        for key in ('duckduckgo', 'deepseek', 'brave', 'wikipedia'):
             self.search_provider_combo.addItem(tr('search.provider.'+key), key)
         self.search_provider_combo.setCurrentIndex(max(0, self.search_provider_combo.findData(settings.web_search_provider.lower())))
         self.search_api_key_edit = QLineEdit(settings.web_search_api_key)
         self.search_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.search_api_key_edit.setPlaceholderText(tr('search.api_key.hint'))
-        self.search_api_key_edit.setEnabled(self.search_provider_combo.currentData() == 'brave')
-        self.search_provider_combo.currentIndexChanged.connect(
-            lambda: self.search_api_key_edit.setEnabled(self.search_provider_combo.currentData() == 'brave'))
+        self.search_api_key_edit.setEnabled(self.search_provider_combo.currentData() in ('brave', 'deepseek'))
+        def select_search_provider():
+            self.search_api_key_edit.clear()
+            self.search_api_key_edit.setEnabled(self.search_provider_combo.currentData() in ('brave', 'deepseek'))
+        self.search_provider_combo.currentIndexChanged.connect(select_search_provider)
         self.sqlite_edit = QLineEdit(settings.sqlite_path)
         self.output_edit = QLineEdit(settings.output_dir)
         self.sqlite_check = self._check("", settings.export_sqlite)
@@ -360,6 +364,7 @@ class SettingsDialog(QDialog):
 
     def _network_page(self) -> QWidget:
         page, layout = self._form_page(tr("network"))
+        layout.addRow(self.web_search_check)
         layout.addRow(tr('search.provider'), self.search_provider_combo)
         layout.addRow(tr('search.api_key'), self.search_api_key_edit)
         hint = QLabel(tr('search.provider.hint'))

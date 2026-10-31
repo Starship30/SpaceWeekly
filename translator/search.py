@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
+from http.client import HTTPException
 from urllib import error
 from urllib import request
 from urllib.parse import parse_qs, unquote, urlparse
@@ -22,6 +23,9 @@ OFFICIAL_DOMAINS = (
     "blueorigin.com",
     "ulalaunch.com",
     "rocketlabusa.com",
+    "rocketlabcorp.com",
+    "he360.com",
+    "starlink.com",
     "arianespace.com",
     "roscosmos.ru",
     "isro.gov.in",
@@ -32,11 +36,23 @@ OFFICIAL_DOMAINS = (
     "spacepioneer.cc",
     "galactic-energy.cn",
     "orienspace.com",
+    "xiopmspace.com",
+    "gzhu.edu.cn",
+    "gz.gov.cn",
+    "spacechina.com",
+    "casic.cn",
+    "casc.cn",
+    "sinomach.com.cn",
+    "commsat.cn",
+    "charmingglobe.com",
+    "cspsat.com",
 )
 
 
 class SearchProviderError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class SearchRateLimitError(SearchProviderError):
@@ -153,6 +169,51 @@ class BraveSearchProvider(SearchProvider):
         return results[:max_results]
 
 
+class DeepSeekSearchProvider(SearchProvider):
+    name = "deepseek"
+
+    def __init__(self, api_key: str, timeout: int = 10) -> None:
+        self.api_key = str(api_key or "").strip()
+        self.timeout = timeout
+
+    def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
+        if not self.api_key:
+            raise SearchProviderError("DeepSeek Search API key is not configured", retryable=False)
+        if not isinstance(query, str) or not 1 <= len(query.strip()) <= 128:
+            raise SearchProviderError("DeepSeek search query must contain 1–128 characters", retryable=False)
+        api_request = request.Request(
+            "https://api.deepseek.com/v1/tools/search",
+            data=json.dumps(dict(query=query.strip(), count=max(1, min(max_results, 50)),
+                                 need_content=False), ensure_ascii=False).encode("utf-8"),
+            headers={"Authorization": "Bearer " + self.api_key, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(api_request, timeout=self.timeout) as response:
+                body = response.read(2 * 1024 * 1024 + 1)
+            if len(body) > 2 * 1024 * 1024:
+                raise SearchProviderError("DeepSeek Search response is too large")
+            payload = json.loads(body)
+        except error.HTTPError as exc:
+            kind = SearchRateLimitError if exc.code == 429 else SearchProviderError
+            raise kind(f"DeepSeek Search HTTP {exc.code}",
+                       retryable=exc.code in (408, 429) or exc.code >= 500) from None
+        except (error.URLError, OSError, ValueError, HTTPException) as exc:
+            raise SearchProviderError("DeepSeek Search request or JSON response failed") from exc
+        items = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise SearchProviderError("DeepSeek Search response has no results array")
+        results = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            result = _make_result(item.get("title"), item.get("url"),
+                                  item.get("summary") or item.get("snippet"))
+            if result is not None:
+                results.append(result)
+        return results[:max_results]
+
+
 class WikipediaSearchProvider(SearchProvider):
     """No-key auxiliary provider used only when a primary web search is unavailable."""
 
@@ -223,6 +284,14 @@ def create_search_provider(settings, *, allow_wikipedia_fallback=True) -> Search
     provider = str(getattr(settings, "web_search_provider", "duckduckgo") or "duckduckgo")
     timeout = int(getattr(settings, "web_search_timeout", 10) or 10)
 
+    if provider.casefold() == "deepseek":
+        key = getattr(settings, "web_search_api_key", "")
+        base = urlparse(getattr(settings, "deepseek_base_url", ""))
+        if (not key and getattr(settings, "ai_provider", "") == "DeepSeek"
+                and base.scheme == "https" and base.hostname == "api.deepseek.com"):
+            key = getattr(settings, "deepseek_api_key", "")
+        return DeepSeekSearchProvider(key, timeout=timeout)
+
     if provider.casefold() == "brave":
         return BraveSearchProvider(
             getattr(settings, "web_search_api_key", ""),
@@ -257,22 +326,9 @@ def search_aerospace_sources(
 ) -> list[SearchResult]:
     """Search exact aerospace context and rank official sources first."""
 
-    official_sites = " OR ".join(
-        f"site:{domain}"
-        for domain in (
-            "nasa.gov",
-            "esa.int",
-            "spacex.com",
-            "blueorigin.com",
-            "ulalaunch.com",
-            "rocketlabusa.com",
-            "arianespace.com",
-            "orienspace.com",
-        )
-    )
     queries = [
-        f'"{term}" ({official_sites})',
-        f'"{term}" rocket spacecraft launch aerospace',
+        f'"{term[:96]}" 航天 卫星 火箭 中文名',
+        f'"{term[:80]}" rocket spacecraft launch aerospace',
     ]
     last_error: Exception | None = None
 
@@ -285,6 +341,8 @@ def search_aerospace_sources(
                     provider.search(query, max_results=max_results * 2)
                 )
             except SearchProviderError as exc:
+                if not exc.retryable:
+                    raise
                 last_error = exc
 
         if combined:

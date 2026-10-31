@@ -16,6 +16,7 @@ class AppToolBar(QToolBar):
     settings_requested = Signal()
     prompt_studio_requested = Signal()
     video_cards_requested = Signal()
+    launch_roundup_requested = Signal()
     output_requested = Signal()
     refresh_requested = Signal()
     launch_test_requested = Signal()
@@ -82,6 +83,8 @@ class AppToolBar(QToolBar):
                 self.output_requested.emit,
             )
         )
+        self.addAction(self._action('每周发射综述', QStyle.StandardPixmap.SP_FileDialogListView,
+                                    self.launch_roundup_requested.emit))
         self.addAction(
             self._action(
                 tr("refresh.rss"),

@@ -222,6 +222,7 @@ class TranslatorPipelineTests(unittest.TestCase):
         search = StubSearchProvider([official_result()])
         cached = {
             "translation": "引力-1",
+            "status": "human_confirmed",
             "source": "web+llm",
             "source_url": official_result().url,
         }
@@ -347,7 +348,7 @@ class TranslatorPipelineTests(unittest.TestCase):
 
 class TranslationCacheTests(unittest.TestCase):
     def test_cache_persists_required_metadata(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir='build') as directory:
             path = Path(directory) / "translation_cache.json"
 
             with patch("translator.cache._cache_path", return_value=path):
@@ -371,18 +372,15 @@ class TranslationCacheTests(unittest.TestCase):
 
 
 class WordTranslationCallTests(unittest.TestCase):
-    def test_word_launch_terms_allow_configured_ai_pipeline(self):
-        from exporters.word import _translated_term
+    def test_word_launch_render_does_not_invoke_legacy_translator(self):
+        from exporters.word import _add_launch
+        from feeds.launches import _launch_to_article
 
         translator = Mock()
-        translator.translate_term.return_value = "电子号"
-
-        self.assertEqual(_translated_term("Electron", "rocket", translator), "电子号")
-        translator.translate_term.assert_called_once_with(
-            "Electron",
-            "rocket",
-            allow_ai=True,
-        )
+        article = _launch_to_article(dict(name='Electron | Test', mission=dict(name='Test')))
+        _add_launch(Mock(), article, translator, 'UTC')
+        translator.translate_term.assert_not_called()
+        translator.translate_description.assert_not_called()
 
 
 if __name__ == "__main__":

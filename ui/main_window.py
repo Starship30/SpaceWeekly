@@ -53,6 +53,8 @@ class MainWindow(QMainWindow):
         self.startup_worker: StartupCheckWorker | None = None
         self._close_after_cancel = False
         self.video_dialog = None
+        self.roundup_dialog = None
+        self._close_after_roundup = False
         self._close_after_video = False
         self.log_handler = QtLogHandler()
         app = QApplication.instance()
@@ -119,6 +121,7 @@ class MainWindow(QMainWindow):
         self.toolbar.settings_requested.connect(self._open_settings)
         self.toolbar.prompt_studio_requested.connect(self._open_prompt_studio)
         self.toolbar.video_cards_requested.connect(self._open_video_cards)
+        self.toolbar.launch_roundup_requested.connect(self._open_launch_roundup)
         self.toolbar.output_requested.connect(self._open_output_dir)
         self.toolbar.refresh_requested.connect(self._refresh_feeds)
         self.toolbar.launch_test_requested.connect(self._test_launch_data)
@@ -258,6 +261,20 @@ class MainWindow(QMainWindow):
             self._close_after_video = False
             QTimer.singleShot(0, self.close)
 
+    def _open_launch_roundup(self) -> None:
+        try:
+            from ui.launch_roundup_dialog import LaunchRoundupDialog
+            self.roundup_dialog = LaunchRoundupDialog(load_settings(), self)
+            self.roundup_dialog.exec()
+            self.roundup_dialog.deleteLater()
+        except (ImportError, OSError, ValueError) as error:
+            QMessageBox.warning(self, '每周发射综述', str(error))
+        finally:
+            self.roundup_dialog = None
+        if self._close_after_roundup:
+            self._close_after_roundup = False
+            QTimer.singleShot(0, self.close)
+
     def _show_about(self) -> None:
         QMessageBox.about(
            self,
@@ -370,6 +387,12 @@ class MainWindow(QMainWindow):
         self._finish_pending_close()
 
     def closeEvent(self, event) -> None:
+        if self.roundup_dialog is not None and (self.roundup_dialog.worker is not None or
+                                                self.roundup_dialog.tts_provider.is_running):
+            self._close_after_roundup = True
+            self.roundup_dialog.reject()
+            event.ignore()
+            return
         if self.video_dialog is not None and (self.video_dialog.worker is not None or
                                               self.video_dialog.intro_dialog is not None or
                                               self.video_dialog.download_dialog is not None):

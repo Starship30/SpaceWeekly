@@ -1,6 +1,7 @@
 import json
 import hashlib
 import logging
+from copy import deepcopy
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
@@ -74,6 +75,13 @@ def get_launches(
     )
     _debug_launch_payload(results)
 
+    try:
+        from services.launch_data import save_collection
+        save_collection([launch_context(item) for item in results if isinstance(item, dict)],
+                        complete=False, reason='旧周报单页采集，未证明所选完整自然日的覆盖情况', display_timezone=display_timezone)
+    except (OSError, ValueError) as error:
+        logger.warning('发射本地快照保存失败：%s', error)
+
     if video_items is not None:
         video_items.extend(_launch_video_item(item, display_timezone) for item in results if isinstance(item, dict))
     return [_launch_to_article(item) for item in results if isinstance(item, dict)]
@@ -95,10 +103,38 @@ def _launch_video_item(item, display_timezone):
         title=_nested_text(item, 'rocket', 'configuration', 'full_name') or _text(item.get('name')) or 'Upcoming Launch',
         summary=_nested_text(item, 'mission', 'name') or _text(item.get('name')),
         source=SOURCE, published=net, url=url, categories=[], video_type='launch',
+        launch_context=launch_context(item),
         launch=dict(orbit=_nested_text(item, 'mission', 'orbit', 'name'),
-                    payload=_nested_text(item, 'mission', 'name'), site=_nested_text(item, 'pad', 'name'),
+                    payload=_payload_text(item), site=_nested_text(item, 'pad', 'name'),
                     time=display_time, display_timezone=display_timezone,
                     status=launch_status_text(item.get("status")), recovery=recovery_text(item)))
+
+
+def _payload_text(item: dict) -> str:
+    """Prefer actual payload records; never use the mission name as a description."""
+    rows = []
+    flights = _nested_value(item, 'rocket', 'payloads')
+    for flight in flights if isinstance(flights, list) else []:
+        payload = flight.get('payload') if isinstance(flight, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        payload_type = payload.get('type')
+        values = (payload.get('name'), payload.get('description'),
+                  payload_type.get('name') if isinstance(payload_type, dict) else None)
+        name, description, kind = [value.strip() if isinstance(value, str) else '' for value in values]
+        detail = description or kind
+        if detail.casefold() == name.casefold():
+            detail = ''
+        amount = flight.get('amount')
+        if name and type(amount) is int and amount > 1:
+            name = f'{amount} × {name}'
+        row = ': '.join(value for value in (name, detail) if value)
+        if row:
+            rows.append(row)
+    if rows:
+        return '; '.join(rows)
+    description = _nested_value(item, 'mission', 'description')
+    return description.strip() if isinstance(description, str) else ''
 
 
 def last_error() -> str:
@@ -202,9 +238,11 @@ def _launch_to_article(item: dict) -> Article:
         url=url,
     )
 
-    status_lines = f"Status: {launch_status_text(item.get('status'))}\nRecovery: {recovery_text(item)}"
-    summary += "\n" + status_lines
-    body += "\nRecovery: " + recovery_text(item)
+    summary += f"\nStatus: {launch_status_text(item.get('status'))}"
+    recovery = recovery_text(item)
+    if recovery:
+        summary += "\nRecovery: " + recovery
+        body += "\nRecovery: " + recovery
 
     return Article(
         news=News(
@@ -216,7 +254,54 @@ def _launch_to_article(item: dict) -> Article:
         ),
         body=body,
         parser=SOURCE,
+        launch_data=launch_context(item),
     )
+
+
+def launch_context(item: dict) -> dict:
+    """Keep record identity and all LL2 information/video links apart from display URL."""
+    links = {'info_urls': [], 'video_urls': []}
+
+    def collect(value):
+        if isinstance(value, list):
+            for child in value:
+                collect(child)
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                group = ('info_urls' if key in ('infoURLs', 'info_urls') else
+                         'video_urls' if key in ('vidURLs', 'vid_urls', 'video_urls') else None)
+                if group and isinstance(child, list):
+                    for link in child:
+                        if link not in links[group]:
+                            links[group].append(deepcopy(link))
+                elif key in ('info_url', 'wiki_url', 'website_url', 'video_url', 'vid_url', 'webcast_url') and isinstance(child, str) and child.strip():
+                    group = 'video_urls' if key in ('video_url', 'vid_url', 'webcast_url') else 'info_urls'
+                    link = {'url': child.strip()}
+                    if link not in links[group]:
+                        links[group].append(link)
+                else:
+                    collect(child)
+
+    collect(item)
+    countries = _nested_value(item, 'launch_service_provider', 'country')
+    if isinstance(countries, dict):
+        countries = [countries]
+    operator_country = ', '.join(c['name'] for c in countries if isinstance(c, dict) and isinstance(c.get('name'), str)) if isinstance(countries, list) else ''
+    return dict(ll2_id=_text(item.get('id')), english_name=_nested_text(item, 'mission', 'name')
+                or _text(item.get('name')), launch_name=_text(item.get('name')),
+                record_url=_text(item.get('url')),
+                net=_text(item.get('net')), rocket=_nested_text(item, 'rocket', 'configuration', 'full_name'),
+                site=_nested_text(item, 'pad', 'name'), provider=_nested_text(item, 'launch_service_provider', 'name'),
+                site_name=_nested_text(item, 'pad', 'location', 'name'), pad_name=_nested_text(item, 'pad', 'name'),
+                status_id=_nested_value(item, 'status', 'id'), status_name=_nested_text(item, 'status', 'name'),
+                recovery=recovery_text(item),
+                site_country=_nested_text(item, 'pad', 'location', 'country', 'name')
+                    or _nested_text(item, 'pad', 'country', 'name')
+                    or _nested_text(item, 'pad', 'location', 'country_code'),
+                operator_country=operator_country,
+                description=_nested_text(item, 'mission', 'description'), payload=_payload_text(item),
+                orbit=_nested_text(item, 'mission', 'orbit', 'name'),
+                **links)
 
 
 def _launch_url(item: dict) -> str:

@@ -154,3 +154,37 @@ VideoUX Preview 最终包验收：正式 EXE 和中文/空格路径下的解压 
 - 新增 1 个运行时 TLS 策略资源文件；未禁用证书验证。没有重新测量冷启动时间、使用真实账号扫码、批量下载整周任务或在 Premiere 宿主中复验。
 
 详细日志：build/v3.0.3-build.log、build/v3.0.3-tests.log、build/v3.0.3-smoke.log、build/v3.0.3-extracted-smoke.log、build/v3.0.3-media-backend.log、build/v3.0.3-package-result.json。既有 Workspace、原始 JSON 和旧素材不迁移、不删除；既有 GitHub 3.0.2 Release 附件保持不变。
+
+## 3.0.3 DemoFix 独立修复包（2026-10-24）
+
+ZIP：dist/v3.0.3-demo-fix/SpaceWeekly_v3.0.3_Windows_x64_DemoFix.zip。版本仍为 3.0.3，不替换旧标签或原 ZIP；本次未提交 Git 或上传 GitHub Release。
+
+省略缺少回收数据的徽标/周报状态行，补齐 Demo 有限重试、候选下载失败后继续及分阶段错误。详见 RELEASE_NOTES_3.0.3_DemoFix.md。新增代码不增加依赖。
+
+全套 328 项测试通过。原生及中文/空格路径解压 EXE 通过；验收包含无回收状态 Word/Markdown 输出和仅一枚发射徽标的真实 ProRes 编码。PATH 仅留 Windows 系统目录、系统字体不可用及当前目录存在假 FFmpeg 的条件下，包内 FFmpeg/ffprobe、字体、片头、下载对话框、yt-dlp、JSON、TLS、时区等检查通过。ZIP CRC 和所有解压文件 SHA-256 一致。
+
+包大小 149,374,032 字节（142.5 MiB）；解压 335,973,355 字节（320.4 MiB）、144 个文件，顶层仍为 SpaceWeekly.exe 和 _internal/。SHA-256：02d5449031726eda08714b74c3deb70ada8c8dbdbeb1665c5bde845a90a1a77d。
+
+真实网络验证：服务层使用本包内 yt-dlp 和 FFmpeg，在全新测试 Workspace 中完成两项遥感任务的自动搜索、解析、最高可获取画质下载和合并，均按原标题保存至同一日期目录。分别为 1080p / 720p 的 H.264/AAC MP4，ffprobe 及开头三秒解码通过。原始 timeout 未复现，先前真实请求曾遇到 HTTP 412；未验证登录态或整周所有任务。证据及日志：build/demo-timeout/ 的 real-batch-result.json、full-tests-final.log、build-final.log、packaged-smoke.log、extracted-smoke.log、package-result.json。
+
+## 3.0.3 MaterialFix 累积修复包（2026-10-24）
+
+ZIP：dist/v3.0.3-material-fix/SpaceWeekly_v3.0.3_Windows_x64_MaterialFix.zip。包含 DemoFix，并加入 LL2 载荷资料抽取、AI 载荷短语、过长说明显示省略号，以及最高优先级的「无中字标记」搜索与 Demo 排序。无需新增依赖，版本仍为 3.0.3。功能与使用步骤见 RELEASE_NOTES_3.0.3_MaterialFix.md；未替换旧包、提交 Git 或上传 GitHub Release。
+
+346 项 Python 测试顺序运行全部通过；并行构建/编码曾导致宿主内存不足，已停止并行后重跑，不将失败运行算作通过。正式 LL2 一次批量查询 7 条本周任务，使用已配置 AI 服务真实生成 7 项载荷短语并复验型号保留；原始 JSON SHA-256 未变。7 张预览、两条完整 12 秒 PNG MOV 解码与预览比对通过。
+
+原生及中文/空格路径解压 EXE 综合验收通过，新增载荷说明、AI 接线和字幕优先级标记；继续验证包内 FFmpeg、字体、片头、下载窗口与 TLS 资源。ZIP CRC 与所有解压文件 SHA-256 一致。大小 149,378,467 字节（142.5 MiB）；解压 335,979,761 字节（320.4 MiB）、144 个文件，顶层仍为 SpaceWeekly.exe 与 _internal/。SHA-256：de960d88524c04165d0ea04a65ecc64d2f8d41f03f7d32b3184395bfa2626692。
+
+记录位于 build/ll2-payload/：material-full-tests-sequential.log、summary-verification.json、material-build.log、material-packaged-smoke.log、material-extracted-smoke.log、material-package-result.json。未在 Premiere 宿主复验、重新测量启动时间或用真实账号重跑整周下载。字幕偏好只按标题标记判断，不分析画面。
+
+## 3.0.3 SearchFix：搜索核名与任务名精简（2026-10-25）
+
+输出为 dist/v3.0.3-search-fix/SpaceWeekly_v3.0.3_Windows_x64_SearchFix.zip，功能及设置见 RELEASE_NOTES_3.0.3_SearchFix.md。新增 DeepSeek Search 选项及可保存的联网核名开关，改进中文名称检索、已核实名称与载荷摘要接线，统一清理任务名括号说明；没有新增运行依赖。
+
+359 项 Python 测试通过（build/search-translation-full-tests-final.log）。首次正式 EXE 检查发现全新 Workspace 词库未合并新增默认项，已修复初始化并增加回归测试后重新构建。首次失败记录保留在 build/search-translation/packaged-smoke-first-start-failed.log，不能作为通过证据。
+
+真实 DeepSeek Search → AI 翻译 → 载荷短语已返回「西光肆号01星」，记录在 build/search-translation/live-result.json。模型请求曾出现一次响应中断，按失败保留原文，后续完整复验成功。测试仅使用公开任务名与官网资料，不输出或保存 Key；没有改写用户配置。build/search-translation/本周译名与任务名称修正.premiere.json 是既有修正 JSON 的独立副本，修改西光任务译名及载荷、清理 3 项括号说明；原始文件校验值不变，见 snapshot-verification.json。
+
+最终原生 EXE 与中文/空格路径下的解压 EXE 均通过严格综合验收，包括新的搜索设置、首次 Workspace 中文名称、内置字体/FFmpeg、完整片头与透明 MOV 编码、Word 和 TLS。ZIP CRC 与全部解压文件 SHA-256 一致。ZIP 149,383,764 字节（142.5 MiB），解压 335,985,967 字节（320.4 MiB），共 144 个文件，顶层仍为 SpaceWeekly.exe 与 _internal/。SHA-256：f0cdabc28eccdddfcd2973b9d7b9f942d7d85a7ab8d8e06eebb16399a8ac4b0d。
+
+最终记录：build/search-translation-build-final.log、build/search-translation/packaged-smoke.log、extracted-smoke.log、package-result.json。没有在 Premiere 宿主中复验、重新测量冷启动时间、重跑整周真实视频下载或更新 GitHub Release。

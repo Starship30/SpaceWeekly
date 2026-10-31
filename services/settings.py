@@ -66,6 +66,7 @@ class AppSettings:
     news_dedup_enabled: bool = True
     news_event_date_check_enabled: bool = True
     title_prompt: str = ""
+    roundup_prompt: str = ""
 
 
 def default_settings() -> AppSettings:
@@ -170,6 +171,7 @@ def load_settings() -> AppSettings:
         ai_provider=str(data.get("ai_provider") or defaults.ai_provider),
         summary_prompt=str(data.get("summary_prompt") or defaults.summary_prompt),
         title_prompt=str(data.get("title_prompt") or defaults.title_prompt),
+        roundup_prompt=str(data.get("roundup_prompt") or defaults.roundup_prompt),
         filter_prompt=str(data.get("filter_prompt") or defaults.filter_prompt),
         prompt_preset=str(data.get("prompt_preset") or defaults.prompt_preset),
         debug_ai_enabled=bool(data.get("debug_ai_enabled", defaults.debug_ai_enabled)),

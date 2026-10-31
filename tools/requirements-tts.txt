@@ -1,0 +1,4 @@
+# Optional: install only inside a dedicated TTS virtual environment.
+qwen-tts
+soundfile
+accelerate
