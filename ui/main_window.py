@@ -37,6 +37,8 @@ class MainWindow(QMainWindow):
         self.feed_panel=self.production.feed_panel;self.dashboard_panel=self.production.dashboard;self.log_panel=self.production.log
         self.roundup_dialog=self.production.roundup;self.video_dialog=self.production.cards
         self.production.close_ready.connect(self._close_ready)
+        self.production.update_ready.connect(self._apply_update)
+        self.production.uninstall_ready.connect(self._uninstall)
         self.production.workspace_requested.connect(self._switch_workspace)
         self.production.settings_applied.connect(self._settings_applied)
         self.log_handler.emitter.message.connect(self.log_panel.append_html)
@@ -49,6 +51,7 @@ class MainWindow(QMainWindow):
         from services.workspace import initialize_workspace
         previous=workspace_path()
         old=self.production
+        old._release_preview()
         old.timer.stop()
         try:
             initialize_workspace(Path(path),self.settings.language)
@@ -69,13 +72,30 @@ class MainWindow(QMainWindow):
     def _close_ready(self):
         self._closing=True;QTimer.singleShot(0,self.close)
 
+    def _apply_update(self):
+        try:
+            from services.updates import handoff
+            handoff();self._close_ready()
+        except (OSError,ValueError,RuntimeError) as error:
+            self.production.updates.details.setPlainText(str(error))
+            self.production.updates.status.setText('更新安装尚未开始；当前版本保留，可重新检查后重试。')
+
     def closeEvent(self,event):
         if self._closing:
+            self.production._release_preview()
             self.production.timer.stop()
             logging.getLogger().removeHandler(self.log_handler)
             event.accept()
         else:
             event.ignore();self.production.guard(lambda:self.production.request_leave('close'))
+
+    def _uninstall(self):
+        try:
+            from services.updates import handoff_uninstall
+            handoff_uninstall();self._close_ready()
+        except (OSError,ValueError,RuntimeError) as error:
+            self.production.updates.status.setText('未开始卸载，可重试；用户数据保留。')
+            self.production.updates.details.setPlainText(str(error))
 
     # Existing command callers now route to pages, without opening modal production windows.
     def _open_launch_roundup(self):

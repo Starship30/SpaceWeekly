@@ -15,12 +15,13 @@ from ai.json_utils import request_json, AIResponseParseError
 from ai.providers import APIRequestError
 from services.launch_data import write_json, supplement_context
 from services.launch_research import (confirmed_values, load_launch_research, background_facts,
-                                      fingerprint, LaunchResearchService)
+                                      fingerprint, LaunchResearchService, display_names, has_primary_background)
+from translator.dictionary import load_dictionary, dictionary_replace
 from services.cancellation import TaskCancelledError
 from utils.time import parse_datetime
 from utils.time import _timezone
 from services.roundup_style import (opening, transition, timezone_label, event_context, event_fact,
-                                   style_context, validate_style)
+                                   style_context, validate_style, narration_parts)
 
 BEIJING = timezone(timedelta(hours=8))
 KINDS = ('overview', 'highlight', 'remaining', 'transition')
@@ -57,8 +58,51 @@ def narration_sources(segment):
 
 def task_names(draft, ids):
     return [dict(task_id=i['ll2_id'], original_name=i['english_name'],
-                 confirmed_chinese_name=confirmed_values(i.get('research', {}), i).get('chinese_name', ''))
+                 confirmed_chinese_name=display_names(i)['name'], name_source=display_names(i)['name_source'])
             for i in draft['snapshot']['items'] if i['ll2_id'] in ids]
+
+
+def sync_names(draft, *, update_manual=False):
+    """Refresh unrecorded generated wording; recorded/edited paragraphs require adoption."""
+    entries = load_dictionary()
+    previous = draft.get('name_bindings', {})
+    current, replacements = {}, {}
+    for item in draft['snapshot']['items']:
+        names = display_names(item, entries)
+        current[item['ll2_id']] = names
+        for key, original in [('name', 'english_name'), ('rocket', 'rocket'), ('site', 'site'),
+                              ('site_name', 'site_name'), ('pad_name', 'pad_name')]:
+            for old in (item.get(original, ''), previous.get(item['ll2_id'], {}).get(key, '')):
+                if old and old != names[key]:
+                    replacements[old] = {'translation': names[key]}
+    pending = []
+    for segment in draft['segments']:
+        narration = current_narration(segment)
+        fields = {key: dictionary_replace(segment[key], replacements)[0] for key in ('spoken', 'screen')}
+        reading = dictionary_replace(narration['text'], replacements)[0] if narration else None
+        changed = any(segment[k] != v for k, v in fields.items()) or narration and reading != narration['text']
+        if not changed:
+            continue
+        if not update_manual and (segment.get('audio') or segment.get('edited') or (narration or {}).get('origin') == 'manual_edit'):
+            pending.append(segment['id'])
+            continue
+        segment.update(fields)
+        if narration:
+            narration.update(text=reading, based_on=narration_basis(segment))
+    # Keep old bindings until edited paragraphs have explicitly adopted the new wording.
+    if not pending:
+        draft['name_bindings'] = current
+    draft['name_updates_pending'] = pending
+    return pending
+
+
+def segment_title(draft, segment):
+    if segment['kind'] == 'overview':
+        return '开场'
+    if segment['kind'] == 'transition':
+        return '结尾'
+    names = task_names(draft, segment['task_ids'])
+    return '、'.join(n['confirmed_chinese_name'] for n in names) or '补充段落'
 
 
 def default_range(now=None, display_timezone='Asia/Shanghai'):
@@ -159,6 +203,7 @@ def create_draft(collection, start, end, display_timezone='Asia/Shanghai'):
                  as_of=datetime.now(timezone.utc).isoformat(),
                  selection=selected, segments=[], target_seconds=90, pause_seconds=.3,
                  tts=dict(python='', model='', speaker='Vivian', style='', device='cpu', timeout=600),
+                 aligner=dict(python='',model='',device='cpu',language='Chinese',timeout=600),
                  pronunciations={}, modified_at=datetime.now(timezone.utc).isoformat())
     sync_materials(draft)
     recommend(draft)
@@ -176,7 +221,7 @@ def recommend(draft):
         s['featured'] = s['id'] in featured
 
 
-def token_catalog(draft):
+def token_catalog(draft, task_ids=None):
     chosen = {s['id']: s for s in draft['selection'] if s['included']}
     tokens = {'[[overview]]': dict(text=opening(draft), task_id='', source=None),
               '[[transition]]': dict(text=transition(draft, statistics(draft)), task_id='', source=None)}
@@ -184,19 +229,14 @@ def token_catalog(draft):
         identifier = item['ll2_id']
         if identifier not in chosen:
             continue
-        record = item.get('research', {})
-        values = confirmed_values(record, item)
-        name = values.get('chinese_name') or item['english_name']
+        name = display_names(item)['name']
         tokens[f'[[name:{identifier}]]'] = dict(text=name, task_id=identifier, source=None)
         event = event_context(item, draft)
-        place = event['site_name'] or event['legacy_site']
-        if event['pad_name'] and event['pad_name'] != place:
-            place += '的' + event['pad_name']
-        event_text = f"{event['date_reading']}，{event['rocket']}" + ('从' + place if place else '')
-        event_text += f"的{name}任务，{event['launch_result']}。"
-        if event['payload_count'] is not None:
-            event_text += f"{'搭载' if event['timing_basis'] == 'reported_launch' else '计划搭载'}{event['payload_count']}颗卫星。"
+        event_text = ''.join(p['text'] for p in narration_parts(draft, [identifier]) if p['display'] != 'group')
         tokens[f'[[event:{identifier}]]'] = dict(text=event_text, task_id=identifier, source=dict(event_fact(item, draft), support_review='program_fields'))
+        screen = ' · '.join(v for v in (name, event['rocket'], event['date_reading'], event['site_name'], event['pad_name'],
+                                       '目标轨道：' + event['orbit'] if event['orbit'] else '', event['launch_result']) if v)
+        tokens[f'[[screen:{identifier}]]'] = dict(text=screen, task_id=identifier, source=event_fact(item, draft))
         fact_number = 0
         for fact in background_facts(item):
             # LL2-only background needs reviewed claims; manual names do not resolve factual conflicts.
@@ -209,6 +249,10 @@ def token_catalog(draft):
                     fact_number += 1
     for index, group in enumerate(thematic_groups(draft)):
         tokens[f'[[group:{index}]]'] = dict(text=group['label'] + '，', task_id='', source=None)
+    items = {i['ll2_id']: i for i in draft['snapshot']['items']}
+    for n, part in enumerate(narration_parts(draft, task_ids if task_ids is not None else list(chosen))):
+        tokens[f'[[narration:{n}]]'] = dict(text=part['text'], task_id='', source=None,
+            claim_ids=part['task_ids'], claim_sources=[dict(event_fact(items[i], draft), support_review='program_fields') for i in part['task_ids']])
     return tokens
 
 
@@ -239,11 +283,51 @@ def _expand(template, catalog):
     return ''.join(text), ids, sources
 
 
+def _generated_units(segment, raw, catalog, draft):
+    from services.roundup_sync import set_units, DISPLAYS,validate_unit_structure
+    parts = []
+    explicit = raw.get('units')
+    if explicit is not None:
+        if not isinstance(explicit,list) or not explicit or len(explicit)>500:
+            raise AIResponseParseError('units应为非空讲解单元数组')
+        for unit in explicit:
+            if not isinstance(unit,dict):raise AIResponseParseError('讲解单元格式无效')
+            text, ids, _ = _expand(unit.get('spoken',''),catalog)
+            scope = unit.get('task_ids')
+            display = unit.get('display')
+            if (not isinstance(scope,list) or any(not isinstance(i,str) for i in scope)
+                    or not set(scope)<=set(segment['task_ids']) or display not in DISPLAYS
+                    or ids and ids!=set(scope) or display=='task' and len(scope)!=1
+                    or display in ('group','summary') and not scope):
+                raise AIResponseParseError('讲解单元的展示类型或任务关联无效')
+            parts.append(dict(text=text,screen=unit.get('screen',text),task_ids=scope,display=display))
+    else:
+        # Existing generation tokens already contain explicit task identity, including multi-task claims.
+        prefix=''
+        for chunk in re.split(r'(\[\[[^\]\r\n]+\]\])',raw['spoken']):
+            if chunk.startswith('[['):
+                value=catalog[chunk];ids=([value['task_id']] if value['task_id'] else value.get('claim_ids',[]))
+                display='task' if len(ids)==1 else 'summary' if ids else 'transition'
+                if chunk.startswith('[[group:'):
+                    group=thematic_groups(draft)[int(chunk[8:-2])]
+                    ids=[i for i in group['task_ids'] if i in segment['task_ids']];display='group' if ids else 'transition'
+                parts.append(dict(text=prefix+value['text'],task_ids=ids,display=display));prefix=''
+            elif parts:parts[-1]['text']+=chunk
+            else:prefix+=chunk
+        if prefix:parts.append(dict(text=prefix,task_ids=[],display='transition'))
+    try:
+        set_units(segment,parts)
+        validate_unit_structure(segment)
+    except ValueError as error:
+        raise AIResponseParseError(str(error)) from error
+
+
 def validate_generated(data, draft, *, single_id=None, context=None):
     raw = data.get('segments')
     if not isinstance(raw, list) or not raw or len(raw) > 30:
         raise AIResponseParseError('segments 必须为非空数组（最多30段）')
-    catalog, segments, seen = token_catalog(draft), [], set()
+    scope = next(s['task_ids'] for s in draft['segments'] if s['id'] == single_id) if single_id else None
+    catalog, segments, seen = token_catalog(draft, scope), [], set()
     catalog.update(_claim_catalog(data, draft))
     chosen = {s['id'] for s in draft['selection'] if s['included']}
     for segment in raw:
@@ -270,6 +354,7 @@ def validate_generated(data, draft, *, single_id=None, context=None):
             raise AIResponseParseError('朗读文本不能包含来源地址')
         segments.append(dict(id=identifier, kind=kind, spoken=spoken, screen=screen, task_ids=ids,
                              source_refs=sources, edited=False, preview_seconds=12., audio=None))
+        _generated_units(segments[-1], segment, catalog, draft)
         if kind in ('overview', 'transition'):
             segments[-1]['statistics_key'] = digest(statistics(draft))
     if single_id:
@@ -366,7 +451,7 @@ def prepare_materials(draft, settings, token, *, recheck_id=None, service=None, 
         if (not recheck_id and item['ll2_id'] not in selected) or (recheck_id and item['ll2_id'] != recheck_id):
             continue
         record = item.get('research', {})
-        if (not recheck_id and background_facts(item) and record.get('fingerprint') == fingerprint(item)
+        if (not recheck_id and has_primary_background(item) and record.get('fingerprint') == fingerprint(item)
                 and not record.get('recheck_requested') and not record.get('needs_review')):
             continue
         ll2 = item.get('ll2_source', {})
@@ -389,7 +474,7 @@ def prepare_materials(draft, settings, token, *, recheck_id=None, service=None, 
 def writing_materials(draft):
     chosen = {s['id'] for s in draft['selection'] if s['included']}
     return [dict(task_id=i['ll2_id'], original={k: deepcopy(v) for k, v in i.items() if k != 'research'},
-                 status=material_status(i), usable_facts=background_facts(i) + [event_fact(i, draft)],
+                 display_names=display_names(i), status=material_status(i), usable_facts=background_facts(i) + [event_fact(i, draft)],
                  research=deepcopy(i.get('research', {}))) for i in draft['snapshot']['items'] if i['ll2_id'] in chosen]
 
 
@@ -478,6 +563,7 @@ def _review_claims(segments, config, token, draft):
               'display_names以外的新造中文任务名不算已确认名称，通用术语可忠实翻译。'
               'll2_event引文是快照结构化字段及程序时区换算，机构group口径由用户确认，不能用发射地反推机构国家。'
               '核对显示时区、日期/时段、火箭、载荷数量及发射结果，发射失败不能由回收失败推导。'
+              '轨道只按event.orbit及相关原文核对；mission_target是目标轨道，不能当实际入轨证明；近地轨道不能窄化成太阳同步轨道。'
               '按paragraphs及chronological_groups核对组内先后、“当天/第二天”等跨日指代；跨组首项必须重新明确日期，指代错位即不支持。'
               '合并任务须逐项核对日期、载荷数量和结果，不能把“各N颗”改成“共N颗”。'
               '发射场与工位分开，工位只能取pad_name/pad_code，legacy_site不能推断额外工位。'
@@ -504,18 +590,24 @@ def local_script(draft, reason, *, single_id=None):
     grouped = thematic_groups(draft)
     featured = {s['id'] for s in draft['selection'] if s['included'] and s['featured']}
     raw = [dict(id='intro', kind='overview', spoken='[[overview]]', screen='[[overview]]', task_ids=[])]
+    parts = narration_parts(draft, [s['id'] for s in draft['selection'] if s['included']])
     for index, group in enumerate(grouped):
         ids = group['task_ids']
-        text = f'[[group:{index}]]' + ''.join(f'[[event:{i}]]' for i in ids)
+        units = [dict(spoken=f'[[narration:{n}]]', screen='',
+                      task_ids=p['task_ids'], display=p['display']) for n, p in enumerate(parts) if set(p['task_ids']) <= set(ids)]
+        text = ''.join(u['spoken'] for u in units)
         raw.append(dict(id=f'group{index+1}', kind='highlight' if featured & set(ids) else 'remaining',
-                        task_ids=ids, spoken=text, screen=text))
+                        task_ids=ids, spoken=text, screen='\n'.join(f'[[screen:{i}]]' for i in ids), units=units))
     raw.append(dict(id='transition', kind='transition', task_ids=[], spoken='[[transition]]', screen='[[transition]]'))
     if single_id:
         previous = next(s for s in draft['segments'] if s['id'] == single_id)
+        units = [dict(spoken=f'[[narration:{n}]]', screen='', task_ids=p['task_ids'], display=p['display'])
+                 for n, p in enumerate(narration_parts(draft, previous['task_ids']))]
         text = ('[[overview]]' if previous['kind'] == 'overview' else '[[transition]]' if previous['kind'] == 'transition'
-                else ''.join(f'[[group:{n}]]' + ''.join(f'[[event:{i}]]' for i in group['task_ids'] if i in previous['task_ids'])
-                             for n, group in enumerate(grouped) if set(group['task_ids']) & set(previous['task_ids'])))
-        raw = [dict(id=single_id, kind=previous['kind'], task_ids=previous['task_ids'], spoken=text, screen=text)]
+                else ''.join(u['spoken'] for u in units))
+        raw = [dict(id=single_id, kind=previous['kind'], task_ids=previous['task_ids'], spoken=text,
+                    screen='\n'.join(f'[[screen:{i}]]' for i in previous['task_ids']) if units else text)]
+        if units: raw[0]['units'] = units
     segments = validate_generated(dict(segments=raw), draft, single_id=single_id)
     for segment in segments:
         segment.update(origin='local_template', generation_reason=reason, validation='program_data_only')
@@ -559,11 +651,17 @@ def generate_script(draft, settings, token, *, single_id=None):
         '每组先明确style.country_company_groups的label，每次任务仅关联一次，同组按时间排序。'
         '一个段落不能跨国家/公司组；同组可用数段或合并。每组首项明确月日，跨组不得沿用“第二天”。'
         '每个任务自然交代display_time对应日期和时段、已知发射场/工位、火箭、载荷及数量、launch_result。'
+        'event.orbit非空时自然交代目标轨道；同组相同可合并，screen保留轨道名称。mission_target不代表实际入轨，不能凭发射成功推断已部署到该轨道。'
         '缺失的工位或数量直接省略，不猜测，不解释字段缺失。背景只选一两句，不强行凑目标时长。'
         'timing_basis=scheduled_time时是原定/计划时间，不能当已实际发射；按launch_result保留计划、延期、取消或待确认。'
         '结构化事实在usable_facts的event中，背景在其他事实中，所有具体断言均须引用相应fact_refs。'
         '顶层claims为[{"id":"c1","text":"完整自然段落", "task_ids":["ID"],"fact_refs":["ID#event","ID#ll2-description"]}]。'
         '段落spoken/screen使用[[claim:c1]]等标记，标记外只加标点，不写自由事实。'
+        '同时每段提供units数组，按朗读顺序逐句登记：'
+        '{"spoken":"[[claim:c1]]","screen":"简短屏幕内容","task_ids":["已有ID"],"display":"task"}。'
+        '所有units的spoken展开后拼接必须等于该段spoken展开结果，关联信息不进入朗读。'
+        'display使用group（国家/公司介绍）、task（单任务）、summary（多任务总结）或transition（过渡）。'
+        '每句claim应有自己的任务范围，涉及多项时保留全部ID，不凭名称搜索分配。时间由实际音频对齐，不返回秒数。'
         '同一组的完整口播可用一个claim引用多次任务。claims也可分别用于屏幕与朗读，但必须准确对应。'
         '重点以资料为依据，自动模式可选0到3个highlight；manual保留用户重点。'
         '重点若含背景，可返回focus_plan:[{"task_ids":["ID"],"fact_refs":["ID#事实id"]}]；不强制扩写资料不足任务。'
@@ -572,9 +670,10 @@ def generate_script(draft, settings, token, *, single_id=None):
         '火箭与任务名称保留原写法，已确认对应可用display_names；通用场地词可忠实翻译。'
         '屏幕文字保留完整型号/工位编号。可在朗读中转换数字读法，但任务编号不任意增减；不凭编号推载荷数量。'
         'screen必须逐项含完整原始rocket和pad_code（若有），可与spoken使用不同claim。'
-        'event.payload_count非空时，spoken必须明确说N颗/枚卫星，不能只将数量放在英文任务名或屏幕文字中。'
+        'event.payload_count非空时自然交代数量，多颗可用一箭N星；单颗且载荷已明确时不再补“一颗卫星”。'
         '只需口播必要的载荷名，可省去冗长宣传任务名；正式全名及编号在screen保留，不能自造中文简称。'
-        '不要先念“执行某任务”再重复载荷名；直接交代发射的载荷。不要额外报一枚/一台等无须报的数量。'
+        '不要先念“执行某任务”再重复载荷名；采用event.spoken_payload时不再追加卫星单位或重复数量。工位用event.pad_spoken。'
+        '同组成功在组末统一交代一次，结尾不重复成功统计；混合结果逐项准确交代。'
         'screen含完整原始任务名；口播可不读宣传任务全名、冗长编号，但载荷身份不能变。'
         '回收不是必报项，优先选具体用途背景；不扩写来源未给出的缩写全称。背景不够就省略。'
         '同组重复背景只讲一次。用途未知本身不是必须播报的背景，不要逐项重复用途未知或同一种性质描述。'
@@ -634,6 +733,10 @@ def validate_draft(draft):
     if not isinstance(draft, dict) or draft.get('version') != 1:
         raise ValueError('不支持的综述草稿版本')
     range_bounds(draft['start'], draft['end'], draft.get('timezone', 'Asia/Shanghai'))
+    from services.roundup_sync import validate_aligner
+    validate_aligner(draft.get('aligner',{}))
+    from tools.roundup_visuals import visual_settings
+    visual_settings(draft)
     if not isinstance(draft.get('segments'), list) or not isinstance(draft.get('selection'), list):
         raise ValueError('草稿段落/任务列表无效')
     if (not isinstance(draft.get('snapshot'), dict) or not isinstance(draft['snapshot'].get('items'), list)
@@ -658,6 +761,8 @@ def validate_draft(draft):
                 or not isinstance(segment.get('spoken'), str) or not isinstance(segment.get('screen'), str)):
             raise ValueError('段落或任务关联无效；任务选择变化后请重写或移除相关段落')
         seen.add(segment['id'])
+        from services.roundup_sync import validate_unit_structure
+        validate_unit_structure(segment)
         if (segment['kind'] in ('overview', 'transition') and segment.get('statistics_key')
                 and segment['statistics_key'] != digest(statistics(draft))):
             raise ValueError('任务或统计已变化，请选中总览并点击“只重写选中段”同步程序统计')

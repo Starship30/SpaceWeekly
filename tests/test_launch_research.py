@@ -199,7 +199,7 @@ class LaunchResearchTests(unittest.TestCase):
         service = research.LaunchResearchService(self.settings, self.token, search_provider=self.provider, fetch=self.fetch)
         self.provider.reset_mock()
         self.fetch.reset_mock()
-        self.assertEqual(service.review(self.context), record)
+        self.assertEqual(service.review(self.context, require_background=True), record)
         self.provider.search.assert_not_called()
         self.fetch.assert_not_called()
         self.context['net'] = '2027-01-01T00:00:00Z'
@@ -221,6 +221,33 @@ class LaunchResearchTests(unittest.TestCase):
         stale = service.review(changed)
         self.assertTrue(stale['needs_review'])
         self.assertEqual(stale['manual']['chinese_name'], '人工确认星')
+
+    def ll2_context(self):
+        context = copy.deepcopy(self.context)
+        context['ll2_source'] = dict(url='https://ll.thespacedevs.com/2.3.0/launches/' + context['ll2_id'] + '/',
+            description=context['description'], net=context['net'],
+            identity={k: context[k] for k in ('english_name', 'net', 'rocket', 'site', 'provider')})
+        return context
+
+    def test_explicit_background_lookup_retries_search_off_memo_despite_ll2_description(self):
+        context = self.ll2_context()
+        self.service.settings = replace(self.settings, web_search_enabled=False)
+        self.assertEqual(self.service.review(context)['evidence_status'], 'pending')
+        self.service.settings = self.settings
+        record = self.service.review(context, require_background=True)
+        self.assertEqual(record['evidence_status'], 'supported')
+        self.assertTrue(self.provider.search.called)
+
+    def test_manual_name_and_ll2_description_do_not_skip_primary_lookup(self):
+        context = self.ll2_context()
+        self.service.settings = replace(self.settings, web_search_enabled=False)
+        self.service.review(context)
+        research.confirm_launch(context['ll2_id'], '人工确认星')
+        service = research.LaunchResearchService(self.settings, self.token,
+            search_provider=self.provider, fetch=self.fetch)
+        record = service.review(context, require_background=True)
+        self.assertEqual(record['evidence_status'], 'supported')
+        self.assertEqual(research.confirmed_values(record, context)['chinese_name'], '人工确认星')
 
     def test_legacy_caches_remain_readable_but_unconfirmed(self):
         path = self.root / 'translator' / 'launch_research.json'

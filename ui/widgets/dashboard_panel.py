@@ -108,7 +108,7 @@ class DashboardPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
-        title = QLabel(tr("dashboard"))
+        title = QLabel(tr("production.collection_scope"))
         title.setObjectName("PanelTitle")
         layout.addWidget(title)
         scroll = QScrollArea()

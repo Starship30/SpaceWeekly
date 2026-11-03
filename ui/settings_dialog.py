@@ -419,6 +419,8 @@ class SettingsDialog(ProductionComponent):
 
     def _about_page(self) -> QWidget:
         page, layout = self._form_page(tr("about"))
+        self.about_layout = layout
+        self.about_index = 8
         layout.addRow(
             tr("version"),
             QLabel(f"v{app_version()} Professional Edition"),

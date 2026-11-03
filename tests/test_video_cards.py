@@ -127,6 +127,20 @@ class VideoCardTests(unittest.TestCase):
         _, count, _ = self.run_fake(sort_order='desc')
         self.assertEqual(count, 0)
 
+    def test_input_order_drives_manifest_numbering_after_time_sort(self):
+        ids=[item['id'] for item in self.data['items']]
+        order=[ids[2],ids[0],ids[1]]
+        self.data['input_order']=order;self.save()
+        with patch.object(video,'make_card',wraps=video.make_card) as make:
+            result,count,_=self.run_fake(sort_order='input',selected_ids={ids[0],ids[2]})
+        self.assertEqual(count,2)
+        self.assertEqual([item['id'] for item in result['cards']],order)
+        self.assertEqual([item['ordinal'] for item in result['cards']],[1,2,None])
+        self.assertEqual(result['order_policy'],'selected_articles_input_order')
+        self.assertEqual([call.args[1] for call in make.call_args_list],[1,2])
+        for invalid in ([ids[0],ids[0]],['missing-id'],['id',None]):
+            with self.assertRaises(ValueError):video.validate_snapshot(dict(self.data,input_order=invalid))
+
     def test_wrap_chinese_english_and_explicit_newlines(self):
         font = video.ImageFont.truetype(str(video.FONT), 32)
         chinese = '中文标点与自动换行。'*10

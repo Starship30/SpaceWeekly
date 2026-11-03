@@ -1,4 +1,5 @@
 import sqlite3
+import json
 from contextlib import closing
 from datetime import datetime
 
@@ -26,6 +27,8 @@ def initialize_database() -> None:
                 )
                 """
             )
+            if 'images_json' not in {row[1] for row in connection.execute('PRAGMA table_info(articles)')}:
+                connection.execute("ALTER TABLE articles ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]'")
 
 
 def save_article(article: Article) -> bool:
@@ -42,9 +45,10 @@ def save_article(article: Article) -> bool:
                     url,
                     body,
                     parser,
-                    created_at
+                    created_at,
+                    images_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article.news.source,
@@ -55,10 +59,17 @@ def save_article(article: Article) -> bool:
                     article.body,
                     article.parser,
                     _created_at(),
+                    json.dumps(article.news.images,ensure_ascii=False),
                 ),
             )
 
-            return cursor.rowcount == 1
+            inserted=cursor.rowcount==1
+            if not inserted and article.news.images:
+                from services.news_images import candidates
+                old=connection.execute('SELECT images_json FROM articles WHERE url=?',(article.news.url,)).fetchone()
+                merged=candidates(json.loads(old[0])+article.news.images,article.news.url)
+                connection.execute('UPDATE articles SET images_json=? WHERE url=?',(json.dumps(merged,ensure_ascii=False),article.news.url))
+            return inserted
 
 
 def get_articles() -> list[Article]:
@@ -73,7 +84,8 @@ def get_articles() -> list[Article]:
                 summary,
                 url,
                 body,
-                parser
+                parser,
+                images_json
             FROM articles
             ORDER BY published DESC, id DESC
             """
@@ -94,7 +106,8 @@ def get_articles_by_date(start_date: str, end_date: str) -> list[Article]:
                 summary,
                 url,
                 body,
-                parser
+                parser,
+                images_json
             FROM articles
             WHERE date(created_at) BETWEEN date(?) AND date(?)
             ORDER BY published DESC, id DESC
@@ -122,6 +135,7 @@ def _row_to_article(row: tuple[str, str, str, str, str, str, str]) -> Article:
         published=row[2],
         summary=row[3],
         url=row[4],
+        images=json.loads(row[7]) if len(row)>7 else [],
     )
 
     return Article(

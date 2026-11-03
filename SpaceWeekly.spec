@@ -9,8 +9,10 @@ import zipfile
 if sys.version_info < (3, 12):
     raise SystemExit("Windows packaging requires Python 3.12+ for bundled tool lookup")
 
-ROOT = Path.cwd()
+ROOT = Path(SPECPATH)
 ONEFILE = os.environ.get("SPACEWEEKLY_ONEFILE") == "1"
+if ONEFILE:raise SystemExit('Velopack releases require PyInstaller onedir')
+DEFAULTS=Path(os.environ['SPACEWEEKLY_RELEASE_RESOURCES'])
 
 VIDEO_BACKEND = Path(os.environ.get(
     "SPACEWEEKLY_VIDEO_BACKEND", str(ROOT / "build" / "video-backend" / "yt-dlp.exe")))
@@ -59,14 +61,16 @@ datas = [
     (str(VIDEO_BACKEND.with_name("yt-dlp-LICENSE.txt")), "video-backend"),
     (str(ROOT / "tools" / "video_cards.py"), "tools"),
     (str(ROOT / "tools" / "qwen_tts_worker.py"), "tools"),
-    (str(ROOT / "assets"), "assets"),
+    (str(ROOT / "tools" / "qwen_align_worker.py"), "tools"),
+    (str(ROOT / "tools" / "voice_environment_probe.py"), "tools"),
+    (str(ROOT / "tools" / "voice_deployment"), "tools/voice_deployment"),
+    (str(DEFAULTS / "assets"), "assets"),
     (str(ROOT / "language"), "language"),
-    (str(ROOT / "prompts"), "prompts"),
-    (str(ROOT / "translator" / "dictionary.json"), "translator"),
-    (str(ROOT / "translator" / "pending_terms.json"), "translator"),
-    (str(ROOT / "translator" / "translation_cache.json"), "translator"),
+    (str(DEFAULTS / "prompts"), "prompts"),
+    (str(DEFAULTS / "translator"), "translator"),
     (str(ROOT / "ui" / "style.qss"), "ui"),
-    (str(ROOT / "config.json"), "."),
+    (str(DEFAULTS / "config.json"), "."),
+    (str(DEFAULTS / "release.json"), "."),
     (str(ROOT / "categories.json"), "."),
     (str(ROOT / "feeds.json"), "."),
 ]
@@ -88,13 +92,15 @@ a = Analysis(
         "requests",
         "PySide6",
         "qrcode.image.pil",
+        "velopack",
+        "tools.update_worker",
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(ROOT / "tools" / "packaging" / name)
                    for name in ("runtime_tzdata.py", "runtime_ffmpeg.py")],
     # Pillow/requests probe these optional packages; SpaceWeekly does not use them.
-    excludes=["numpy", "torch", "qwen_tts", "soundfile", "OpenSSL", "cryptography"],
+    excludes=["numpy", "torch", "qwen_tts", "qwen_asr", "soundfile", "OpenSSL", "cryptography"],
     noarchive=False,
 )
 # The interface uses raster QWidget painting, not QML, PDF rendering or OpenGL.

@@ -140,7 +140,8 @@ class NewsSourceTests(unittest.TestCase):
 
     def test_api_merges_before_ai_and_existing_premiere_export(self):
         rss_article = article("https://example.com/news/1", title="虚构新闻 1", source="RSS")
-        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+        Path('build').mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir='build') as directory, ExitStack() as stack:
             settings = replace(default_settings(), news_event_date_check_enabled=False, deepseek_api_key="", launch_range="disabled", date_mode="custom",
                 start_date="2026-10-01", end_date="2026-10-01", export_sqlite=False, export_word=False,
                 export_markdown=False, export_premiere=True, rss_limit=0, output_dir=directory)
@@ -197,7 +198,8 @@ class NewsSourceTests(unittest.TestCase):
         self.assertEqual(len(result), 550)
 
     def test_settings_zero_custom_legacy_invalid_and_dashboard_roundtrip(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(settings_module, "CONFIG_PATH", Path(directory)/"config.json"):
+        Path('build').mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir='build') as directory, patch.object(settings_module, "CONFIG_PATH", Path(directory)/"config.json"):
             for limit in [0, 550, 10000]:
                 settings = replace(default_settings(), rss_limit=limit, news_dedup_enabled=False)
                 save_settings(settings)

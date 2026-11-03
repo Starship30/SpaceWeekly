@@ -29,8 +29,8 @@ class Theme:
 LIGHT_THEME = Theme(
     name=THEME_LIGHT,
     colors={
-        "window_bg": "#f3f5fa",
-        "sidebar_bg": "#e7edf8",
+        "window_bg": "#f5f6f9",
+        "sidebar_bg": "#f0f3f8",
         "panel_bg": "#ffffff",
         "panel_alt_bg": "#f8fafc",
         "control_bg": "#ffffff",
@@ -38,7 +38,7 @@ LIGHT_THEME = Theme(
         "control_pressed_bg": "#eaeef2",
         "border": "#e3e8f2",
         "border_strong": "#d6deeb",
-        "text": "#17233c",
+        "text": "#222b3d",
         "text_muted": "#65738b",
         "text_subtle": "#6e7781",
         "accent": "#4468e8",
@@ -47,7 +47,8 @@ LIGHT_THEME = Theme(
         "primary_hover": "#3656c8",
         "primary_border": "#4468e8",
         "on_primary": "#ffffff",
-        "selection_text": "#ffffff",
+        "selection_text": "#3159d8",
+        "selection_bg": "#eaf0ff",
         "input_shadow": "#eef2f6",
         "log_info": "#2563eb",
         "log_success": "#16833a",
@@ -66,8 +67,8 @@ DARK_THEME = Theme(
         "control_bg": "#202a40",
         "control_hover_bg": "#343c46",
         "control_pressed_bg": "#3c4652",
-        "border": "#3a434f",
-        "border_strong": "#4a5563",
+        "border": "#2d3647",
+        "border_strong": "#3b475c",
         "text": "#e6edf3",
         "text_muted": "#b6c2cf",
         "text_subtle": "#8d99a6",
@@ -77,7 +78,8 @@ DARK_THEME = Theme(
         "primary_hover": "#8aabff",
         "primary_border": "#7094ff",
         "on_primary": "#10172a",
-        "selection_text": "#0d1117",
+        "selection_text": "#b7ccff",
+        "selection_bg": "#263858",
         "input_shadow": "#1c2229",
         "log_info": "#79b8ff",
         "log_success": "#72d987",
@@ -97,7 +99,7 @@ class ThemeManager(QObject):
         self.app = app
         self.app.setStyle("Fusion")
         font = QFont()
-        families = ["Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei"]
+        families = ["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"]
         fallback = self.app.property('spaceweeklyFallbackFonts')
         if fallback is None:
             path = bundled_resource_path('assets', 'fonts', 'NotoSansCJKsc-Bold.otf')
@@ -105,7 +107,7 @@ class ThemeManager(QObject):
             fallback = QFontDatabase.applicationFontFamilies(identifier) if identifier >= 0 else []
             self.app.setProperty('spaceweeklyFallbackFonts', fallback)
         font.setFamilies(families + list(fallback))
-        font.setPointSize(10)
+        font.setPixelSize(14)
         self.app.setFont(font)
         self.mode = THEME_SYSTEM
         self.theme = LIGHT_THEME
@@ -114,6 +116,7 @@ class ThemeManager(QObject):
     def apply(self, mode: str) -> Theme:
         self.mode = mode if mode in THEME_MODES else THEME_SYSTEM
         self.theme = self._resolve_theme()
+        self.app.setProperty('spaceweeklyThemeColors',self.theme.colors)
         self._apply_palette(self.theme)
         self.app.setStyleSheet(self._render_stylesheet(self.theme))
         self.theme_changed.emit(self.theme)
@@ -186,6 +189,6 @@ class ThemeManager(QObject):
         palette.setColor(QPalette.ColorRole.Button, QColor(colors["control_bg"]))
         palette.setColor(QPalette.ColorRole.ButtonText, QColor(colors["text"]))
         palette.setColor(QPalette.ColorRole.BrightText, QColor(colors["log_error"]))
-        palette.setColor(QPalette.ColorRole.Highlight, QColor(colors["accent"]))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(colors["selection_bg"]))
         palette.setColor(QPalette.ColorRole.HighlightedText, QColor(colors["selection_text"]))
         self.app.setPalette(palette)

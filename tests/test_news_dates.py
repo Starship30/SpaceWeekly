@@ -210,6 +210,8 @@ class NewsDateTests(unittest.TestCase):
         for url in ['https://cas.cn.evil.example/test','https://user:pass@www.cas.cn/x', 'http://www.cas.cn/x','https://www.cas.cn:444/x']:
             self.assertFalse(dates._official_url(url))
         self.assertTrue(dates._official_url(CAS))
+        self.assertTrue(dates._official_url('https://www.vandenberg.spaceforce.mil/News/Article-Display/'))
+        self.assertFalse(dates._official_url('https://spaceforce.mil.evil.example/News/'))
         response = Mock();response.__enter__ = Mock(return_value=response);response.__exit__ = Mock(return_value=False)
         response.is_redirect = True;response.headers = {'Location': 'https://other.example/x'}
         with patch.object(dates.requests, 'get', return_value=response) as get:

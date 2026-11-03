@@ -81,6 +81,8 @@ class SpaceflightNewsProvider:
                         continue
                     news = News(source=item["news_site"].strip(), title=item["title"].strip(),
                         published=item["published_at"], summary=item.get("summary", ""), url=item["url"])
+                    from services.news_images import api_candidates
+                    news.images=api_candidates(item,news.url)
                 except ValueError as error:
                     logger.warning("[SNAPI] Skipping article %s: %s", item.get("id") if isinstance(item, dict) else "?", error)
                     continue

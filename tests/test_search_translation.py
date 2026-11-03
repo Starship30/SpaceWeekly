@@ -133,7 +133,8 @@ class VerifiedNameTests(unittest.TestCase):
                  patch.object(dictionary, 'bundled_resource_path', return_value=bundled):
                 self.assertEqual(dictionary.exact_dictionary_translation('Xiguang-4 01'), '')
                 self.assertEqual(dictionary.exact_dictionary_translation('CustomSat'), '测试星')
-            self.assertIn('Jiuquan', json.loads(target.read_text(encoding='utf-8')))
+                self.assertIn('Jiuquan', dictionary.load_dictionary())
+            self.assertFalse(target.exists())
 
     def test_official_name_and_glossary_agreement_overrides_unchanged_ai_name(self):
         settings = replace(default_settings(), language='zh_CN', web_search_enabled=True, retry_count=0)

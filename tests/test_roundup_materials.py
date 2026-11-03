@@ -167,7 +167,7 @@ class MaterialsTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(client.call_count, 1)
 
-    def test_preparation_reuses_unchanged_background_and_force_rechecks_only_selected_id(self):
+    def test_pending_ll2_background_retries_and_force_rechecks_only_selected_id(self):
         self.add_material()
         first = self.draft['snapshot']['items'][0]
         first['research'] = dict(fingerprint=research.fingerprint(first), evidence_status='pending')
@@ -176,14 +176,28 @@ class MaterialsTests(unittest.TestCase):
         before = deepcopy(self.draft['segments'])
         r.prepare_materials(self.draft, self.settings, self.token, service=service, hydrate=hydrate)
         self.assertEqual(hydrate.call_count, 2)
-        self.assertEqual(service.review.call_count, 2)
+        self.assertEqual(service.review.call_count, 3)
         service.reset_mock()
         r.prepare_materials(self.draft, self.settings, self.token, service=service, hydrate=hydrate)
-        service.review.assert_not_called()
+        self.assertEqual(service.review.call_count, 3)
+        self.assertEqual(hydrate.call_count, 2)
+        service.reset_mock()
         r.prepare_materials(self.draft, self.settings, self.token, service=service, hydrate=hydrate, recheck_id='launch-1')
         service.review.assert_called_once()
         self.assertTrue(service.review.call_args.kwargs['force'])
         self.assertEqual(self.draft['segments'], before)
+
+    def test_preparation_reuses_matched_primary_background(self):
+        item = self.draft['snapshot']['items'][0]
+        for selection in self.draft['selection']:
+            selection['included'] = selection['id'] == item['ll2_id']
+        item['research'] = dict(version=1, fingerprint=research.fingerprint(item), evidence_status='supported',
+            sources=[dict(source_id=0, url='https://www.spacex.com/fixture', text='Fixture background quote.')],
+            matches=[dict(source_id=0, summary='Fixture background quote.')])
+        service, hydrate = Mock(), Mock()
+        r.prepare_materials(self.draft, self.settings, self.token, service=service, hydrate=hydrate)
+        service.review.assert_not_called()
+        hydrate.assert_not_called()
 
     def test_supported_chinese_quantity_is_normalized_for_checking_without_changing_the_text(self):
         self.add_material()
@@ -336,7 +350,7 @@ class MaterialsTests(unittest.TestCase):
             self.addCleanup(dialog.close)
             dialog.draft = deepcopy(self.draft)
             dialog._show_draft()
-            self.assertEqual(dialog.tasks.columnCount(), 12)
+            self.assertEqual(dialog.tasks.columnCount(), 14)
             self.assertIn('背景不足', dialog.tasks.item(0,8).text())
             labels = [b.text() for b in dialog.findChildren(QPushButton)]
             self.assertIn('补充缺失资料（联网）', labels)

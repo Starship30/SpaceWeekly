@@ -71,6 +71,40 @@ class StyleTests(unittest.TestCase):
         self.assertEqual(len(r.create_draft(collection, '2026-10-24', '2026-10-24', 'UTC')['selection']), 0)
         self.assertFalse(r.statistics(utc_draft)['complete'])
 
+    def test_activity_counts_selected_actual_launches_in_display_timezone(self):
+        draft=deepcopy(self.draft);draft.update(start='2026-10-23',end='2026-10-29')
+        a,b,c=draft['snapshot']['items']
+        a.update(net='2026-10-23T15:59:00Z',status_id=3)
+        b.update(net='2026-10-23T16:00:00Z',status_id=4)
+        c.update(net='2026-10-24T02:00:00Z',status_id=1)
+        before=deepcopy(draft)
+        activity=style.activity_context(draft,b['ll2_id'])
+        self.assertEqual(activity['ordinal'],2)
+        self.assertEqual([(d['date'],d['count']) for d in activity['days'][:2]],
+                         [('2026-10-23',1),('2026-10-24',1)])
+        self.assertEqual(sum(d['count'] for d in activity['days']),r.statistics(draft)['actual'])
+        self.assertEqual([d['date'] for d in activity['days'] if d['selected']],['2026-10-24'])
+        self.assertIsNone(style.activity_context(draft,c['ll2_id'])['ordinal'])
+        self.assertEqual(draft,before)
+        utc=style.activity_context(dict(draft,timezone='UTC'),b['ll2_id'])
+        self.assertEqual(utc['days'][0]['count'],2)
+        draft['selection'][0]['included']=False
+        self.assertEqual(style.activity_context(draft,b['ll2_id'])['ordinal'],1)
+
+    def test_activity_strip_has_bounded_windows_for_custom_dates_and_crosses_months(self):
+        draft=deepcopy(self.draft);draft.update(start='2026-10-20',end='2026-11-03')
+        item=draft['snapshot']['items'][0];item['net']='2026-11-01T23:00:00Z'
+        activity=style.activity_context(draft,item['ll2_id'])
+        self.assertTrue(activity['windowed']);self.assertEqual(len(activity['days']),7)
+        self.assertEqual((activity['start'],activity['end']),('2026-10-27','2026-11-02'))
+        self.assertEqual(activity['days'][-1]['label'],'11/02')
+        self.assertTrue(activity['days'][-1]['selected'])
+        item['net']='2026-11-03T01:00:00Z'
+        tail=style.activity_context(draft,item['ll2_id'])
+        self.assertEqual(len(tail['days']),7);self.assertEqual(tail['end'],'2026-11-03')
+        short=dict(draft,start='2026-11-02',end='2026-11-03')
+        self.assertEqual(len(style.activity_context(short,item['ll2_id'])['days']),2)
+
     def test_week_opening_custom_range_future_and_scoped_closing(self):
         week = dict(self.draft, start='2026-10-20', end='2026-10-26', as_of='2026-11-01T00:00:00Z')
         self.assertEqual(style.opening(week), '先来看一下过去一周的发射任务。')
@@ -81,7 +115,7 @@ class StyleTests(unittest.TestCase):
         self.draft['selection'][2]['included'] = False
         stats = r.statistics(self.draft)
         closing = style.transition(self.draft, stats)
-        self.assertIn('本期关注的2次', closing)
+        self.assertNotIn('均取得成功', closing)
         self.assertNotIn('全球', closing)
         self.assertEqual(stats['results']['success'], 2)  # Landing failed in both source records.
         self.draft['snapshot']['items'][0]['status_id'] = 987
@@ -107,7 +141,7 @@ class StyleTests(unittest.TestCase):
         self.assertEqual(style.payload_count(item)[0], 12)
         raw = base.styled_generated()
         good = r.validate_generated(raw, self.draft, context=style.style_context(self.draft, self.settings))
-        self.assertIn('12颗', good[1]['spoken'])
+        self.assertIn('十二颗', good[1]['spoken'])
         # A sourced event reference alone does not satisfy the required spoken quantity.
         good[1]['spoken'] = '美国 Rocket Lab 方面，Fictional deployment任务发射成功。'
         with self.assertRaisesRegex(AIResponseParseError, '载荷数量'):
@@ -140,13 +174,18 @@ class StyleTests(unittest.TestCase):
             r.validate_generated(raw, self.draft, context=style.style_context(self.draft, self.settings))
 
     def test_whole_and_single_requests_use_same_editable_rules_and_event_context(self):
+        self.draft['snapshot']['items'][0]['orbit'] = '近地轨道'
         self.settings.roundup_prompt = '自定义口播规则：只写短句，保留必要限定。'
         self.settings.deepseek_api_key = 'mock-key-never-live'
         seen = []
         def respond(prompt, config, **kw):
             payload = json.loads(prompt.split('\n')[-1])
-            self.assertEqual(payload['style']['rules'], self.settings.roundup_prompt)
+            self.assertTrue(payload['style']['rules'].startswith(self.settings.roundup_prompt))
+            self.assertIn(style.NARRATION_RULE, payload['style']['rules'])
             self.assertEqual(payload['style']['events'][0]['timezone'], '北京时间')
+            self.assertEqual(payload['style']['events'][0]['orbit'], '近地轨道')
+            self.assertEqual(payload['style']['events'][0]['orbit_basis'], 'mission_target')
+            self.assertIn('不能仅因发射成功',payload['style']['rules'])
             self.assertNotIn(self.settings.deepseek_api_key, prompt)
             result = base.styled_generated()
             if payload['current']:
@@ -162,13 +201,17 @@ class StyleTests(unittest.TestCase):
         self.assertEqual(self.draft['segments'], before)
 
     def test_polish_removes_routine_attribution_keeps_selected_ids_and_rules(self):
+        self.draft['snapshot']['items'][0]['orbit'] = '近地轨道'
         self.settings.deepseek_api_key = 'mock-key-never-live'
         self.settings.roundup_prompt = '自定义选段与整稿共用规则'
         before = deepcopy(self.draft)
         calls = []
         def respond(prompt, config, **kw):
             payload = json.loads(prompt.split('\n')[-1]); calls.append(payload)
-            self.assertEqual(payload['style']['rules'], self.settings.roundup_prompt)
+            self.assertTrue(payload['style']['rules'].startswith(self.settings.roundup_prompt))
+            self.assertIn(style.NARRATION_RULE, payload['style']['rules'])
+            self.assertEqual(payload['style']['events'][0]['orbit'], '近地轨道')
+            self.assertIn('目标轨道',prompt)
             if kw['module_name'] == 'roundup_polish':
                 result = dict(segments=[dict(id='focus1', task_ids=['launch-1'], text='美国 Rocket Lab 方面，10月21日晚上，Electron执行Fixture mission 1任务，发射成功。')])
             else:

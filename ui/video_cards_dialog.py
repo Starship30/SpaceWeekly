@@ -147,6 +147,7 @@ class VideoCardsDialog(ProductionComponent):
         self.sort_order = QComboBox()
         self.sort_order.addItem(tr('video.order_asc'), 'asc')
         self.sort_order.addItem(tr('video.order_desc'), 'desc')
+        self.sort_order.addItem(tr('video.order_input'), 'input')
         self.sort_order.setToolTip(tr('video.order_hint'))
         self.sort_order.currentIndexChanged.connect(self._sort_changed)
         list_layout.addWidget(self.sort_order)
@@ -309,7 +310,7 @@ class VideoCardsDialog(ProductionComponent):
         if filename:
             self.load_snapshot(Path(filename))
 
-    def load_snapshot(self, path):
+    def load_snapshot(self, path, *, sort_order=None):
         if self.worker is not None:
             return
         try:
@@ -317,14 +318,20 @@ class VideoCardsDialog(ProductionComponent):
         except (OSError, ValueError) as error:
             self.report_error( tr('video.title'), str(error))
             return
-        self._set_data(data, Path(path))
+        self._set_data(data, Path(path),sort_order=sort_order)
 
-    def _set_data(self, data, path, selected_ids=None, current_id=None):
+    def _set_data(self, data, path, selected_ids=None, current_id=None, *, sort_order=None):
         self._stop_preview()
         self._refresh_timer.stop()
         self._changing = True
-        data = dict(data, items=video_cards.sort_items(data['items'], self.sort_order.currentData()),
-                    order_policy=f'video_type_then_published_{self.sort_order.currentData()}')
+        if sort_order is not None:
+            self.sort_order.setCurrentIndex(max(0,self.sort_order.findData(sort_order)))
+        ids={item['id'] for item in data['items']}
+        order=[i for i in data.get('input_order',[]) if i in ids]
+        order += [item['id'] for item in data['items'] if item['id'] not in order]
+        mode=self.sort_order.currentData()
+        data = dict(data, items=video_cards.sort_items(data['items'],mode,input_order=order),input_order=order,
+                    order_policy='selected_articles_input_order' if mode=='input' else f'video_type_then_published_{mode}')
         self.source, self.data, self.index = Path(path), data, -1
         self.editor_panel.setEnabled(True)
         self.save_snapshot_action.setEnabled(True)

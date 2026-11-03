@@ -50,6 +50,10 @@ def is_valid_workspace(path: Path) -> bool:
 def initialize_workspace(path: Path, language: str | None = None) -> Path:
     """Create or reuse a workspace and update settings paths."""
     workspace = Path(path).expanduser().resolve()
+    if getattr(sys,'frozen',False):
+        program=Path(sys.executable).resolve().parent
+        if program.name=='current':program=program.parent
+        if workspace.is_relative_to(program):raise ValueError('工作区不能放在会被安装更新替换的程序目录，请选择独立文件夹')
     workspace.mkdir(parents=True, exist_ok=True)
 
     if not _can_write(workspace):

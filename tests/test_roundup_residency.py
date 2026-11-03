@@ -42,6 +42,7 @@ class ResidentTests(unittest.TestCase):
     def test_second_paragraph_speaker_and_style_reuse_one_loaded_instance(self):
         provider, model, states = self.resident_provider()
         self.assertFalse(provider.is_running)
+
         first = self.speak(provider, model)
         pid = provider.process.pid
         second = self.speak(provider, model, 'second', voice='serena', style='calm')
@@ -51,6 +52,21 @@ class ResidentTests(unittest.TestCase):
         self.assertTrue(any('复用已加载' in state for state in states))
         provider.unload()
         self.assertFalse(provider.is_running)
+
+    def test_unicode_model_path_and_chinese_reading_cross_the_real_worker_protocol(self):
+        provider,model,_=self.resident_provider()
+        renamed=self.root/'中文 模型';model.rename(renamed)
+        provider.configure(dict(provider.settings,model=str(renamed)))
+        result=self.speak(provider,renamed,'遥感零三星，九A工位。')
+        self.assertTrue(result.path.exists());self.assertEqual(provider.load_count,1)
+
+    def test_temporary_log_cleanup_error_does_not_discard_completed_audio(self):
+        provider,model,states=self.resident_provider();result=self.speak(provider,model)
+        content=result.path.read_bytes();temporary=provider._runtime
+        with patch.object(temporary,'cleanup',side_effect=PermissionError('file scanner holds log')):
+            provider.unload()
+        self.assertFalse(provider.is_running);self.assertEqual(result.path.read_bytes(),content)
+        self.assertTrue(any('临时日志' in state for state in states));temporary.cleanup()
 
     def test_switch_device_or_model_stops_old_process_before_loading_another(self):
         provider, model, _ = self.resident_provider()

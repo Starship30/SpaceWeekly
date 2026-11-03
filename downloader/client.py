@@ -1,5 +1,7 @@
 import random
 import time
+from urllib.parse import urljoin, urlsplit
+import ipaddress
 
 import requests
 
@@ -52,6 +54,51 @@ def download(url):
                 break
 
     raise RuntimeError(f"Download failed after {RETRY_COUNT + 1} attempts: {url}") from last_error
+
+
+def public_url(value, base=''):
+    """Candidate URLs must be ordinary public HTTP links, never credentials or local files."""
+    try:
+        if not isinstance(value,str) or not value.strip():return ''
+        value=urljoin(base,str(value).strip());parsed=urlsplit(value)
+        if parsed.scheme not in ('https','http') or not parsed.hostname or parsed.username or parsed.password or len(value)>4096:
+            return ''
+        host=parsed.hostname.lower()
+        if host=='localhost' or host.endswith(('.localhost','.local')) or any(c.isspace() for c in value):return ''
+        try:
+            if not ipaddress.ip_address(host).is_global:return ''
+        except ValueError:pass
+        return value.split('#')[0]
+    except ValueError:return ''
+
+
+def download_to(url, path, token, *, max_bytes=24*1024*1024, progress=None):
+    """Bounded streamed assets; callers verify decoded content before committing."""
+    for attempt in range(2):
+        token.check();current=public_url(url)
+        if not current:raise ValueError('图片地址无效或不是公开网页地址')
+        try:
+            for redirect in range(4):
+                token.check()
+                with _session().get(current,headers=headers,timeout=(5,8),stream=True,allow_redirects=False) as response:
+                    if response.status_code in (301,302,303,307,308):
+                        current=public_url(response.headers.get('Location',''),current)
+                        if not current or redirect==3:raise ValueError('图片重定向无效或次数过多')
+                        continue
+                    response.raise_for_status()
+                    total=int(response.headers.get('Content-Length','0'))
+                    if total>max_bytes:raise ValueError('下载文件超过大小限制')
+                    count=0
+                    with path.open('wb') as handle:
+                        for block in response.iter_content(65536):
+                            token.check();count+=len(block)
+                            if count>max_bytes:raise ValueError('下载文件超过大小限制')
+                            handle.write(block)
+                            if progress:progress(count,total or None)
+                    token.check()
+                    return dict(url=current,bytes=count,content_type=response.headers.get('Content-Type',''))
+        except requests.RequestException:
+            if attempt or token.wait(.5):token.check();raise
 
 
 def _session() -> requests.Session:

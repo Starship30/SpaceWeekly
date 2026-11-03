@@ -31,6 +31,13 @@ RAW = dict(id='fictional-launch-01', name='Fictional Rocket | Orbital Test', net
 
 
 class LaunchExportTests(unittest.TestCase):
+    def setUp(self):
+        import resources
+        Path('build').mkdir(exist_ok=True)
+        temp=tempfile.TemporaryDirectory(dir='build');self.addCleanup(temp.cleanup)
+        workspace=patch.object(resources,'_WORKSPACE_PATH',Path(temp.name).resolve())
+        workspace.start();self.addCleanup(workspace.stop)
+
     def test_structured_launch_reuses_one_fetch_and_raw_date(self):
         response = MagicMock(); response.json.return_value = {'results': [RAW]}
         rows = []

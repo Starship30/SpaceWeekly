@@ -1,35 +1,41 @@
-from ui.component import ProductionComponent
+from ui.component import ProductionComponent,SegmentedTabs,configure_table,StatusDelegate
 """Weekly launch roundup: explicit data, script editing, optional speech, handoff."""
 from copy import deepcopy
 import json
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QDate, Qt, QThread, Signal, QUrl
+from PySide6.QtCore import QDate, Qt, QThread, Signal, QUrl, QTimer
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QTabWidget, QWidget,
     QLabel, QPushButton, QDateEdit, QTableWidget, QTableWidgetItem, QListWidget, QPlainTextEdit,
-    QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox, QFileDialog, QMessageBox, QSplitter, QAbstractItemView)
+    QLineEdit, QDoubleSpinBox, QSpinBox, QFileDialog, QMessageBox, QSplitter, QAbstractItemView,QCheckBox)
+from ui.widgets.combo_box import RoundedComboBox as QComboBox
 
 from resources import resource_path
+from i18n import tr
 from services.cancellation import CancellationToken, TaskCancelledError
 from services.launch_data import load_existing, refresh_collection, save_collection, write_json
 from services import launch_roundup as roundup
-from services.roundup_audio import current_audio, generate_audio, speech_text
-from services.roundup_polish import polish_segments, apply_polish
+from services.roundup_audio import current_audio, generate_audio, speech_text, reading_text
+from services.roundup_polish import polish_segments, apply_polish, organize_segments
 from services.roundup_export import export_package
 from ai.qwen_tts import QwenTTSProvider, capabilities
 
 
 class RoundupWorker(QThread):
-    def __init__(self, action, payload, parent=None):
+    def __init__(self, action, payload, parent=None, *, protect_cache=True):
         super().__init__(parent)
         self.action, self.payload = action, payload
         self.token = CancellationToken()
         self.value, self.error, self.cancelled = None, '', False
+        self.protect_cache=protect_cache
 
     def run(self):
         try:
-            self.value = self.action(self.payload, self.token)
+            from contextlib import nullcontext
+            from services.cache_maintenance import using_media
+            with using_media() if self.protect_cache else nullcontext():
+                self.value = self.action(self.payload, self.token)
         except TaskCancelledError:
             self.cancelled = True
         except Exception as error:
@@ -40,6 +46,7 @@ class LaunchRoundupDialog(ProductionComponent):
     tts_state_changed = Signal(str)
     job_changed = Signal()
     draft_changed = Signal()
+    preview_ready = Signal(object)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -66,6 +73,9 @@ class LaunchRoundupDialog(ProductionComponent):
                 settings_voice['timeout'] = max(10, min(3600, int(settings_voice.get('timeout', 600))))
                 speech_text('', rules)
                 self.draft['tts'], self.draft['pronunciations'] = settings_voice, rules
+                from services.roundup_sync import DEFAULT_ALIGNER,validate_aligner
+                alignment=dict(DEFAULT_ALIGNER,**saved.get('aligner',{}));validate_aligner(alignment)
+                self.draft['aligner']=alignment
             except (OSError, ValueError, TypeError, AttributeError) as error:
                 warning = '独立语音配置读取失败，请重新配置；稿件仍可使用：' + str(error)
         else:
@@ -98,29 +108,39 @@ class LaunchRoundupDialog(ProductionComponent):
 
     def _build(self):
         outer = QVBoxLayout(self)
-        self.tabs = QTabWidget()
+        self.tabs = SegmentedTabs()
         outer.addWidget(self.tabs)
         data_page = QWidget()
         self.data_page = data_page
         layout = QVBoxLayout(data_page)
         dates = QHBoxLayout()
         self.start, self.end = QDateEdit(), QDateEdit()
-        self.date_label = QLabel(roundup.timezone_label(self.draft) + '起日')
-        for label, edit in [(self.date_label, self.start), (QLabel('止日（包含当天）'), self.end)]:
+        self.date_label = QLabel('日期')
+        for label, edit in [(self.date_label, self.start), (QLabel('至'), self.end)]:
             edit.setCalendarPopup(True)
             edit.setDisplayFormat('yyyy-MM-dd')
+            edit.setMaximumWidth(145)
             dates.addWidget(label)
             dates.addWidget(edit)
-        self._button(dates, '最近七个完整自然日', self._default_dates)
-        self._button(dates, '应用范围（本地）', self._apply_range)
-        self._button(dates, '刷新 LL2 与资料（联网）', self._refresh)
+        self._button(dates, '最近7天', self._default_dates).setToolTip('最近七个完整自然日，不含今天')
+        dates.addStretch(1)
+        self._button(dates, '联网刷新', self._refresh).setObjectName('PrimaryButton')
+        self.range_timer = QTimer(self)
+        self.range_timer.setSingleShot(True)
+        self.range_timer.setInterval(500)
+        self.range_timer.timeout.connect(lambda: self._guard(self._apply_range))
+        for edit in (self.start, self.end):
+            edit.dateChanged.connect(lambda *_: self.range_timer.start() if not self._loading else None)
         layout.addLayout(dates)
         self.stats = QLabel()
         self.stats.setWordWrap(True)
-        layout.addWidget(self.stats)
-        self.tasks = QTableWidget(0, 12)
+        summary=QWidget();summary_row=QHBoxLayout(summary);summary_row.setContentsMargins(0,0,0,0)
+        self.include_all=QCheckBox('全选');self.include_all.stateChanged.connect(self._include_all)
+        summary_row.addWidget(self.include_all);summary_row.addWidget(self.stats,1);layout.addWidget(summary)
+        self.tasks = QTableWidget(0, 14)
+        configure_table(self.tasks);self.tasks.setItemDelegateForColumn(13,StatusDelegate(self.tasks))
         self.tasks.setHorizontalHeaderLabels(['纳入', '重点', '任务名（悬停查看ID）', '分类', '分组（可编辑）', '北京时间', '发射地国家', '机构',
-                                              '资料准备', '资料来源', '独立来源支持', '人工确认（名称）'])
+                                              '资料准备', '资料来源', '独立来源支持', '人工确认（名称）', '火箭', '发射结果'])
         for index in (11, 10, 9, 8):
             self.tasks.horizontalHeader().moveSection(self.tasks.horizontalHeader().visualIndex(index), 2)
         self.tasks.itemChanged.connect(self._selection_changed)
@@ -161,6 +181,8 @@ class LaunchRoundupDialog(ProductionComponent):
         layout.addWidget(self.script_origin)
         split = QSplitter()
         self.segment_list = QListWidget()
+        self.segment_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.segment_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.segment_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.segment_list.setToolTip('Ctrl/Shift多选；口播润色只作用于选中的重点/补充段落')
         self.segment_list.currentRowChanged.connect(self._select_segment)
@@ -168,7 +190,7 @@ class LaunchRoundupDialog(ProductionComponent):
         editor = QWidget()
         form = QFormLayout(editor)
         self.spoken, self.screen, self.narration_edit = QPlainTextEdit(), QPlainTextEdit(), QPlainTextEdit()
-        self.text_tabs = QTabWidget()
+        self.text_tabs = SegmentedTabs()
         self.text_tabs.addTab(self.spoken, '事实原稿')
         self.text_tabs.addTab(self.screen, '屏幕文字')
         reading_page = QWidget()
@@ -209,6 +231,7 @@ class LaunchRoundupDialog(ProductionComponent):
         self._button(actions, '删除选中段', self._remove_segment)
         self._button(actions, '查看段落出处', self._segment_sources)
         self._button(actions, '润色选中段口播', self._polish_selected)
+        self._button(actions, '口播整理', self._organize_selected)
         layout.addLayout(actions)
         self.tabs.addTab(script_page, '2 · 结构化稿件与编辑')
 
@@ -270,7 +293,7 @@ class LaunchRoundupDialog(ProductionComponent):
         export_layout = QVBoxLayout(self.export_controls)
         self._button(export_layout, '导出稿件与快照（含可用配音）', lambda: self._export(False))
         self._button(export_layout, '导出配音与画面素材包', lambda: self._export(True))
-        export_layout.addWidget(QLabel('完整当前配音齐备后才生成整段旁白和 SRT。字幕精度为段落级，不是逐字对齐。'))
+        export_layout.addWidget(QLabel(tr('production.legacy.60')))
         layout.addWidget(self.export_controls)
         layout.addStretch()
         self.tabs.addTab(voice_page, '3 · 可选配音、试听与导出')
@@ -283,6 +306,8 @@ class LaunchRoundupDialog(ProductionComponent):
         outer.addLayout(footer)
 
     def _show_draft(self):
+        roundup.sync_materials(self.draft)
+        roundup.sync_names(self.draft)
         self._loading = True
         self.start.setDate(QDate.fromString(self.draft['start'], 'yyyy-MM-dd'))
         self.end.setDate(QDate.fromString(self.draft['end'], 'yyyy-MM-dd'))
@@ -298,6 +323,12 @@ class LaunchRoundupDialog(ProductionComponent):
         self.timeout.setValue(int(voice.get('timeout', 600)))
         self.pause.setValue(float(self.draft['pause_seconds']))
         self.pronunciations.setPlainText(json.dumps(self.draft['pronunciations'], ensure_ascii=False, indent=2))
+        if hasattr(self,'align_python'):
+            from services.roundup_sync import DEFAULT_ALIGNER
+            aligner=dict(DEFAULT_ALIGNER,**self.draft.get('aligner',{}))
+            self.align_python.setText(aligner['python']);self.align_model.setText(aligner['model'])
+            self.align_device.setText(aligner['device']);self.align_language.setCurrentText(aligner['language'])
+            self.align_timeout.setValue(int(aligner['timeout']))
         self._loading = False
         self._capabilities()
         self._voice_dirty = False
@@ -307,9 +338,9 @@ class LaunchRoundupDialog(ProductionComponent):
 
     def _show_tasks(self):
         current=self.tasks.currentRow()
-        selected_id=self.tasks.item(current,0).toolTip().split('\n')[0] if current>=0 and self.tasks.item(current,0) else None
+        selected_id=self.tasks.item(current,0).data(Qt.ItemDataRole.UserRole) if current>=0 and self.tasks.item(current,0) else None
         scroll=self.tasks.verticalScrollBar().value()
-        self.date_label.setText(roundup.timezone_label(self.draft) + '起日')
+        self.date_label.setText('日期')
         self.tasks.horizontalHeaderItem(5).setText(roundup.timezone_label(self.draft))
         self._loading = True
         self.tasks.setRowCount(0)
@@ -319,16 +350,19 @@ class LaunchRoundupDialog(ProductionComponent):
         for row, selection in enumerate(self.draft['selection']):
             self.tasks.insertRow(row)
             item = items[selection['id']]
-            name = confirmed_values(item.get('research', {}), item).get('chinese_name') or item['english_name']
+            names = roundup.display_names(item)
+            name = names['name']
             classification = {'actual': '实际发射', 'planned': '计划', 'delayed': '延期', 'cancelled': '取消', 'pending': '待确认'}
             state = roundup.material_status(item)
             values = ['', '', name, classification[roundup.category(item, roundup.parse_datetime(self.draft['as_of']))], selection['group'], format_datetime(item.get('net', ''), self.draft.get('timezone', 'Asia/Shanghai')),
                       item.get('site_country', ''), item.get('provider', ''),
-                      state['preparation_label'], state['source_label'], state['independent_label'], state['human_label']]
+                      state['preparation_label'], state['source_label'], state['independent_label'], state['human_label'],
+                      names['rocket'], roundup.event_context(item, self.draft)['launch_result']]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
-                cell.setToolTip(selection['id'] + '\n' + str(value))
-                if column >= 8:
+                cell.setData(Qt.ItemDataRole.UserRole,selection['id']);cell.setToolTip(str(value))
+                if column == 5:cell.setText(str(value)[:16])
+                if 8 <= column <= 11:
                     cell.setToolTip(json.dumps(state, ensure_ascii=False, indent=2) + '\n独立支持指已有外部原句与事件匹配；机器复核不等于官方或人工确认。')
                 if column in (0, 1):
                     cell.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable)
@@ -338,6 +372,7 @@ class LaunchRoundupDialog(ProductionComponent):
                 self.tasks.setItem(row, column, cell)
         self.tasks.resizeColumnsToContents()
         self.tasks.setColumnWidth(2, min(320, self.tasks.columnWidth(2)))
+        if hasattr(self,'task_column_sizes'):self.task_column_sizes()
         self._loading = False
         if selected_id:
             row=next((n for n,s in enumerate(self.draft['selection']) if s['id']==selected_id),-1)
@@ -356,12 +391,18 @@ class LaunchRoundupDialog(ProductionComponent):
             item['group'] = self.tasks.item(row, 4).text()
         self._show_stats()
 
+    def _include_all(self,state):
+        if self._loading or self.worker:return
+        self._loading=True
+        for row in range(self.tasks.rowCount()):self.tasks.item(row,0).setCheckState(Qt.CheckState.Checked if state else Qt.CheckState.Unchecked)
+        self._loading=False;self._selection_changed()
+
     def _show_stats(self):
         stats = roundup.statistics(self.draft)
-        self.stats.setText(roundup.overview(self.draft) + '\n'
-            + ('完整分页覆盖所选范围。' if stats['complete'] else '资料不完整或只选择了部分任务：' + self.draft['snapshot'].get('reason', ''))
-            + '\n实际发射地点国家：' + json.dumps(stats['site_countries'], ensure_ascii=False)
-            + '；发射机构：' + json.dumps(stats['agencies'], ensure_ascii=False))
+        self.include_all.blockSignals(True);self.include_all.setChecked(bool(self.draft['selection']) and all(s['included'] for s in self.draft['selection']));self.include_all.blockSignals(False)
+        self.stats.setText(f"已选{stats['total']}项，已发射{stats['actual']}项，成功{stats['results']['success']}项"
+            + (' · 当前收录不完整或仅选中部分任务' if not stats['complete'] else ''))
+        self.stats.setToolTip(roundup.overview(self.draft))
 
     def _store_segment(self, *_):
         if self._loading or not 0 <= self._current < len(self.draft['segments']):
@@ -374,7 +415,8 @@ class LaunchRoundupDialog(ProductionComponent):
         segment['preview_seconds'] = self.preview_seconds.value()
         self.audio_state.setText('人工编辑' if segment.get('edited') else '资料约束生成')
         audio = current_audio(self.draft, segment) if not self._voice_dirty else None
-        self.audio_state.setText(self.audio_state.text() + (f" · 当前配音 {audio['duration_seconds']:.2f} 秒" if audio else ' · 无当前音频（未生成或已过期）'))
+        self.audio_state.setText(self.audio_state.text() + (f" · 当前配音 {audio['duration_seconds']:.2f} 秒" if audio else
+            ' · 旧音频需重新生成' if segment.get('audio') else ' · 尚未生成配音'))
         self._refresh_reading()
 
     def _refresh_reading(self):
@@ -385,7 +427,8 @@ class LaunchRoundupDialog(ProductionComponent):
         if segment.get('narration') and not value:
             self.audio_state.setText(self.audio_state.text() + ' · 朗读润色已过期，当前使用事实原稿')
         elif value:
-            self.audio_state.setText(self.audio_state.text() + (' · AI口播润色（非人工确认）' if value.get('origin') == 'ai_polish' else ' · 人工朗读编辑（待复核）'))
+            label = {'ai_polish':'AI口播润色（非人工确认）', 'event_organize':'口播整理（待复核）'}.get(value.get('origin'), '人工朗读编辑（待复核）')
+            self.audio_state.setText(self.audio_state.text() + ' · ' + label)
         names = roundup.task_names(self.draft, segment['task_ids'])
         self.names.setText(' / '.join(n['confirmed_chinese_name'] or n['original_name'] for n in names))
         self.names.setToolTip(json.dumps(names, ensure_ascii=False, indent=2))
@@ -429,7 +472,8 @@ class LaunchRoundupDialog(ProductionComponent):
         self.segment_list.clear()
         for segment in self.draft['segments']:
             origin = {'ai': 'AI综述', 'local_template': '本地模板', 'program_statistics': '程序统计'}.get(segment.get('origin'), '来源未记录')
-            self.segment_list.addItem(segment['id'] + ' · ' + segment['kind'] + ' · ' + origin)
+            self.segment_list.addItem(roundup.segment_title(self.draft, segment))
+            self.segment_list.item(self.segment_list.count()-1).setToolTip(roundup.segment_title(self.draft,segment)+'\n'+origin)
         origins = set(s.get('origin', 'unknown') for s in self.draft['segments'])
         reasons = list(dict.fromkeys(s.get('generation_reason', '') for s in self.draft['segments'] if s.get('generation_reason')))
         label = 'AI综述（资料约束生成）' if origins == {'ai'} else '本地模板稿（非AI综述）' if origins == {'local_template'} else '混合稿/人工稿，请查看各段来源'
@@ -439,7 +483,7 @@ class LaunchRoundupDialog(ProductionComponent):
         count = sum(bool(roundup.current_narration(s)) for s in self.draft['segments'])
         if count:
             detail += f'；{count}段有独立朗读文本'
-        self.script_origin.setText(detail[:360])
+        self.script_origin.setText(label + (' · 含人工编辑' if any(s.get('edited') for s in self.draft['segments']) else '') if origins else '尚无稿件')
         self.script_origin.setToolTip(detail)
         self._current = -1
         self._loading = False
@@ -452,16 +496,23 @@ class LaunchRoundupDialog(ProductionComponent):
         self._selection_changed()
         self.draft['target_seconds'] = int(self.target.currentText())
         self.draft['pause_seconds'] = self.pause.value()
-        self.draft['tts'] = dict(python=self.python.text().strip(), model=self.model.text().strip(),
-            speaker=self.speaker.currentText().strip(), style=self.style.text() if not self.style.isHidden() else '',
-            device=self.device.currentText(), timeout=self.timeout.value())
-        rules = json.loads(self.pronunciations.toPlainText())
-        speech_text('', rules)
-        self.draft['pronunciations'] = rules
+        self.draft.update(self.voice_settings())
         self._voice_dirty = False
         self._store_segment()
         if validate:
             roundup.validate_draft(self.draft)
+
+    def voice_settings(self):
+        voice=dict(tts=dict(python=self.python.text().strip(), model=self.model.text().strip(),
+            speaker=self.speaker.currentText().strip(), style=self.style.text() if not self.style.isHidden() else '',
+            device=self.device.currentText(), timeout=self.timeout.value()))
+        rules = json.loads(self.pronunciations.toPlainText())
+        speech_text('', rules)
+        voice['pronunciations'] = rules
+        if hasattr(self,'align_python'):
+            voice['aligner']=dict(python=self.align_python.text().strip(),model=self.align_model.text().strip(),
+                device=self.align_device.text().strip() or 'cpu',language=self.align_language.currentText(),timeout=self.align_timeout.value())
+        return voice
 
     def _default_dates(self):
         start, end = roundup.default_range(display_timezone=self.settings.display_timezone)
@@ -473,14 +524,24 @@ class LaunchRoundupDialog(ProductionComponent):
             '应用新日期/数据会新建草稿。当前稿件不会自动迁移，请先保存。继续？') == QMessageBox.StandardButton.Yes
 
     def _apply_range(self):
+        if self._loading or (self.start.date().toString('yyyy-MM-dd'), self.end.date().toString('yyyy-MM-dd')) == (self.draft['start'], self.draft['end']):
+            return
+        roundup.range_bounds(self.start.date().toString('yyyy-MM-dd'), self.end.date().toString('yyyy-MM-dd'), self.settings.display_timezone)
         if self._allow_new_snapshot():
+            self._checkpoint()
             self._new_snapshot(self.collection)
+        else:
+            self._loading = True
+            self.start.setDate(QDate.fromString(self.draft['start'], 'yyyy-MM-dd'))
+            self.end.setDate(QDate.fromString(self.draft['end'], 'yyyy-MM-dd'))
+            self._loading = False
 
     def _new_snapshot(self, collection):
         voice, rules = deepcopy(self.draft['tts']), deepcopy(self.draft['pronunciations'])
+        aligner=deepcopy(self.draft.get('aligner',{}))
         self.collection = collection
         self.draft = roundup.create_draft(collection, self.start.date().toString('yyyy-MM-dd'), self.end.date().toString('yyyy-MM-dd'), self.settings.display_timezone)
-        self.draft.update(tts=voice, pronunciations=rules)
+        self.draft.update(tts=voice, pronunciations=rules,aligner=aligner)
         self._show_draft()
 
     def _refresh(self):
@@ -602,6 +663,43 @@ class LaunchRoundupDialog(ProductionComponent):
         self._checkpoint()
         self._start_job('polish', lambda data, token: polish_segments(data, ids, self.settings, token), deepcopy(self.draft))
 
+    def _organize_selected(self):
+        self._sync()
+        ids = [self.draft['segments'][self.segment_list.row(item)]['id'] for item in self.segment_list.selectedItems()]
+        self._review_narration(organize_segments(self.draft, ids), '口播整理')
+
+    def _review_narration(self, result, title):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title + ' · 修改预览')
+        dialog.resize(940, 620)
+        layout = QVBoxLayout(dialog)
+        note = QLabel('采用后只更新选中段口播；事实原稿、屏幕文字和前后版本保留。相关旧配音与对齐需重新生成。'
+                      + ('本次按已有事件资料整理，省略额外背景，请核对后采用。' if result.get('operation') == 'event_organize' else '机器复核仍需人工检查。'))
+        note.setWordWrap(True); layout.addWidget(note)
+        tabs = SegmentedTabs()
+        before, after, final = [], [], []
+        for update in result['updates']:
+            before.append(roundup.narration_text(update['before']))
+            after.append(roundup.narration_text(update['after']))
+            final.append(reading_text(self.draft, update['after']))
+        for label, rows in [('修改前', before), ('整理后口播', after), ('最终 TTS 输入', final)]:
+            editor = QPlainTextEdit('\n\n'.join(rows)); editor.setReadOnly(True); tabs.addTab(editor, label)
+        layout.addWidget(tabs, 1)
+        buttons = QHBoxLayout(); buttons.addStretch(1)
+        cancel = QPushButton('保留原稿'); cancel.clicked.connect(dialog.reject); buttons.addWidget(cancel)
+        accept = QPushButton('采用口播'); accept.setObjectName('PrimaryButton'); accept.clicked.connect(dialog.accept); buttons.addWidget(accept)
+        layout.addLayout(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.status.setText('已保留原稿，未采用口播整理结果')
+            return False
+        self._checkpoint()
+        apply_polish(self.draft, result)
+        selected_id = result['updates'][0]['id']
+        self._show_segments(next(i for i, s in enumerate(self.draft['segments']) if s['id'] == selected_id))
+        self.text_tabs.setCurrentIndex(2)
+        self.status.setText('已采用口播并保留前后版本；旧配音与时间标记需重新生成。读法请试听确认。')
+        return True
+
     def _writing_rules(self):
         if hasattr(self, 'open_rules'):
             self.open_rules()
@@ -702,7 +800,9 @@ class LaunchRoundupDialog(ProductionComponent):
 
     def _save_voice(self):
         self._sync(validate=False)
-        write_json(resource_path('config', 'roundup_voice.json'), dict(tts=self.draft['tts'], pronunciations=self.draft['pronunciations']))
+        from services.voice_storage import validate_voice_locations
+        for value in (self.draft['tts'],self.draft.get('aligner',{})):validate_voice_locations(value)
+        write_json(resource_path('config', 'roundup_voice.json'), dict(tts=self.draft['tts'], pronunciations=self.draft['pronunciations'],aligner=self.draft.get('aligner',{})))
         self.status.setText('语音配置已独立保存，未修改文本模型配置')
 
     def _voice_changed(self, *_):
@@ -712,6 +812,7 @@ class LaunchRoundupDialog(ProductionComponent):
             self._refresh_reading()
 
     def _audio_job(self, identifier=None, force=False, play=False):
+        if getattr(self,'voice_setup_busy',lambda:False)():raise ValueError('语音环境正在配置，请等待完成或取消')
         self._sync()
         if not self.draft['segments']:
             raise ValueError('请先生成稿件或添加人工段落')
@@ -720,17 +821,30 @@ class LaunchRoundupDialog(ProductionComponent):
         needed = [s for s in self.draft['segments'] if (not identifier or s['id'] == identifier)
                   and (force or not current_audio(self.draft, s))]
         if needed:
+            if hasattr(self,'request_voice_setup') and (not settings['model'] or not settings['python']
+                    or not Path(settings['python']).is_file() or not Path(settings['model']).is_dir()):
+                self.request_voice_setup();self.status.setText('请先自动配置语音，或检查已有环境；稿件和无声预览仍可使用');return
             capabilities(settings['model'])
             if not settings['python'] or not Path(settings['python']).is_file():
                 raise ValueError('请在语音页配置独立 TTS 环境的 python.exe；参见 tools/ROUNDUP.md。稿件可直接导出。')
         def synthesize(data, token):
             self.tts_provider.configure(settings)
-            return generate_audio(data, self.tts_provider, token, segment_id=identifier, force=force)
+            errors=generate_audio(data, self.tts_provider, token, segment_id=identifier, force=force)
+            from services.roundup_sync import align_draft
+            from ai.qwen_aligner import QwenForcedAligner
+            aligner=data.get('aligner',{})
+            if aligner.get('python') and aligner.get('model'):
+                self.tts_provider.unload()
+                align_draft(data,QwenForcedAligner(aligner,self.tts_state_changed.emit),token,segment_id=identifier)
+            else:
+                for s in data['segments']:
+                    if not identifier or s['id']==identifier:s['alignment_error']='尚未配置强制对齐模型，保留配音并使用段落级展示'
+            return errors
         self._start_job('audio', synthesize, deepcopy(self.draft))
 
     def _tts_state(self, message):
         self.voice_info.setText(message)
-        if self.worker is not None and self._job_kind in ('audio', 'unload'):
+        if self.worker is not None and self._job_kind in ('audio', 'unload','align'):
             self.status.setText(message)
 
     def _unload_voice(self):
@@ -784,11 +898,13 @@ class LaunchRoundupDialog(ProductionComponent):
         self.worker.finished.connect(self._finished)
         self._busy_inputs(True)
         self.cancel.setEnabled(True)
-        self.status.setText('处理中：' + kind + '；可取消。语音加载/编码可能需要较长时间。')
+        self.status.setText('正在' + {'refresh':'刷新资料','script':'生成综述','segment':'重写段落','materials':'核对资料',
+            'polish':'润色口播','audio':'生成配音与对齐','align':'强制对齐','preview_audio':'准备音画预览','export':'导出','unload':'卸载语音模型'}.get(kind,'处理任务') + '，可取消。')
         self.worker.start()
         self.job_changed.emit()
 
     def _busy_inputs(self, busy):
+        self.include_all.setEnabled(not busy)
         if not getattr(self, 'workflow_embedded', False):
             self.tabs.setEnabled(not busy)
             return
@@ -816,7 +932,7 @@ class LaunchRoundupDialog(ProductionComponent):
         self._busy_inputs(False)
         self.cancel.setEnabled(False)
         try:
-            if kind in ('audio', 'materials'):
+            if kind in ('audio', 'materials','align'):
                 self.draft = worker.payload
                 self._show_segments(max(0, self._current))
                 if kind == 'materials':
@@ -843,14 +959,12 @@ class LaunchRoundupDialog(ProductionComponent):
             elif kind == 'materials':
                 self.status.setText('资料准备完成；原稿和人工编辑保留，请查看每项资料状态后再生成新稿。')
             elif kind == 'polish':
-                apply_polish(self.draft, worker.value)
-                selected_id = worker.value['updates'][0]['id']
-                self._show_segments(next(i for i, s in enumerate(self.draft['segments']) if s['id'] == selected_id))
-                self.text_tabs.setCurrentIndex(2)
-                self.status.setText('已润色所选朗读文字并保留前后版本；事实、屏幕文字和其他段落未改。机器复核不等于人工确认，实际口播时长未测量。')
+                self._review_narration(worker.value, '润色口播')
             elif kind == 'audio':
                 errors = worker.value or []
                 self.status.setText('配音完成' if not errors else '部分段落失败：' + str(errors))
+                if not errors and any(s.get('alignment_error') for s in self.draft['segments']):
+                    self.status.setText('配音完成；部分段落待校准，可在“同步校准”中检查')
                 if getattr(self, '_play_after', None):
                     segment = next(s for s in self.draft['segments'] if s['id'] == self._play_after)
                     audio = current_audio(self.draft, segment)
@@ -858,6 +972,10 @@ class LaunchRoundupDialog(ProductionComponent):
                         self._play(audio['path'])
             elif kind == 'unload':
                 self.status.setText('语音模型已卸载；下次生成时按需加载')
+            elif kind == 'align':
+                self.status.setText('对齐完成，请试听检查切换点' if not worker.value else '部分段落待校准；配音保留，请打开同步校准查看原因')
+            elif kind == 'preview_audio':
+                self.preview_ready.emit(worker.value)
             elif kind == 'export':
                 self.last_export_path=str(worker.value)
                 self.status.setText('已导出：' + str(worker.value) + '（无完整配音时不生成整段WAV/SRT）')

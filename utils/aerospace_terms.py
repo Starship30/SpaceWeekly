@@ -16,9 +16,11 @@ def load_terms() -> dict[str, str]:
 
 
 def save_terms(terms: dict[str, str]) -> None:
+    original = load_dictionary()
     save_dictionary(
         {
-            source: {"translation": translation, "type": "term"}
+            source: dict(original.get(source, {}), translation=translation,
+                         type=original.get(source, {}).get('type', 'term'), human_status='confirmed')
             for source, translation in terms.items()
         }
     )

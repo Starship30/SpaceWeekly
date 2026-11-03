@@ -1,0 +1,2 @@
+# Install only in the independent forced-alignment environment.
+qwen-asr

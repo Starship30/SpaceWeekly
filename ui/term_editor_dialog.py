@@ -1,3 +1,4 @@
+from ui.component import SegmentedTabs,configure_table
 from PySide6.QtWidgets import QDialog
 from PySide6.QtWidgets import QDialogButtonBox
 from PySide6.QtWidgets import QHBoxLayout
@@ -8,6 +9,7 @@ from PySide6.QtWidgets import QTableWidget
 from PySide6.QtWidgets import QTableWidgetItem
 from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QPlainTextEdit
+from PySide6.QtWidgets import QLineEdit, QTabWidget, QWidget
 from PySide6.QtCore import Qt
 import json
 
@@ -18,8 +20,12 @@ from translator.dictionary import load_dictionary
 from translator.dictionary import load_pending_terms
 from translator.dictionary import remove_pending_term
 from translator.dictionary import save_dictionary
+from translator.dictionary import save_pending_terms
 from translator.translator import Translator
 from services.launch_research import load_launch_research, confirm_launch, request_recheck
+
+TERM_TYPES = {'mission':'任务','rocket':'火箭','organization':'机构','location':'发射场',
+              'orbit':'轨道','status':'状态','term':'术语'}
 
 
 class TermEditorDialog(QDialog):
@@ -33,6 +39,7 @@ class TermEditorDialog(QDialog):
         self.setWindowTitle(tr("terms.editor"))
         self.resize(760, 500)
         self.table = QTableWidget(0, 3)
+        configure_table(self.table)
         self.table.setHorizontalHeaderLabels(
             [tr("terms.original"), tr("terms.translation"), tr("terms.type")]
         )
@@ -41,6 +48,7 @@ class TermEditorDialog(QDialog):
         )
         self._load_rows()
         self.launch_table = QTableWidget(0, 5)
+        configure_table(self.launch_table)
         self.launch_table.setHorizontalHeaderLabels(['LL2 ID', '英文任务名', '中文名（可纠正）', '中文简介（可纠正）', '资料 / 人工状态'])
         self.launch_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._load_launches()
@@ -48,7 +56,12 @@ class TermEditorDialog(QDialog):
 
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
-        layout.addWidget(self.table)
+        self.search=QLineEdit();self.search.setPlaceholderText('查询原文或中文名称')
+        self.search.textChanged.connect(self._filter)
+        layout.addWidget(self.search)
+        tabs=SegmentedTabs();layout.addWidget(tabs,1)
+        terms=QWidget();terms_layout=QVBoxLayout(terms);terms_layout.addWidget(self.table)
+        tabs.addTab(terms,'术语词典与待确认候选')
         actions = QHBoxLayout()
 
         for label, handler in [
@@ -62,22 +75,30 @@ class TermEditorDialog(QDialog):
             actions.addWidget(button)
 
         actions.addStretch(1)
-        layout.addLayout(actions)
-        layout.addWidget(self.launch_table)
+        terms_layout.addLayout(actions)
+        launches=QWidget();launch_layout=QVBoxLayout(launches);launch_layout.addWidget(self.launch_table)
+        tabs.addTab(launches,'任务资料')
+        self.launch_table.setColumnHidden(0,True)
         launch_actions = QHBoxLayout()
         for label, handler in [('查看发射资料与出处', self._show_launch), ('人工确认任务资料', self._confirm_launch),
                                ('重新核对任务（下次生成）', self._recheck_launch)]:
             button = QPushButton(label)
             button.clicked.connect(handler)
             launch_actions.addWidget(button)
-        layout.addLayout(launch_actions)
+        launch_layout.addLayout(launch_actions)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText('保存')
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
         layout.addWidget(buttons)
+
+    def _filter(self,text):
+        for row in range(self.table.rowCount()):
+            self.table.setRowHidden(row,text.casefold() not in ' '.join(self._cell_text(row,c) for c in (0,1)).casefold())
 
     def _load_rows(self) -> None:
         self.original_entries = load_dictionary()
@@ -85,6 +106,8 @@ class TermEditorDialog(QDialog):
             self._append_row(source, entry["translation"], entry["type"])
 
         for source, entry in load_pending_terms().items():
+            if any(k.casefold() == source.casefold() for k in self.original_entries):
+                continue
             self.pending_sources.add(source)
             self._append_row(
                 source,
@@ -169,7 +192,7 @@ class TermEditorDialog(QDialog):
         prefix = self.pending_prefix if pending else ""
         self.table.setItem(row, 0, QTableWidgetItem(prefix + source))
         self.table.setItem(row, 1, QTableWidgetItem(translation))
-        self.table.setItem(row, 2, QTableWidgetItem(term_type))
+        self.table.setItem(row, 2, QTableWidgetItem(TERM_TYPES.get(term_type,term_type)))
 
     def _add_row(self) -> None:
         self._append_row()
@@ -253,10 +276,14 @@ class TermEditorDialog(QDialog):
 
     def _save(self) -> None:
         entries = {}
+        pending = load_pending_terms()
 
         for row in range(self.table.rowCount()):
             source = self._source(row)
             translation = self._cell_text(row, 1)
+            if source in self.pending_sources:
+                pending[source] = dict(pending.get(source, {}), translation=translation,
+                                       type=self._cell_text(row, 2) or 'term')
 
             if source and translation and source not in self.pending_sources:
                 entries[source] = {
@@ -269,6 +296,7 @@ class TermEditorDialog(QDialog):
                     entries[source]['human_status'] = 'confirmed'
 
         save_dictionary(entries)
+        save_pending_terms(pending)
         self.accept()
 
     def _source(self, row: int) -> str:
@@ -276,5 +304,5 @@ class TermEditorDialog(QDialog):
 
     def _cell_text(self, row: int, column: int) -> str:
         item = self.table.item(row, column)
-
-        return item.text().strip() if item is not None else ""
+        value = item.text().strip() if item is not None else ""
+        return {v:k for k,v in TERM_TYPES.items()}.get(value,value) if column == 2 else value

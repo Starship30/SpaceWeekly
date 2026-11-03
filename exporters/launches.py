@@ -79,12 +79,13 @@ def launch_fields(launch: Article) -> dict[str, str]:
         fields[key] = mission_display_name(fields[key])
     context = launch.launch_data
     if context:
-        from services.launch_research import confirmed_values
+        from services.launch_research import confirmed_values, display_names
         fields.update(context.get('display', {}))
         values = confirmed_values(context.get('research', {}), context)
-        if values.get('chinese_name'):
-            fields['mission_name'] = values['chinese_name']
-            fields['name'] = fields['rocket'] + ' | ' + values['chinese_name']
+        names = display_names(context)
+        fields.update(rocket=names['rocket'], provider=names['provider'], pad=names['pad_name'] or names['site'], orbit=names['orbit'])
+        fields['mission_name'] = names['name']
+        fields['name'] = fields['rocket'] + ' | ' + names['name']
         if values.get('summary'):
             fields['mission_description'] = values['summary']
     fields["status"] = launch_status_text(fields["status"])

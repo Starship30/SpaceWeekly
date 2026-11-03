@@ -45,6 +45,19 @@ class LaunchPayloadTests(unittest.TestCase):
         self.assertNotEqual(item['summary'], item['launch']['payload'])
         self.assertEqual(mission_search_keywords(item)[0], RAW['mission']['name'])
 
+    def test_context_keeps_explicit_reuse_and_booster_recovery_separate_from_capsules(self):
+        self.raw['rocket']['configuration']['reusable']=True
+        self.raw['rocket']['launcher_stage']=[dict(launcher=dict(serial_number='TEST'),landing=dict(attempt=True,success=None))]
+        self.raw['rocket']['spacecraft_stage']=[dict(spacecraft=dict(name='Capsule'),landing=dict(attempt=True,success=True))]
+        context=launches.launch_context(self.raw)
+        self.assertTrue(context['rocket_reusable'])
+        self.assertEqual(context['rocket_recovery'],'TEST: 结果待确认')
+        self.assertIn('成功',context['recovery'])
+        self.raw['rocket']['configuration']['reusable']=False
+        self.assertFalse(launches.launch_context(self.raw)['rocket_reusable'])
+        del self.raw['rocket']['configuration']['reusable']
+        self.assertNotIn('rocket_reusable',launches.launch_context(self.raw))
+
     def test_explicit_payload_records_use_amount_and_description_or_type(self):
         self.raw['rocket']['payloads'] = [
             dict(amount=3, payload=dict(name='FictionalSat', description='Weather observations.')),

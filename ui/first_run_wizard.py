@@ -24,6 +24,9 @@ class FirstRunWizard(QWizard):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
+        self.resize(760,520)
+        self.setMinimumSize(680,460)
         self.workspace: Path | None = None
         self.language = _detect_system_language()
         set_language(self.language)
@@ -43,6 +46,11 @@ class FirstRunWizard(QWizard):
         self.language = language
         set_language(language)
         self.retranslate()
+
+    def reject(self):
+        if self.workspace_page.worker:
+            self.workspace_page.worker.token.cancel();self.workspace_page.cancel_after=True;return
+        super().reject()
 
     def retranslate(self) -> None:
         self.setWindowTitle(tr("first.run.title"))
@@ -126,6 +134,7 @@ class _WorkspacePage(QWizardPage):
         self.create_button.clicked.connect(self._create_folder)
         self.note = QLabel()
         self.note.setWordWrap(True)
+        self.worker=None;self.cancel_after=False
 
         path_row = QHBoxLayout()
         path_row.addWidget(self.path_edit, 1)
@@ -135,6 +144,8 @@ class _WorkspacePage(QWizardPage):
         layout = QVBoxLayout(self)
         layout.addLayout(path_row)
         layout.addWidget(self.note)
+        self.import_button=QPushButton('从旧便携版或工作区导入（先选择空的目标目录）')
+        self.import_button.clicked.connect(self._import);layout.addWidget(self.import_button)
         layout.addStretch(1)
 
     def retranslate(self) -> None:
@@ -144,6 +155,7 @@ class _WorkspacePage(QWizardPage):
         self.note.setText(tr("wizard.workspace.note"))
 
     def validatePage(self) -> bool:
+        if self.worker:return False
         raw_workspace = self.path_edit.text().strip()
 
         if not raw_workspace:
@@ -157,11 +169,27 @@ class _WorkspacePage(QWizardPage):
                 workspace,
                 language=self._wizard.language,
             )
-        except OSError:
+        except (OSError,ValueError):
             self._show_error(tr("wizard.error.not.writable"))
             return False
 
         return True
+
+    def _import(self):
+        if self.worker:return
+        source=QFileDialog.getExistingDirectory(self,'选择含 config.json 的旧数据目录')
+        if not source:return
+        from services.workspace_import import import_data
+        from ui.launch_roundup_dialog import RoundupWorker
+        self.worker=RoundupWorker(lambda _,token:import_data(source,self.path_edit.text().strip(),token),{},self)
+        self.worker.finished.connect(self._import_finished);self.import_button.setEnabled(False);self.path_edit.setEnabled(False)
+        self.note.setText('正在备份并导入，原目录会保留；取消将等待当前复制安全结束。');self.worker.start()
+
+    def _import_finished(self):
+        worker=self.worker;self.worker=None;self.import_button.setEnabled(True);self.path_edit.setEnabled(True)
+        self.note.setText('导入失败，原目录与已完成备份保留：'+worker.error if worker.error else '已取消，原目录保留' if worker.cancelled else '已备份并导入，可点击下一步打开工作区。')
+        worker.deleteLater()
+        if self.cancel_after:self._wizard.reject()
 
     def _browse(self) -> None:
         folder = QFileDialog.getExistingDirectory(

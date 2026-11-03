@@ -1,5 +1,6 @@
 import logging
 import re
+from copy import deepcopy
 from dataclasses import replace
 from datetime import date
 from datetime import timedelta
@@ -37,7 +38,7 @@ from services.feed_manager import enabled_feeds
 from services.prompt_manager import find_preset
 from services.prompt_manager import prompt_value, render_prompt
 from services.news_dates import verify_news_dates
-from services.launch_research import LaunchResearchService, confirmed_values
+from services.launch_research import LaunchResearchService, confirmed_values, display_names
 from services.settings import AppSettings
 from services.settings import apply_settings
 from services.settings import load_settings
@@ -66,8 +67,9 @@ def generate_weekly(
     set_language(settings.language)
     logger.setLevel(logging.DEBUG if not settings.release_mode else logging.NOTSET)
     apply_settings(settings)
-    if prepared and prepared.get('source_scope') and prepared['source_scope']!=prepared_scope(settings):
+    if prepared and not prepared_scope_matches(prepared.get('source_scope'), settings):
         raise ValueError('资料日期范围已变化；请重新采集或恢复原范围，未隐式刷新资料')
+    source_scope = deepcopy(prepared['source_scope']) if prepared and prepared.get('source_scope') else prepared_scope(settings)
     logger.info("SpaceWeekly v%s", app_version())
     logger.info("AI Model: %s", settings.deepseek_model or "-")
 
@@ -85,7 +87,7 @@ def generate_weekly(
         selected_feeds = feeds if feeds is not None else enabled_feeds()
     markdown_enabled = _enabled(export_markdown_enabled, settings.export_markdown)
     word_enabled = _enabled(export_word_enabled, settings.export_word)
-    date_range = _date_range(settings)
+    date_range = tuple(source_scope['news']) if source_scope['news'] else None
     web_feeds = [feed for feed in selected_feeds if SpaceComWebProvider.handles(feed.rss)]
     api_feeds = [feed for feed in selected_feeds if SpaceflightNewsProvider.handles(feed.rss)]
     launch_video_items = [] if settings.export_premiere or collect_only or defer_exports else None
@@ -140,7 +142,7 @@ def generate_weekly(
         if result_callback:
             result_callback(dict(articles=parsed_articles, launch_articles=launch_articles,
                                  launch_video_items=launch_video_items or [], summaries={}, assessments={}, context=None,
-                                 source_scope=prepared_scope(settings)))
+                                 source_scope=source_scope))
         return parsed_articles
 
     preset = find_preset(settings.prompt_preset)
@@ -205,7 +207,7 @@ def generate_weekly(
         if result_callback:
             result_callback(dict(articles=selected_articles, launch_articles=launch_articles,
                                  launch_video_items=launch_video_items or [], summaries=ai_summaries,
-                                 assessments=assessments, context=context,source_scope=prepared_scope(settings)))
+                                 assessments=assessments, context=context,source_scope=source_scope))
     else:
         _export_reports(
             selected_articles,
@@ -230,8 +232,35 @@ def prepared_scope(settings):
     if settings.launch_range!='disabled':
         params=_query_params(100,settings.launch_range,start_date=settings.launch_start_date,
                              end_date=settings.launch_end_date,display_timezone=settings.display_timezone)
-        launches={k:params.get(k) for k in ('net__gte','net__lt')}
-    return dict(news=list(news) if news else None,launches=launches,timezone=settings.display_timezone)
+        launches={k:params[k] for k in ('net__gte','net__lt','net__lte') if k in params}
+    return dict(news=list(news) if news else None,launches=launches,timezone=settings.display_timezone,
+                launch_range=settings.launch_range)
+
+
+def prepared_scope_matches(scope, settings):
+    """Compare date selections without treating elapsed seconds as a user edit."""
+    if not scope:
+        return True
+    expected = prepared_scope(settings)
+    if any(scope.get(key) != expected[key] for key in ('news', 'timezone')):
+        return False
+    if scope.get('launch_range', settings.launch_range) != settings.launch_range:
+        return False
+    stored, current = scope.get('launches'), expected['launches']
+    if not stored or not current or settings.launch_range == 'custom':
+        return stored == current
+    if 'launch_range' in scope and set(stored) != set(current):
+        return False
+    from utils.time import _timezone
+    tz = _timezone(settings.display_timezone)
+    # Old drafts omitted the rolling upper bound and stored net__lt=None.
+    for key in ('net__gte', 'net__lt', 'net__lte'):
+        if key != 'net__gte' and stored.get(key) is None and (key not in current or 'launch_range' not in scope):
+            continue
+        first, last = parse_datetime(stored.get(key)), parse_datetime(current.get(key))
+        if first is None or last is None or first.astimezone(tz).date() != last.astimezone(tz).date():
+            return False
+    return True
 
 
 def get_news(
@@ -320,6 +349,7 @@ def _fetch_launch_articles(
 
 def _news_from_feed_item(feed: FeedSource, item, url: str) -> News:
     from bs4 import BeautifulSoup
+    from services.news_images import feed_candidates
 
     summary = BeautifulSoup(
         str(getattr(item, "summary", "")),
@@ -331,6 +361,7 @@ def _news_from_feed_item(feed: FeedSource, item, url: str) -> News:
         published=str(getattr(item, "published", "")),
         summary=summary,
         url=url,
+        images=feed_candidates(item,url),
     )
 
 
@@ -367,6 +398,8 @@ def _deduplicate_articles(articles: list[Article], cancel_token: CancellationTok
         if previous is None and title_match is not None and title_match.news.source != news.source:
             previous = title_match
         if previous is not None:
+            from services.news_images import candidates
+            previous.news.images=candidates(previous.news.images+news.images,previous.news.url)
             if url:
                 by_url[url] = previous
             logger.info("重复新闻跳过：%s %s；保留 %s %s", news.source, news.url, previous.news.source, previous.news.url)
@@ -431,6 +464,10 @@ def _parse_article(
         logger.warning("HTML 获取失败 %s %s，使用 RSS Summary 回退", news.url, exc)
         return _rss_summary_article(news)
 
+    if not news.images:
+        from services.news_images import page_candidates
+        try:news.images=page_candidates(html,news.url)
+        except (ValueError,TypeError):logger.warning('原文配图提取失败，继续解析新闻：%s',news.url)
     try:
         article = parser(news, html)
         cancel_token.check()
@@ -723,7 +760,10 @@ def _localize_launch_video_items(items, translator, cancel_token):
         context = record.get('launch_context')
         if context and getattr(getattr(translator, 'settings', None), 'language', 'zh_CN') == 'zh_CN':
             values = confirmed_values(context.get('research', {}), context)
-            record['summary'] = values.get('chinese_name') or context['english_name']
+            names = display_names(context)
+            record['summary'] = names['name']
+            record['title'] = names['rocket']
+            record['launch'].update(site=names['site'], orbit=names['orbit'])
             if values.get('summary'):
                 record['launch']['description_zh'] = values['summary']
         if translator is None:

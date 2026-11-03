@@ -516,8 +516,21 @@ class _WindowsJob:
         self.api.TerminateJobObject.restype = wintypes.BOOL
         self.api.CloseHandle.argtypes = [wintypes.HANDLE]
         self.api.CloseHandle.restype = wintypes.BOOL
+        class BasicLimits(ctypes.Structure):
+            _fields_=[('process_time',ctypes.c_longlong),('job_time',ctypes.c_longlong),('flags',wintypes.DWORD),
+                ('minimum_working_set',ctypes.c_size_t),('maximum_working_set',ctypes.c_size_t),
+                ('process_limit',wintypes.DWORD),('affinity',ctypes.c_size_t),('priority',wintypes.DWORD),('scheduling',wintypes.DWORD)]
+        class IoCounters(ctypes.Structure):
+            _fields_=[(name,ctypes.c_ulonglong) for name in ('read_ops','write_ops','other_ops','read_bytes','write_bytes','other_bytes')]
+        class ExtendedLimits(ctypes.Structure):
+            _fields_=[('basic',BasicLimits),('io',IoCounters),('process_memory',ctypes.c_size_t),
+                ('job_memory',ctypes.c_size_t),('peak_process_memory',ctypes.c_size_t),('peak_job_memory',ctypes.c_size_t)]
+        self.api.SetInformationJobObject.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD]
+        self.api.SetInformationJobObject.restype=wintypes.BOOL
         self.handle = self.api.CreateJobObjectW(None, None)
-        if self.handle and not self.api.AssignProcessToJobObject(self.handle, int(process._handle)):
+        limits=ExtendedLimits();limits.basic.flags=0x2000  # Kill the child tree when a crashed app loses its last job handle.
+        if self.handle and (not self.api.SetInformationJobObject(self.handle,9,ctypes.byref(limits),ctypes.sizeof(limits))
+                or not self.api.AssignProcessToJobObject(self.handle, int(process._handle))):
             self.api.CloseHandle(self.handle)
             self.handle = None
 
@@ -525,9 +538,28 @@ class _WindowsJob:
         if self.handle:
             self.api.TerminateJobObject(self.handle, 1)
 
+    def wait(self,timeout=10) -> None:
+        if not self.handle:return
+        import ctypes
+        from ctypes import wintypes
+        class Accounting(ctypes.Structure):
+            _fields_=[(n,ctypes.c_longlong) for n in ('user','kernel','period_user','period_kernel')]+[
+                (n,wintypes.DWORD) for n in ('faults','total','active','terminated')]
+        self.api.QueryInformationJobObject.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD,ctypes.c_void_p]
+        self.api.QueryInformationJobObject.restype=wintypes.BOOL
+        deadline=time.monotonic()+timeout
+        while True:
+            info=Accounting()
+            if not self.api.QueryInformationJobObject(self.handle,1,ctypes.byref(info),ctypes.sizeof(info),None):
+                raise OSError(ctypes.get_last_error(),'无法确认子进程树已退出')
+            if not info.active:return
+            if time.monotonic()>=deadline:raise RuntimeError('未确认全部子进程退出，请重试停止')
+            time.sleep(.05)
+
     def close(self) -> None:
         if self.handle:
             self.terminate()
+            self.wait()
             self.api.CloseHandle(self.handle)
             self.handle = None
 
@@ -554,12 +586,12 @@ def _stop_process(process: subprocess.Popen, job=None) -> None:
 
 def _run_process(command: list[str], cancel_check: CancelCheck,
                  on_line: Callable[[str], None], timeout: float | None = None,
-                 input_text: str | None = None, secret_values=()) -> None:
+                 input_text: str | None = None, secret_values=(), env=None) -> None:
     cancel_check()
     options = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {'start_new_session': True}
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-        text=True, encoding='utf-8', errors='replace', **options)
+        text=True, encoding='utf-8', errors='replace', env=env, **options)
     job = _WindowsJob(process) if os.name == 'nt' else None
     lines: Queue = Queue()
     errors = deque(maxlen=8)

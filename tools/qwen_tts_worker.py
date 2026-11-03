@@ -9,6 +9,7 @@ class QwenRuntime:
     def __init__(self):
         self.model = self.sf = self.torch = self.key = None
         self.load_count = 0
+        self.capabilities={}
 
     def _load(self, job):
         import torch
@@ -22,6 +23,7 @@ class QwenRuntime:
 
     def release(self):
         self.model, self.key = None, None
+        self.capabilities={}
         gc.collect()
         if self.torch is not None and self.torch.cuda.is_available():
             self.torch.cuda.empty_cache()
@@ -48,6 +50,8 @@ class QwenRuntime:
         speakers = self.model.get_supported_speakers() or []
         if speakers and job['voice'].casefold() not in {v.casefold() for v in speakers}:
             raise ValueError('Unsupported speaker: ' + job['voice'])
+        self.capabilities=dict(speakers=speakers,style=config.get('tts_model_size')=='1b7',device=job['device'])
+        notify('ready')
         notify('generating')
         wavs, rate = self.model.generate_custom_voice(text=job['text'], language='Chinese', speaker=job['voice'],
                                                     **({'instruct': job['style']} if job.get('style') else {}))
@@ -55,6 +59,7 @@ class QwenRuntime:
 
 
 def serve():
+    sys.stdin.reconfigure(encoding='utf-8')
     runtime = QwenRuntime()
     try:
         for line in sys.stdin:
@@ -62,9 +67,10 @@ def serve():
             status = Path(job['status'])
             def notify(state, error=''):
                 # Append-only records avoid Windows replace/read sharing violations.
+                event=dict(id=job['id'],state=state,error=error,load_count=runtime.load_count,
+                    model_loaded=runtime.model is not None,capabilities=runtime.capabilities)
                 with status.open('a', encoding='utf-8') as handle:
-                    handle.write(json.dumps(dict(id=job['id'], state=state, error=error,
-                        load_count=runtime.load_count, model_loaded=runtime.model is not None), ensure_ascii=False) + '\n')
+                    handle.write(json.dumps(event,ensure_ascii=False)+'\n')
             try:
                 runtime.generate(job, notify)
                 notify('done')

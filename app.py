@@ -2,13 +2,10 @@ import ctypes
 import logging
 import sys
 
-from dependency_check import dependency_message
-from dependency_check import missing_dependencies
-from logging_config import setup_logging
-
-
 def main() -> None:
     """Start the SpaceWeekly desktop application."""
+    from dependency_check import dependency_message,missing_dependencies
+    from logging_config import setup_logging
     missing = missing_dependencies()
 
     if missing:
@@ -161,7 +158,7 @@ def main() -> None:
         assert isinstance(create_search_provider(replace(settings, web_search_provider='deepseek')),
                           DeepSeekSearchProvider)
         named = Translator(mode='hybrid', ai_callable=lambda *_: '西光肆号01星', web_search=False)
-        assert named.summarize_payload('Xiguang-4 01', 'Earth observation satellite.') == '西光肆号01星'
+        assert named.summarize_payload('Xiguang-4 01', 'Earth observation satellite.') == 'Earth observation satellite.', 'Unverified name was accepted without evidence'
         assert mission_display_name('Bandwagon 5（拼车任务）') == 'Bandwagon 5'
         checked('deepseek-search-and-verified-mission-names')
         assert video_cards.make_card(exported, 1)['status_lines'] == ['发射成功', '回收成功']
@@ -283,12 +280,20 @@ def main() -> None:
         return
 
     if needs_first_run_wizard():
+        from ui.theme import ThemeManager
+        startup_theme=ThemeManager(app);startup_theme.apply('system')
         wizard = FirstRunWizard()
 
-        if wizard.exec() != QDialog.DialogCode.Accepted:
+        result = wizard.exec()
+        startup_theme.deleteLater()
+        if result != QDialog.DialogCode.Accepted:
             return
 
     setup_logging()
+    if getattr(sys,'frozen',False):
+        from services.workspace_import import prepare_release
+        from resources import workspace_path
+        prepare_release(workspace_path())
     from ui.main_window import MainWindow
 
     window = MainWindow()
@@ -305,6 +310,10 @@ def _show_dependency_error(message: str) -> None:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
+    from services.release_startup import early_startup
+    if early_startup():sys.exit(0)
     try:
         main()
     except Exception:

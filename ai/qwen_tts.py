@@ -29,7 +29,7 @@ def capabilities(model_path):
 
 
 class QwenTTSProvider:
-    def __init__(self, settings, on_state=None):
+    def __init__(self, settings, on_state=None, *, acquire_environment=True):
         self.settings = dict(settings)
         self.on_state = on_state or (lambda message: None)
         self.process = None
@@ -37,12 +37,16 @@ class QwenTTSProvider:
         self._loaded = False
         self._lock = RLock()
         self.load_count = 0
+        self.runtime_info={};self.acquire_environment=acquire_environment;self._environment_lease=None
+        self._job=None
 
     @property
     def is_running(self):
         return self.process is not None and self.process.poll() is None
 
     def configure(self, settings):
+        from services.voice_storage import validate_voice_locations
+        validate_voice_locations(settings)
         self.settings = dict(settings)
 
     def unload(self, *, force=False):
@@ -53,14 +57,15 @@ class QwenTTSProvider:
                 self.on_state('正在终止当前生成并卸载模型' if force else '正在卸载语音模型')
                 try:
                     if force:
-                        process.kill()
+                        from services.video_download import _stop_process
+                        _stop_process(process,self._job)
                     elif process.stdin is not None:
                         process.stdin.close()
                     try:
                         process.wait(timeout=1)
                     except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
+                        from services.video_download import _stop_process
+                        _stop_process(process,self._job)
                 except (OSError, subprocess.TimeoutExpired) as error:
                     if process.poll() is None:
                         self.on_state('停止尚未确认，工作进程仍在运行，请重试卸载')
@@ -71,12 +76,16 @@ class QwenTTSProvider:
                 except OSError:
                     pass
             self.process, self._loaded, self._worker_key = None, False, None
+            if self._job is not None:self._job.close();self._job=None
             if self._log is not None:
                 self._log.close()
                 self._log = None
             if self._runtime is not None:
-                self._runtime.cleanup()
+                try:self._runtime.cleanup()
+                except OSError:self.on_state('语音进程已退出，临时日志暂未清理；音频已保留')
                 self._runtime = None
+            if self._environment_lease is not None:
+                self._environment_lease.__exit__(None,None,None);self._environment_lease=None
             self.on_state('语音模型已卸载；下次生成时按需加载')
 
     def _start(self, info, output_dir):
@@ -94,13 +103,19 @@ class QwenTTSProvider:
         if self.is_running and key == self._worker_key:
             return
         self.unload()
-        self._runtime = tempfile.TemporaryDirectory(dir=output_dir)
+        if self.acquire_environment:
+            from services.voice_storage import environment_guard
+            self._environment_lease=environment_guard(self.settings['python']);self._environment_lease.__enter__()
+        self._runtime = tempfile.TemporaryDirectory(dir=output_dir,ignore_cleanup_errors=True)
         self._log = (Path(self._runtime.name) / 'worker.log').open('w+b')
         env = dict(os.environ, HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', PYTHONUTF8='1')
         try:
-            self.process = subprocess.Popen([str(python.resolve()), '-I', str(worker), '--serve'],
+            self.process = subprocess.Popen([str(python.resolve()), '-I', '-X', 'utf8', str(worker), '--serve'],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self._log, env=env,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            if os.name=='nt':
+                from services.video_download import _WindowsJob
+                self._job=_WindowsJob(self.process)
             self._worker_key, self.load_count = key, 0
         except BaseException:
             self.unload(force=True)
@@ -119,13 +134,15 @@ class QwenTTSProvider:
         inflight = False
         try:
             cancel_check()
+            from services.voice_storage import validate_voice_locations
+            validate_voice_locations(self.settings)
             info = capabilities(self.settings['model'])
             if request.style and not info['style']:
                 raise ValueError('当前模型不支持风格指令；0.6B 请留空')
             if info['speakers'] and request.voice.casefold() not in {s.casefold() for s in info['speakers']}:
                 raise ValueError('说话人不在当前模型支持列表中')
             self._start(info, Path(output_path).parent)
-            with tempfile.TemporaryDirectory(dir=Path(output_path).parent) as directory:
+            with tempfile.TemporaryDirectory(dir=Path(output_path).parent,ignore_cleanup_errors=True) as directory:
                 identifier = uuid4().hex
                 status = Path(directory) / 'status.jsonl'
                 payload = dict(asdict(request), id=identifier, model=info['model'],
@@ -145,9 +162,11 @@ class QwenTTSProvider:
                             raise RuntimeError('语音工作进程响应 ID 不匹配')
                         self.load_count = event.get('load_count', self.load_count)
                         self._loaded = bool(event.get('model_loaded'))
+                        if event.get('capabilities'):self.runtime_info=event['capabilities']
                         state = event.get('state')
                         if state != previous:
                             self.on_state({'loading': '正在加载语音模型', 'generating': '模型已就绪，正在生成音频',
+                                'ready':'模型已加载，音色已读取',
                                 'done': '本段生成完成；模型驻留，可继续复用', 'error': '本段生成失败'}.get(state, str(state)))
                             previous = state
                         if state == 'done':

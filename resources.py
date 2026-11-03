@@ -15,6 +15,7 @@ WRITABLE_ROOTS = {
     "prompts",
     "config",
     "translator",
+    "news-images",
 }
 _WORKSPACE_PATH: Path | None = None
 
@@ -63,12 +64,22 @@ def default_workspace_path() -> Path:
 
 def workspace_pointer_path() -> Path:
     """Return the user-scoped file that remembers the selected workspace."""
+    return app_data_directory()/"workspace.json"
+
+
+def app_data_directory() -> Path:
     base = os.getenv("APPDATA") or os.getenv("XDG_CONFIG_HOME")
+    name='SpaceWeekly'
+    manifest=bundled_resource_path('release.json')
+    if getattr(sys,'frozen',False) and manifest.exists():
+        try:
+            if json.loads(manifest.read_text(encoding='utf-8')).get('qa'):name='SpaceWeekly-QA'
+        except (OSError,ValueError):pass
 
     if base:
-        return Path(base) / "SpaceWeekly" / "workspace.json"
+        return Path(base) / name
 
-    return Path.home() / ".spaceweekly" / "workspace.json"
+    return Path.home() / ('.'+name.lower())
 
 
 def workspace_path() -> Path | None:
@@ -128,7 +139,8 @@ def clear_workspace_path() -> None:
 
 
 def _writable_path(*parts: str) -> Path:
-    target = Path(sys.executable).resolve().parent.joinpath(*parts)
+    # Installed version directories are replaced by the updater, including on uninstall.
+    target = app_data_directory().joinpath('unconfigured',*parts)
 
     if target.exists():
         return target

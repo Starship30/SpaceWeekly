@@ -287,7 +287,7 @@ def launch_context(item: dict) -> dict:
     if isinstance(countries, dict):
         countries = [countries]
     operator_country = ', '.join(c['name'] for c in countries if isinstance(c, dict) and isinstance(c.get('name'), str)) if isinstance(countries, list) else ''
-    return dict(ll2_id=_text(item.get('id')), english_name=_nested_text(item, 'mission', 'name')
+    context = dict(ll2_id=_text(item.get('id')), english_name=_nested_text(item, 'mission', 'name')
                 or _text(item.get('name')), launch_name=_text(item.get('name')),
                 record_url=_text(item.get('url')),
                 net=_text(item.get('net')), rocket=_nested_text(item, 'rocket', 'configuration', 'full_name'),
@@ -302,6 +302,13 @@ def launch_context(item: dict) -> dict:
                 description=_nested_text(item, 'mission', 'description'), payload=_payload_text(item),
                 orbit=_nested_text(item, 'mission', 'orbit', 'name'),
                 **links)
+    reusable = _nested_value(item, 'rocket', 'configuration', 'reusable')
+    if type(reusable) is bool:
+        context['rocket_reusable'] = reusable
+    rocket = item.get('rocket')
+    if isinstance(rocket, dict) and isinstance(rocket.get('launcher_stage'), list):
+        context['rocket_recovery'] = recovery_text({'rocket': {'launcher_stage': rocket['launcher_stage']}})
+    return context
 
 
 def _launch_url(item: dict) -> str:

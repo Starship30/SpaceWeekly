@@ -230,7 +230,7 @@ class PolishTests(unittest.TestCase):
         self.assertEqual(dialog.draft['segments'][1]['screen'],before['screen'])
         self.assertFalse(dialog.draft['segments'][1]['narration']['human_confirmed'])
         self.assertEqual(dialog.draft['segments'][1]['narration']['source_refs'][0]['support_review'],'manual_edit_unreviewed')
-        self.assertEqual(dialog.tasks.columnCount(),12)
+        self.assertEqual(dialog.tasks.columnCount(),14)
         self.assertEqual(dialog.segment_list.selectionMode(),QAbstractItemView.SelectionMode.ExtendedSelection)
         self.assertIn('润色选中段口播',[b.text() for b in dialog.findChildren(QPushButton)])
 

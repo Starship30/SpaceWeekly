@@ -24,6 +24,10 @@ def validate_session(value):
         raise ValueError('Invalid voice configuration')
     if not isinstance(draft['tts'].get('timeout',600),(int,float)) or not 1<=draft['tts'].get('timeout',600)<=7200:
         raise ValueError('Invalid voice timeout')
+    from services.roundup_sync import validate_aligner
+    validate_aligner(draft.get('aligner',{}))
+    from tools.roundup_visuals import visual_settings
+    visual_settings(draft)
     if not isinstance(draft['pronunciations'],dict) or draft.get('target_seconds') not in (60,90,120) or not 0<=float(draft.get('pause_seconds',.3))<=3:
         raise ValueError('Invalid production timing/voice rules')
     if not isinstance(draft['snapshot'].get('items'),list) or not isinstance(draft['selection'],list) or not isinstance(draft['segments'],list):
@@ -38,11 +42,25 @@ def validate_session(value):
             or not isinstance(segment.get('spoken'),str) or not isinstance(segment.get('screen'),str)
             or not isinstance(segment.get('task_ids'),list)):
             raise ValueError('Invalid paragraph')
+        from services.roundup_sync import validate_unit_structure
+        validate_unit_structure(segment)
     restored=restore_news(value.get('news',{}).get('bundle'))
+    selected=value.get('news',{}).get('script_included')
+    if selected is not None:
+        urls={a.news.url for a in restored['articles']} if restored else set()
+        if not isinstance(selected,list) or any(not isinstance(url,str) for url in selected) or not set(selected)<=urls:
+            raise ValueError('新闻稿件选择无效')
+    from services.news_voice import validate as validate_voice
+    voices=value.get('news',{}).get('voices',{})
+    if not isinstance(voices,dict):raise ValueError('新闻配音草稿列表无效')
+    for identifier,draft_voice in voices.items():
+        validate_voice(draft_voice)
+        if identifier!=draft_voice['news_id']:raise ValueError('新闻配音身份无效')
     if restored and any(not isinstance(getattr(a.news,key),str) for a in restored['articles'] for key in ('title','summary','source','published','url')):
         raise ValueError('Invalid news fields')
     cards=value.get('cards',{}).get('data')
     if cards:validate_snapshot(deepcopy(cards))
+    if value.get('cards',{}).get('sort_order','asc') not in ('input','asc','desc'):raise ValueError('素材排序无效')
     if not isinstance(value.get('daily',{}),dict) or not isinstance(value.get('view',{}),dict):
         raise ValueError('Invalid production controls')
     from services.settings import default_settings
@@ -97,6 +115,9 @@ def prepare_news(feeds, token, *, prepared=None, collect_only=False):
                    export_word_enabled=False, cancel_token=token, prepared=prepared,
                    collect_only=collect_only, defer_exports=True, result_callback=result.append)
     token.check()
+    if not collect_only:
+        from services.news_images import collect
+        collect(result[0]['articles'],token)
     return result[0]
 
 
@@ -107,9 +128,9 @@ def export_news(bundle, settings, token):
     from exporters.premiere import export_premiere
     from services.settings import apply_settings
     from services.weekly_report import _export_context
-    from services.weekly_report import prepared_scope
+    from services.weekly_report import prepared_scope_matches
     token.check()
-    if bundle.get('source_scope') and bundle['source_scope']!=prepared_scope(settings):
+    if not prepared_scope_matches(bundle.get('source_scope'), settings):
         raise ValueError('资料日期范围已变化；请恢复稿件范围或重新采集后生成，导出不会隐式联网')
     if not any((settings.export_markdown,settings.export_word,settings.export_premiere,settings.export_sqlite)):
         raise ValueError('Choose at least one output format')

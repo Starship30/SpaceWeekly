@@ -1,5 +1,7 @@
 import json
 import re
+import shutil
+from uuid import uuid4
 from pathlib import Path
 
 from resources import bundled_resource_path
@@ -31,31 +33,31 @@ DEFAULT_DICTIONARY = {
 
 
 def load_dictionary() -> dict[str, dict[str, str]]:
-    path = _dictionary_path()
-
-    if path.exists():
-        entries = _read_entries(path, {})
-        for key, value in DEFAULT_DICTIONARY.items():
-            entries.setdefault(key, dict(value))
-            if entries[key]['translation'] == value['translation']:
-                for field, default in value.items():
-                    entries[key].setdefault(field, default)
-        return entries
-
+    # Resource defaults are a baseline; workspace edits and confirmed legacy terms win.
+    entries = {key: dict(value) for key, value in DEFAULT_DICTIONARY.items()}
+    bundled = bundled_resource_path("translator", "dictionary.json")
+    entries.update(_read_entries(bundled, {}))
+    defaults = {key.casefold(): value['translation'] for key, value in entries.items()}
     legacy = resource_path("config", "aerospace_terms.json")
-
-    if legacy.exists():
-        entries = _read_entries(legacy, DEFAULT_DICTIONARY)
-    else:
-        bundled = bundled_resource_path("translator", "dictionary.json")
-        entries = _read_entries(bundled, DEFAULT_DICTIONARY)
-
-    for key, value in DEFAULT_DICTIONARY.items():
-        entries.setdefault(key, dict(value))
-        if entries[key]['translation'] == value['translation']:
-            for field, default in value.items():
-                entries[key].setdefault(field, default)
-    save_dictionary(entries)
+    for source in (legacy, _dictionary_path()):
+        if not source.exists():
+            continue
+        # Never turn a damaged user dictionary into a new empty one.
+        raw = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("术语词典格式无效，请从备份恢复")
+        for key, entry in _normalize_entries(raw).items():
+            previous = next((k for k in entries if k.casefold() == key.casefold()), key)
+            if (entries.get(previous, {}).get('human_status') == 'confirmed'
+                    and entry.get('human_status') != 'confirmed'):
+                continue
+            if (entry.get('human_status') != 'confirmed' and previous in entries
+                    and entry['translation'] == defaults.get(key.casefold())
+                    and entries[previous]['translation'] != entry['translation']):
+                continue
+            if previous != key:
+                entries.pop(previous)
+            entries[key] = entry
     return entries
 
 
@@ -67,9 +69,11 @@ def load_pending_terms() -> dict[str, dict[str, str]]:
     path = _pending_path()
 
     if path.exists():
-        return _read_entries(path, {}, allow_empty=True)
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict):
+            raise ValueError('待确认术语格式无效，请从备份恢复')
+        return _normalize_entries(data, allow_empty=True)
 
-    save_pending_terms({})
     return {}
 
 
@@ -154,19 +158,14 @@ def dictionary_replace(
         if source.casefold() == original.casefold():
             return entry["translation"], True
 
-    translated = original
-    matched = False
-
-    for source in sorted(dictionary, key=len, reverse=True):
-        translated, count = re.subn(
-            re.escape(source),
-            dictionary[source]["translation"],
-            translated,
-            flags=re.IGNORECASE,
-        )
-        matched = matched or count > 0
-
-    return translated, matched
+    if not dictionary:
+        return original, False
+    folded = {k.casefold(): v['translation'] for k, v in dictionary.items()}
+    pattern = '|'.join(re.escape(k) for k in sorted(dictionary, key=len, reverse=True))
+    # One pass, at Latin word boundaries, preserves model numbers and replacement text.
+    translated, count = re.subn(r'(?<![A-Za-z0-9])(?:' + pattern + r')(?![A-Za-z0-9])',
+                               lambda m: folded[m.group().casefold()], original, flags=re.I)
+    return translated, bool(count)
 
 
 def exact_dictionary_translation(
@@ -244,7 +243,11 @@ def _normalize_entries(
 
 def _write_entries(path: Path, entries: dict[str, dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(entries, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    if path.exists() and path.name == 'dictionary.json':
+        shutil.copy2(path, path.with_name(path.name + '.backup-' + uuid4().hex[:8]))
+    temporary = path.with_name('.terms-' + uuid4().hex + '.tmp')
+    try:
+        temporary.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)

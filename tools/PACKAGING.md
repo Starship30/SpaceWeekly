@@ -1,6 +1,15 @@
 # Windows 精简打包
 
-当前应用版本为 3.0.3。下方保留此前 3.0.2 各构建的历史记录，旧发布文件不替换。精简构建保留现有应用功能。
+**当前 3.1.0 安装和更新流程见 [INSTALLER_UPDATES.md](INSTALLER_UPDATES.md)。**
+使用 `tools/build_installer.py` 生成 PyInstaller onedir、Velopack 安装器和更新源。
+以下各日期章节为旧便携版的历史验证记录，不代表本次安装版验收结果。
+
+语音自动部署的资源与存储规划见 [VOICE_SETUP.md](VOICE_SETUP.md)。spec 已包含部署清单、哈希锁文件、
+目标环境检查脚本及两个原有语音工作脚本；PyTorch、Qwen 和模型权重仍不进入桌面包。
+运行时下载到用户选择的专用目录，升级复用环境与模型，不能在 PyInstaller 内置解释器执行 pip。
+语音模型继续独立部署；本次安装与更新不打包模型。
+
+当前应用版本为 3.1.0。下方保留此前各构建的历史记录，旧发布文件不替换。
 
 Windows 构建使用 Python 3.12+，安装 requirements.txt、tools/requirements-video-download.txt 和 PyInstaller。3.12 起的工具查找行为用于防止工作目录中的同名程序覆盖包内工具；spec 会拒绝更旧的构建解释器。此要求仅针对 Windows 打包。
 将官方 yt-dlp 2026.08.19 的 yt-dlp.exe 与 LICENSE 放到 build/video-backend/，将 LICENSE 命名为 yt-dlp-LICENSE.txt。可用 SPACEWEEKLY_VIDEO_BACKEND 指定 EXE 的其他路径，许可文件需同目录。

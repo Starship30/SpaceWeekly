@@ -1,17 +1,17 @@
-"""Non-overwriting Premiere handoff packages, measured WAV timeline and paragraph SRT."""
+"""Non-overwriting handoff packages using the shared sample clock and calibrated subtitles."""
 from copy import deepcopy
 from datetime import datetime
-import math
 from pathlib import Path
 import shutil
 from uuid import uuid4
-import wave
 
 from services.launch_data import write_json
 from services.launch_roundup import (validate_draft, statistics, material_status, task_names,
                                     narration_text, current_narration, narration_sources)
-from services.roundup_audio import current_audio, wav_info, reading_text
+from services.roundup_audio import wav_info, reading_text,file_hash
+from services.roundup_reading import VERSION as READING_VERSION
 from services.roundup_style import timezone_label
+from services.roundup_sync import build_timeline, timeline_audio, VERSION as SYNC_VERSION
 from utils.output_files import reserved_output
 
 
@@ -23,31 +23,22 @@ def _srt_time(value):
     return f'{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}'
 
 
-def _merge(rows, directory, pause, token):
-    formats = [wav_info(directory / row['audio_file'])[1] for row in rows]
-    if len(set(formats)) != 1:
-        raise ValueError('段落采样率不同，请使用同一语音设置重新生成')
-    rate = formats[0]
-    with reserved_output(directory, '.narration.wav') as (final, temporary):
-        with wave.open(str(temporary), 'wb') as target:
-            target.setnchannels(1)
-            target.setsampwidth(2)
-            target.setframerate(rate)
-            for index, row in enumerate(rows):
-                with wave.open(str(directory / row['audio_file']), 'rb') as audio:
-                    while True:
-                        token.check()
-                        chunk = audio.readframes(65536)
-                        if not chunk:
-                            break
-                        target.writeframesraw(chunk)
-                if index + 1 < len(rows):
-                    target.writeframesraw(b'\x00\x00' * round(pause * rate))
-        token.check()
+def _mux(directory, manifest, token, *, opaque=False):
+    from services.media_process import run_media
+    concat=directory/'visuals.ffconcat'
+    concat.write_text(''.join("file '"+(directory/r['visual_file']).resolve().as_posix().replace("'","'\\''")+"'\n"
+        for r in manifest['segments']),encoding='utf-8')
+    with reserved_output(directory,'.mp4') as (final,temporary):
+        video_map=['-map','0:v:0']
+        if opaque:video_map=['-filter_complex','color=c=black:s=1920x1080:r=30[bg];[bg][0:v]overlay=shortest=1:format=auto[v]','-map','[v]']
+        run_media(['ffmpeg','-v','error','-y','-f','concat','-safe','0','-i',str(concat),'-i',str(directory/manifest['narration_file']),
+            *video_map,'-map','1:a:0','-c:v','libx264','-crf','18','-preset','fast','-pix_fmt','yuv420p',
+            '-c:a','aac','-t',str(manifest['timeline_seconds']),'-movflags','+faststart',str(temporary)],token)
     return final
 
 
 def export_package(draft, output_dir, token, *, visuals=True, renderer=None):
+    native_renderer=renderer is None
     validate_draft(draft)
     if not draft['segments']:
         raise ValueError('请先生成或编辑段落')
@@ -56,18 +47,26 @@ def export_package(draft, output_dir, token, *, visuals=True, renderer=None):
     token.check()
     directory = Path(output_dir) / ('SpaceWeekly_roundup_' + datetime.now().strftime('%Y%m%d_%H%M%S_') + uuid4().hex[:8])
     directory.mkdir(parents=True, exist_ok=False)
-    manifest = dict(version=1, state='exporting', subtitle_precision='paragraph', start=draft['start'], end=draft['end'],
+    timeline = build_timeline(draft)
+    manifest = dict(version=1, sync_version=SYNC_VERSION, state='exporting', subtitle_precision=timeline['precision'], start=draft['start'], end=draft['end'],
                     timezone=draft.get('timezone', 'Asia/Shanghai'), statistics=statistics(draft), segments=[], all_audio_current=False)
     states = {i['ll2_id']: material_status(i) for i in draft['snapshot']['items']}
     manifest['material_states'] = states
     write_json(directory / 'material_states.json', states)
     write_json(directory / 'draft.json', draft)
     write_json(directory / 'snapshot.json', draft['snapshot'])
+    write_json(directory / 'timeline.json', timeline)
+    manifest['timeline_file']='timeline.json'
+    from tools.roundup_visuals import shot_plan
+    shots=shot_plan(draft,timeline)
+    write_json(directory/'shots.json',shots)
+    manifest.update(visual_version=shots['version'],shots_file='shots.json',
+        visual_transitions=shots['transition_count'],short_shots=len(shots['short_shots']))
     if draft.get('writing_input'):
         write_json(directory / 'writing_input.json', draft['writing_input'])
     if draft.get('polish_history'):
         write_json(directory / 'polish_history.json', draft['polish_history'])
-    lines = ['# 每周发射综述', f"{timezone_label(draft)} {draft['start']} 至 {draft['end']}", '字幕精度：段落级；不提供逐字对齐。', '']
+    lines = ['# 每周发射综述', f"{timezone_label(draft)} {draft['start']} 至 {draft['end']}", '字幕与画面精度：'+timeline['precision']+'；不提供逐字动画。', '']
     for segment in draft['segments']:
         voice = current_narration(segment)
         reading_status = ('AI口播润色（机器复核，非人工确认）' if voice and voice.get('origin') == 'ai_polish' else
@@ -83,7 +82,8 @@ def export_package(draft, output_dir, token, *, visuals=True, renderer=None):
         lines += ['出处：' + s['url'] + '\n> ' + s['quote'] for s in narration_sources(segment)]
         lines += ['']
     (directory / 'script.md').write_text('\n'.join(lines), encoding='utf-8')
-    audio = [current_audio(draft, s) for s in draft['segments']]
+    timings = timeline['segments']
+    audio = [timing['audio'] for timing in timings]
     manifest['all_audio_current'] = all(a is not None for a in audio)
     cursor, srt = 0., []
     try:
@@ -92,8 +92,10 @@ def export_package(draft, output_dir, token, *, visuals=True, renderer=None):
             narration_status='current' if current_narration(s) else 'stale' if s.get('narration') else 'original',
             narration_origin=(current_narration(s) or {}).get('origin', 'original'),
             narration_review=(current_narration(s) or {}).get('review'),
-            source_refs=narration_sources(s), material_states={i: states[i] for i in s['task_ids']}) for s in draft['segments']]
-        write_json(directory / 'reading_map.json', dict(version=1, alignment_status='not_performed',
+            source_refs=narration_sources(s), material_states={i: states[i] for i in s['task_ids']},
+            units=clock.get('reading_units',s.get('units',[])),sync_status=clock['status']) for s,clock in zip(draft['segments'],timings)]
+        write_json(directory / 'reading_map.json', dict(version=3, reading_rules_version=READING_VERSION,
+            alignment_status=timeline['precision'] if any(r['units'] for r in timings) else 'not_performed',
             measured_audio=manifest['all_audio_current'], pronunciation_rules=draft['pronunciations'], segments=reading_rows))
         (directory / 'reading.txt').write_text('\n\n'.join(r['reading_text'] for r in reading_rows) + '\n', encoding='utf-8')
         (directory / 'reading_script.md').write_text('# 最终朗读稿\n\n' +
@@ -105,18 +107,17 @@ def export_package(draft, output_dir, token, *, visuals=True, renderer=None):
             renderer = render_segment
         for index, (segment, sound) in enumerate(zip(draft['segments'], audio)):
             token.check()
-            duration = sound['duration_seconds'] if sound else float(segment.get('preview_seconds', 12))
-            if not math.isfinite(duration) or not .1 <= duration <= 600:
-                raise ValueError('单段时长应为0.1至600秒')
-            pause = float(draft['pause_seconds']) if index + 1 < len(audio) else 0.
-            if sound:
-                # Match the silence that will actually be written to the WAV, down to one sample.
-                pause = round(pause * sound['sample_rate']) / sound['sample_rate']
+            clock=timings[index]
+            duration = clock['duration_samples']/timeline['sample_rate']
+            pause = clock['pause_samples']/timeline['sample_rate']
+            cursor = clock['start_seconds']
             row = dict(id=segment['id'], kind=segment['kind'], task_ids=segment['task_ids'], start_seconds=cursor,
                        script_origin=segment.get('origin', 'unknown'), edited=segment.get('edited', False),
                        generation_reason=segment.get('generation_reason', ''),
                        speech_end_seconds=cursor+duration, end_seconds=cursor+duration+pause,
-                       duration_seconds=duration, pause_seconds=pause, timing_source='audio' if sound else 'editable_preview',
+                       duration_seconds=duration, pause_seconds=pause, timing_source=clock['timing_source'],
+                       sync_precision=clock['precision'],sync_status=clock['status'],sync_message=clock['message'],
+                       units=clock['units'],
                        audio_file=None, visual_file=None, source_refs=narration_sources(segment),
                        fact_source_refs=segment.get('source_refs', []), reading_text=reading_text(draft, segment),
                        narration_origin=(current_narration(segment) or {}).get('origin', 'original'),
@@ -129,19 +130,28 @@ def export_package(draft, output_dir, token, *, visuals=True, renderer=None):
                 shutil.copyfile(sound['path'], directory / target)
                 row['audio_file'] = target
             if visuals:
-                frames = max(1, math.ceil(row['end_seconds'] * 30) - math.ceil(cursor * 30))
+                frames = max(1, (clock['end_sample']*30+timeline['sample_rate']-1)//timeline['sample_rate']
+                    -(clock['start_sample']*30+timeline['sample_rate']-1)//timeline['sample_rate'])
                 path = renderer(draft, segment, directory, frames, token)
                 row.update(visual_file=path.relative_to(directory).as_posix(), visual_frames=frames, visual_fps=30)
             manifest['segments'].append(row)
             write_json(directory / 'manifest.json', manifest)
             if manifest['all_audio_current']:
-                srt += [str(index+1), _srt_time(cursor) + ' --> ' + _srt_time(cursor+duration), narration_text(segment), '']
+                cues=clock['units'] or [dict(global_start_seconds=cursor,global_end_seconds=cursor+duration,
+                    screen=narration_text(segment))]
+                for cue in cues:
+                    number=len(srt)//4+1
+                    srt += [str(number), _srt_time(cue['global_start_seconds'])+' --> '+_srt_time(cue['global_end_seconds']),cue['screen'], '']
             cursor += duration + pause
         if manifest['all_audio_current']:
-            path = _merge(manifest['segments'], directory, float(draft['pause_seconds']), token)
+            path = timeline_audio(draft,timeline,token)
+            target=directory/'narration.wav';shutil.copyfile(path,target);path=target
             manifest['narration_file'] = path.name
             measured_frames, rate = wav_info(path)
             manifest['actual_narration_seconds'] = measured_frames / rate
+            timeline['playback_audio']=dict(file=path.name,sha256=file_hash(path),sample_count=measured_frames,sample_rate=rate)
+            manifest['narration_sha256']=timeline['playback_audio']['sha256']
+            write_json(directory/'timeline.json',timeline)
             (directory / 'paragraphs.srt').write_text('\n'.join(srt), encoding='utf-8')
             manifest['subtitle_file'] = 'paragraphs.srt'
         else:
@@ -151,7 +161,10 @@ def export_package(draft, output_dir, token, *, visuals=True, renderer=None):
             if row['audio_file']:
                 segment['audio']['path'] = row['audio_file']
         write_json(directory / 'draft.json', portable)
-        manifest.update(state='complete', timeline_seconds=cursor)
+        manifest.update(timeline_seconds=timeline['duration_seconds'])
+        if visuals and native_renderer and manifest['all_audio_current']:
+            manifest['preview_video_file']=_mux(directory,manifest,token).name
+        manifest['state']='complete'
         write_json(directory / 'manifest.json', manifest)
         return directory
     except BaseException as error:

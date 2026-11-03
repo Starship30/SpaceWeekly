@@ -20,6 +20,7 @@ OFFICIAL_DOMAINS = (
     "nasa.gov",
     "esa.int",
     "spacex.com",
+    "spaceforce.mil",
     "blueorigin.com",
     "ulalaunch.com",
     "rocketlabusa.com",

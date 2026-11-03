@@ -115,6 +115,10 @@ def validate_snapshot(data: dict) -> dict:
         if not isinstance(item.get('categories'), list) or any(
                 not isinstance(x, str) or not x.strip() for x in item['categories']):
             raise ValueError(f'第 {index} 条 categories 必须是字符串列表')
+    order=data.get('input_order')
+    if order is not None and (not isinstance(order,list) or any(not isinstance(i,str) for i in order)
+                              or len(order)!=len(set(order)) or not set(order)<=ids):
+        raise ValueError('素材载入顺序无效')
     return dict(data, items=[dict(item, summary=mission_display_name(item['summary']))
                             if item.get('video_type') == 'launch' else item for item in data['items']])
 
@@ -132,9 +136,12 @@ def card_ordinals(items, selected_ids=None):
     return ordinals
 
 
-def sort_items(items, sort_order='asc'):
+def sort_items(items, sort_order='asc', *, input_order=None):
+    if sort_order=='input':
+        order={identifier:index for index,identifier in enumerate(input_order or [])}
+        return sorted(items,key=lambda item:order.get(item['id'],len(order)))
     if sort_order not in ('asc', 'desc'):
-        raise ValueError('排序须为 asc 或 desc')
+        raise ValueError('排序须为 input、asc 或 desc')
 
     def key(item):
         published = parse_datetime(item['published'])
@@ -435,7 +442,7 @@ def render_launch_frame(card, t, seconds):
 
 
 def verify_video(path: Path, frames: int, seconds: float, ffmpeg: str, ffprobe: str,
-                 encoding='png', alpha_samples=((1200, 500, 0), (120, 970, 255))):
+                 encoding='png', alpha_samples=((1200, 500, 0), (120, 970, 255)),sample_time=4):
     info = json.loads(subprocess.check_output([ffprobe, '-v', 'error', '-select_streams', 'v:0',
         *(['-show_frames'] if encoding == 'png' else []),
         '-show_entries', 'stream=codec_name,width,height,pix_fmt,nb_frames:format=duration:frame=key_frame',
@@ -450,7 +457,7 @@ def verify_video(path: Path, frames: int, seconds: float, ffmpeg: str, ffprobe: 
                                    any(frame.get('key_frame') != 1 for frame in info['frames'])):
         raise RuntimeError('PNG MOV 必须全部为独立关键帧，拒绝 Delta 帧')
     for x, y, expected in alpha_samples:
-        alpha = subprocess.check_output([ffmpeg, '-v', 'error', '-ss', '4', '-i', str(path),
+        alpha = subprocess.check_output([ffmpeg, '-v', 'error', '-ss', str(sample_time), '-i', str(path),
             '-frames:v', '1', '-vf', f'alphaextract,crop=2:2:{x}:{y}', '-pix_fmt', 'gray',
             '-f', 'rawvideo', 'pipe:1'], creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         if alpha != bytes([expected])*4:
@@ -458,7 +465,7 @@ def verify_video(path: Path, frames: int, seconds: float, ffmpeg: str, ffprobe: 
 
 
 def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel, on_frame=None,
-                encoding='png'):
+                encoding='png',frame_provider=None):
     if encoding not in ('png', 'prores'):
         raise ValueError('未知透明视频编码')
     codec_args = (['-c:v', 'png', '-pix_fmt', 'rgba', '-pred', 'mixed', '-compression_level', '6'] if encoding == 'png' else
@@ -478,7 +485,7 @@ def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel
                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                     for i in range(frames):
                         cancel_check()
-                        process.stdin.write(render_frame(card, i/FPS, seconds).tobytes())
+                        process.stdin.write((frame_provider(i/FPS) if frame_provider else render_frame(card, i/FPS, seconds)).tobytes())
                         if on_frame is not None and ((i+1) % FPS == 0 or i+1 == frames):
                             on_frame((i+1)/frames)
                     process.stdin.close()
@@ -492,7 +499,10 @@ def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel
                         raise RuntimeError('FFmpeg 编码失败')
                     cancel_check()
                     samples = ((1200, 500, 0), (20, 500, card['background_alpha'])) if card.get('video_type') == 'launch' else ((1200, 500, 0), (120, 970, 255))
-                    verify_video(temporary, frames, seconds, ffmpeg, ffprobe, encoding, samples)
+                    probe=min(4,max(0,seconds-1/FPS)) if frame_provider else 4
+                    if frame_provider:
+                        expected=frame_provider(probe);samples=tuple((x,y,expected.getpixel((x,y))[3]) for x,y,_ in samples)
+                    verify_video(temporary, frames, seconds, ffmpeg, ffprobe, encoding, samples,probe)
                     cancel_check()
                 except BaseException as error:
                     if process is not None and process.poll() is None:
@@ -548,7 +558,7 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
              selected_ids=None, on_progress=None, encoding='png', sort_order='asc'):
     cancel_check()
     data = validate_snapshot(snapshot) if isinstance(snapshot, dict) else load_snapshot(snapshot)
-    data = dict(data, items=sort_items(data['items'], sort_order))
+    data = dict(data, items=sort_items(data['items'], sort_order,input_order=data.get('input_order')))
     if encoding not in ('png', 'prores'):
         raise ValueError('未知透明视频编码')
     if not math.isfinite(seconds) or not 6 <= seconds <= 600:
@@ -635,7 +645,8 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
                              and path.is_file() and sha_file(path) == record['sha256'])
         records.append(record)
     payload = {'protocol_version': data['protocol_version'], 'job_id': data['job_id'],
-               'report_title': data['report_title'], 'order_policy': f'video_type_then_published_{sort_order}',
+               'audio_policy': 'silent_no_audio_stream',
+               'report_title': data['report_title'], 'order_policy': ('selected_articles_input_order' if sort_order=='input' else f'video_type_then_published_{sort_order}'),
                'numbering_policy': 'independent_news_and_launch',
                'selection_policy': 'checked_items_only',
                'fps': FPS, 'encoding': encoding, 'cards': records}
@@ -695,7 +706,7 @@ def main():
     parser.add_argument('--seconds', type=float, default=12., help='每卡最低时长；摘要滚动时自动延长')
     parser.add_argument('--item-id', help='仅重生成此稳定 ID 的卡片；不使用列表位置作为身份')
     parser.add_argument('--encoding', choices=['png', 'prores'], default='png')
-    parser.add_argument('--order', choices=['asc', 'desc'], default='asc', help='各类按原始时间正序或倒序；默认正序')
+    parser.add_argument('--order', choices=['input','asc', 'desc'], default='asc', help='按稿件载入顺序，或各类按原始时间正序或倒序；默认正序')
     args = parser.parse_args()
     try:
         manifest = generate(args.snapshot, args.output, args.seconds, args.item_id,

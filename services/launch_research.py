@@ -15,9 +15,10 @@ from ai.json_utils import request_json, AIResponseParseError
 from resources import resource_path
 from services.cancellation import TaskCancelledError
 from services.news_dates import _fetch_evidence, _official_url
-from translator.dictionary import load_dictionary
+from translator.dictionary import load_dictionary, dictionary_replace
 from translator.search import create_search_provider, SearchProviderError, SearchRateLimitError
 from utils.time import parse_datetime
+from utils.text import mission_display_name
 
 logger = logging.getLogger(__name__)
 _LOCK = RLock()
@@ -110,6 +111,27 @@ def confirmed_values(record, context):
     return {}
 
 
+def display_names(context, entries=None):
+    """Local name resolution only; glossary matches never confirm mission background."""
+    entries = load_dictionary() if entries is None else entries
+    record = context.get('research', {})
+    values = confirmed_values(record, context)
+    original = context.get('english_name', '')
+    translated, matched = dictionary_replace(original, entries)
+    identity = record.get('input', {})
+    # Schedule/background changes can stale facts without changing a confirmed task name.
+    manual = (record.get('manual', {}) if record.get('human_status') == 'confirmed' and
+              (record.get('human_fingerprint') == fingerprint(context) or
+               identity.get('ll2_id') == context.get('ll2_id') and identity.get('english_name') == original) else {})
+    name = manual.get('chinese_name') or (translated if matched else '')
+    name = name or values.get('chinese_name') or mission_display_name(original)
+    result = {key: dictionary_replace(context.get(key, ''), entries)[0]
+              for key in ('rocket', 'site', 'site_name', 'pad_name', 'provider', 'orbit')}
+    result.update(name=name, name_source='任务人工确认' if manual.get('chinese_name') else
+                  '术语词典' if matched else '有出处的任务名称' if values.get('chinese_name') else '原文，名称待核对')
+    return result
+
+
 def background_facts(context):
     """Quote validity and event matching are recorded separately from wording review."""
     facts = []
@@ -146,6 +168,11 @@ def background_facts(context):
                     event_quote=match.get('event_quote', ''),
                     citation_status='exact_quote', event_status='matched'))
     return facts
+
+
+def has_primary_background(context):
+    # An LL2 description or a confirmed name does not complete an explicit primary-source lookup.
+    return any(fact['evidence_level'] == 'primary_announcement' for fact in background_facts(context))
 
 
 def _now():
@@ -299,12 +326,12 @@ class LaunchResearchService:
             return {}
         signature = fingerprint(context)
         if (not force and (identifier, signature) in self.memo and (not require_background
-                or background_facts(dict(context, research=self.memo[identifier, signature])))):
+                or has_primary_background(dict(context, research=self.memo[identifier, signature])))):
             return deepcopy(self.memo[identifier, signature])
         previous = load_launch_research().get(identifier, {})
         if (not force and previous.get('fingerprint') == signature
                 and not previous.get('recheck_requested') and confirmed_values(previous, context)
-                and (not require_background or background_facts(dict(context, research=previous)))):
+                and (not require_background or has_primary_background(dict(context, research=previous)))):
             return deepcopy(previous)
         record = dict(version=1, ll2_id=identifier, english_name=context['english_name'],
                       input=deepcopy(context), fingerprint=signature, chinese_name='', aliases=[], summary='',

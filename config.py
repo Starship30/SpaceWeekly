@@ -1,6 +1,8 @@
 import os
+import json
+import sys
 
-from resources import resource_path
+from resources import resource_path,bundled_resource_path
 
 BASE_DIR = resource_path()
 DATABASE_PATH = resource_path("database", "spaceweekly.db")
@@ -9,7 +11,10 @@ OUTPUT_DIR = resource_path("output")
 
 def app_version() -> str:
     """Single source for the application version."""
-    return "3.1.0demo"
+    if getattr(sys,'frozen',False):
+        manifest=bundled_resource_path('release.json')
+        if manifest.exists():return json.loads(manifest.read_text(encoding='utf-8'))['version']
+    return "3.1.2"
 
 
 APP_EDITION = "AI Workflow Edition"

@@ -1,6 +1,5 @@
 """Offline content snapshot; the selected Article order is the timeline order."""
 
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -9,6 +8,7 @@ from uuid import uuid4
 from config import OUTPUT_DIR
 from models.ai_summary import AISummary
 from models.article import Article
+from models.news import news_id
 from models.export_context import ExportContext
 from services.cancellation import CancelCheck, no_cancel
 from utils.output_files import reserved_output
@@ -41,7 +41,7 @@ def export_premiere(
         if not re.fullmatch(r"https?://[^\s/]+(?:/[^\s]*)?", news.url, re.IGNORECASE):
             raise ValueError("Premiere: URL must be an HTTP(S) URL without whitespace")
         # News/Article carry no stable ID; SQLite's row ID is not in this run.
-        item_id = "url-sha256:" + hashlib.sha256(news.url.encode("utf-8")).hexdigest()
+        item_id = news_id(news.url)
         if item_id in seen:
             raise ValueError(f"Premiere: duplicate news URL: {news.url}")
         seen.add(item_id)
