@@ -68,5 +68,27 @@ class CacheMaintenanceTests(unittest.TestCase):
         rows=cache.scan(self.token,now=self.now+3*cache.DAY)['files'];rows[0]['path']='../outside.png'
         result=cache.clean(rows,self.token,now=self.now+3*cache.DAY);self.assertEqual(result['deleted'],0)
 
+    def test_inventory_lists_formal_files_and_only_deletes_confirmed_owned_files(self):
+        export=self.file('output/SpaceWeekly_2026-11-04_001.premiere.json')
+        export.write_text('{"protocol_version":"1.0","items":[]}')
+        video=self.file('video-downloads/已下载.mp4')
+        record=self.root/'video-downloads/2026-11-04/metadata.json'
+        record.parent.mkdir();record.write_text(json.dumps(dict(status='completed',original_url='https://example.com/',
+                                                               file_path=str(video))),encoding='utf8')
+        unknown=self.file('output/工作区.json')
+        keep=self.file('cache/news_thumbnails/'+('f'*64)+'.png')
+        result=cache.scan(self.token,now=self.now,extra=[str(video)])
+        by_kind={r['category']:r for r in result['inventory']}
+        self.assertEqual(set(by_kind),{'exports','downloads','thumbnail'})
+        self.assertEqual(result['files'],[by_kind['thumbnail']])
+        self.assertTrue(by_kind['downloads']['referenced'])
+        self.assertFalse(by_kind['exports']['referenced'])
+        self.assertEqual(cache.clean([by_kind['downloads']],self.token,now=self.now,extra=[str(video)],allow_formal=True)['deleted'],0)
+        self.assertEqual(cache.clean([by_kind['downloads']],self.token,now=self.now,allow_formal=True,allow_referenced=True,
+                                     extra=[str(video)],in_use=[str(video)])['deleted'],0)
+        self.assertEqual(cache.clean([by_kind['downloads']],self.token,now=self.now,allow_formal=True,allow_referenced=True,
+                                     extra=[str(video)])['deleted'],1)
+        self.assertTrue(unknown.is_file() and keep.is_file() and export.is_file())
+
 
 if __name__=='__main__':unittest.main()

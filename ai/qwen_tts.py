@@ -1,5 +1,5 @@
-"""One lazy local CustomVoice worker shared by preview and batch synthesis."""
-from dataclasses import asdict
+"""One lazy local Qwen worker shared by preview and batch synthesis."""
+from dataclasses import asdict,replace
 import json
 import os
 from pathlib import Path
@@ -18,13 +18,14 @@ def capabilities(model_path):
     if not model_path or not root.is_dir() or not (root / 'config.json').is_file():
         raise ValueError('请选择已下载的本地 Qwen3-TTS CustomVoice 模型目录（含 config.json）')
     config = json.loads((root / 'config.json').read_text(encoding='utf-8'))
-    if not isinstance(config, dict) or config.get('tts_model_type') != 'custom_voice':
-        raise ValueError('仅支持 CustomVoice，不支持 Base 克隆或 VoiceDesign')
+    kind=config.get('tts_model_type') if isinstance(config,dict) else None
+    if kind not in ('custom_voice','base'):
+        raise ValueError('仅支持 CustomVoice 预设或 Base 参考音色')
     talker = config.get('talker_config') or {}
     speakers = (talker.get('spk_id') or {}) if isinstance(talker, dict) else {}
     if not isinstance(speakers, (dict, list)):
         speakers = {}
-    return dict(style=config.get('tts_model_size') == '1b7', speakers=[s for s in speakers if isinstance(s, str)],
+    return dict(style=kind=='custom_voice' and config.get('tts_model_size') == '1b7', kind=kind,speakers=[s for s in speakers if isinstance(s, str)],
                 size=str(config.get('tts_model_size') or 'unknown'), model=str(root.resolve()))
 
 
@@ -136,7 +137,21 @@ class QwenTTSProvider:
             cancel_check()
             from services.voice_storage import validate_voice_locations
             validate_voice_locations(self.settings)
-            info = capabilities(self.settings['model'])
+            from services.voice_profiles import load,PREFIX
+            if request.voice.startswith(PREFIX):
+                profile=load(request.voice)
+                request=replace(request,model=profile['model'],style='',reference_audio=profile['reference'],
+                                reference_text=profile['text'],reference_sha256=profile['sha256'])
+            info = capabilities(request.model if request.reference_audio else self.settings['model'])
+            validate_voice_locations(dict(self.settings,model=info['model']))
+            if info['kind']=='base' and (not Path(request.reference_audio).is_file() or not request.reference_text.strip()):
+                raise ValueError('请先选择有录音与对应文字的参考音色')
+            if info['kind']=='base':
+                from services.roundup_audio import file_hash
+                if file_hash(request.reference_audio)!=request.reference_sha256:
+                    raise ValueError('参考录音文件已变化，请在我的音色中重新导入并试听')
+            if info['kind']=='custom_voice' and request.reference_audio:
+                raise ValueError('参考音色需要 Base 模型')
             if request.style and not info['style']:
                 raise ValueError('当前模型不支持风格指令；0.6B 请留空')
             if info['speakers'] and request.voice.casefold() not in {s.casefold() for s in info['speakers']}:

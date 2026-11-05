@@ -6,12 +6,12 @@ import shutil
 from uuid import uuid4
 
 from services.launch_data import write_json
-from services.launch_roundup import (validate_draft, statistics, material_status, task_names,
+from services.launch_roundup import (digest,validate_draft, statistics, material_status, task_names,
                                     narration_text, current_narration, narration_sources)
 from services.roundup_audio import wav_info, reading_text,file_hash
 from services.roundup_reading import VERSION as READING_VERSION
 from services.roundup_style import timezone_label
-from services.roundup_sync import build_timeline, timeline_audio, VERSION as SYNC_VERSION
+from services.roundup_sync import build_timeline, join_timelines, timeline_audio, VERSION as SYNC_VERSION
 from utils.output_files import reserved_output
 
 
@@ -37,7 +37,87 @@ def _mux(directory, manifest, token, *, opaque=False):
     return final
 
 
-def export_package(draft, output_dir, token, *, visuals=True, renderer=None):
+def copy_prepared_intro(source,directory,cancel_check):
+    """Include a prepared clip as a separate, non-overwriting export asset."""
+    source=Path(source)
+    if source.suffix.lower()!='.mp4' or not source.is_file() or not source.stat().st_size:
+        raise ValueError('已制作的片头文件不可用，请在制作片头页检查')
+    with reserved_output(Path(directory),'.intro.mp4') as (final,temporary):
+        with source.open('rb') as reader,temporary.open('wb') as writer:
+            while block:=reader.read(1024*1024):
+                cancel_check();writer.write(block)
+        cancel_check()
+    return final.name
+
+
+def export_complete_video(drafts, output_dir, token):
+    from bisect import bisect_right
+    from tempfile import TemporaryDirectory
+    from services import news_voice
+    from services.roundup_audio import content_namespace
+    from tools import roundup_visuals, video_cards
+
+    ffmpeg, ffprobe = shutil.which('ffmpeg'), shutil.which('ffprobe')
+    if not ffmpeg or not ffprobe:
+        raise ValueError('成片导出需要 FFmpeg 和 ffprobe')
+    if not drafts:
+        raise ValueError('请先勾选本期要导出的内容')
+    schedules = []
+    for draft in drafts:
+        token.check()
+        is_news = content_namespace(draft)=='news'
+        (news_voice.validate if is_news else validate_draft)(draft)
+        schedule = build_timeline(draft)
+        if not schedule['all_audio_current']:
+            title = draft['screen_item']['title'] if is_news else '发射综述'
+            raise ValueError(f'{title}缺少当前配音，请先生成或更新配音')
+        schedules.append(schedule)
+    clock = join_timelines(schedules)
+    audio = timeline_audio(drafts[0],clock,token)
+    sections, starts = [], []
+    clock['sections']=[]
+    offset = 0
+    for draft, schedule in zip(drafts,schedules):
+        clock['sections'].append(dict(id=draft['id'],start_sample=offset,duration_samples=schedule['total_samples']))
+        if content_namespace(draft)=='news':
+            starts.append(offset);sections.append((news_voice, (draft,), schedule))
+        else:
+            for segment, row in zip(draft['segments'],schedule['segments']):
+                starts.append(offset+row['start_sample']);sections.append((roundup_visuals, (draft,segment), schedule))
+        offset += schedule['total_samples']
+    active, prepared = -1, None
+    rate, fps = clock['sample_rate'], video_cards.FPS
+    def frame_at(seconds):
+        nonlocal active, prepared
+        sample = round(seconds*rate)
+        index = bisect_right(starts,sample)-1
+        module,args,schedule = sections[index]
+        if index!=active:
+            prepared = module.prepare_frames(*args,timeline=schedule)
+            active = index
+        return module.frame_at(prepared,(sample-starts[index])/rate)
+    frames = (clock['total_samples']*fps+rate-1)//rate
+    clock['playback_audio'] = dict(file=audio.name,sha256=file_hash(audio),sample_count=clock['total_samples'],sample_rate=rate)
+    write_json(audio.parent/f"timeline-{digest(clock)}.json",clock)
+    cues=[]
+    segments=(segment for draft in drafts for segment in draft['segments'])
+    for row,segment in zip(clock['segments'],segments):
+        timed=row['units'] or [dict(global_start_seconds=row['start_seconds'],
+            global_end_seconds=row['speech_end_seconds'],screen=narration_text(segment))]
+        for unit in timed:
+            text=' '.join((unit['screen'].strip() or unit.get('text','')).split())
+            start,end=_srt_time(unit['global_start_seconds']),_srt_time(unit['global_end_seconds'])
+            if text and start!=end:cues.append(f'{len(cues)+1}\n{start} --> {end}\n{text}')
+    with TemporaryDirectory(dir=audio.parent) as folder:
+        subtitles=None
+        if cues:
+            subtitles=Path(folder)/'captions.srt'
+            subtitles.write_text('\n\n'.join(cues)+'\n',encoding='utf-8')
+        return video_cards.encode_card({},Path(output_dir),frames,ffmpeg,ffprobe,token.check,
+                                       frame_provider=frame_at,audio=audio,subtitles=subtitles)
+
+
+def export_package(draft, output_dir, token, *, visuals=True, renderer=None,intro=None):
     native_renderer=renderer is None
     validate_draft(draft)
     if not draft['segments']:
@@ -164,6 +244,7 @@ def export_package(draft, output_dir, token, *, visuals=True, renderer=None):
         manifest.update(timeline_seconds=timeline['duration_seconds'])
         if visuals and native_renderer and manifest['all_audio_current']:
             manifest['preview_video_file']=_mux(directory,manifest,token).name
+        if intro:manifest['intro_file']=copy_prepared_intro(intro,directory,token.check)
         manifest['state']='complete'
         write_json(directory / 'manifest.json', manifest)
         return directory

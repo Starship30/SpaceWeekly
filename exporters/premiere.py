@@ -17,15 +17,16 @@ from utils.text import mission_display_name
 PROTOCOL_VERSION = "1.0"
 
 
-def export_premiere(
+def build_snapshot(
     articles: list[Article],
     ai_summaries: dict[str, AISummary],
     context: ExportContext,
     language: str,
     cancel_check: CancelCheck = no_cancel,
     launches: list[dict] | None = None,
-) -> Path:
-    """Export this run's in-memory result, without fetching or invoking AI."""
+    *, job_id: str | None = None,
+) -> dict:
+    """Build the same content for direct editing or the portable JSON export."""
     cancel_check()
     items = []
     seen = set()
@@ -78,7 +79,7 @@ def export_premiere(
         raise ValueError("Premiere: report_title must be a string")
     payload = {
         "protocol_version": PROTOCOL_VERSION,
-        "job_id": str(uuid4()),
+        "job_id": job_id or str(uuid4()),
         "report_title": context.report_title if context.report_title.strip() else "SpaceWeekly",
         "language": language,
         "order_policy": "selected_articles_input_order",
@@ -118,6 +119,11 @@ def export_premiere(
                 from copy import deepcopy
                 record['launch_context'] = deepcopy(launch['launch_context'])
             payload['launches'].append(record)
+    return payload
+
+
+def export_premiere(articles,ai_summaries,context,language,cancel_check=no_cancel,launches=None) -> Path:
+    payload = build_snapshot(articles,ai_summaries,context,language,cancel_check,launches)
     with reserved_output(OUTPUT_DIR, ".premiere.json") as (output_path, temp_path):
         cancel_check()
         temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

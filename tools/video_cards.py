@@ -465,13 +465,22 @@ def verify_video(path: Path, frames: int, seconds: float, ffmpeg: str, ffprobe: 
 
 
 def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel, on_frame=None,
-                encoding='png',frame_provider=None):
+                encoding='png',frame_provider=None,audio=None,subtitles=None):
     if encoding not in ('png', 'prores'):
         raise ValueError('未知透明视频编码')
     codec_args = (['-c:v', 'png', '-pix_fmt', 'rgba', '-pred', 'mixed', '-compression_level', '6'] if encoding == 'png' else
                   ['-c:v', 'prores_ks', '-profile:v', '4', '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16'])
     seconds = frames/FPS
     suffix = '.launch.mov' if card.get('video_type') == 'launch' else '.news.mov'
+    if audio is not None:
+        suffix = '.mp4'
+        codec_args = ['-c:v','libx264','-pix_fmt','yuv420p','-preset','fast','-crf','18',
+                      '-c:a','aac','-movflags','+faststart']
+    inputs = ['-an'] if audio is None else ['-i',str(audio),'-map','0:v:0','-map','1:a:0']
+    if subtitles is not None:
+        inputs[2:2]=['-i',str(subtitles)]
+        inputs+=['-map','2:s:0']
+        codec_args+=['-c:s','mov_text','-metadata:s:s:0','language=chi','-disposition:s:0','0']
     with reserved_output(directory, suffix) as (final, temporary):
         log_path = temporary.with_suffix('.log')
         try:
@@ -480,7 +489,7 @@ def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel
                 try:
                     process = subprocess.Popen([ffmpeg, '-hide_banner', '-y', '-f', 'rawvideo',
                         '-pixel_format', 'rgba', '-video_size', f'{W}x{H}', '-framerate', str(FPS),
-                        '-i', 'pipe:0', '-an', *codec_args, '-threads', '4', str(temporary)],
+                        '-i', 'pipe:0', *inputs, *codec_args, '-threads', '4', str(temporary)],
                         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log,
                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                     for i in range(frames):
@@ -498,11 +507,20 @@ def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel
                     if process.returncode != 0:
                         raise RuntimeError('FFmpeg 编码失败')
                     cancel_check()
-                    samples = ((1200, 500, 0), (20, 500, card['background_alpha'])) if card.get('video_type') == 'launch' else ((1200, 500, 0), (120, 970, 255))
-                    probe=min(4,max(0,seconds-1/FPS)) if frame_provider else 4
-                    if frame_provider:
-                        expected=frame_provider(probe);samples=tuple((x,y,expected.getpixel((x,y))[3]) for x,y,_ in samples)
-                    verify_video(temporary, frames, seconds, ffmpeg, ffprobe, encoding, samples,probe)
+                    if audio is not None:
+                        streams = json.loads(subprocess.check_output([ffprobe,'-v','error','-show_streams',
+                            '-of','json',str(temporary)],timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)))['streams']
+                        expected=['h264','aac']+(['mov_text'] if subtitles is not None else [])
+                        if ([s['codec_name'] for s in streams]!=expected
+                                or int(streams[0].get('nb_frames',0))!=frames
+                                or abs(float(streams[1]['duration'])-seconds)>1/FPS+.002):
+                            raise RuntimeError('成片音轨或帧数与时间表不一致')
+                    else:
+                        samples = ((1200, 500, 0), (20, 500, card['background_alpha'])) if card.get('video_type') == 'launch' else ((1200, 500, 0), (120, 970, 255))
+                        probe=min(4,max(0,seconds-1/FPS)) if frame_provider else 4
+                        if frame_provider:
+                            expected=frame_provider(probe);samples=tuple((x,y,expected.getpixel((x,y))[3]) for x,y,_ in samples)
+                        verify_video(temporary, frames, seconds, ffmpeg, ffprobe, encoding, samples,probe)
                     cancel_check()
                 except BaseException as error:
                     if process is not None and process.poll() is None:
@@ -555,7 +573,7 @@ def manifest_video_path(directory: Path, name: str) -> Path:
 
 
 def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, cancel_check=no_cancel,
-             selected_ids=None, on_progress=None, encoding='png', sort_order='asc'):
+             selected_ids=None, on_progress=None, encoding='png', sort_order='asc',intro=None):
     cancel_check()
     data = validate_snapshot(snapshot) if isinstance(snapshot, dict) else load_snapshot(snapshot)
     data = dict(data, items=sort_items(data['items'], sort_order,input_order=data.get('input_order')))
@@ -694,6 +712,9 @@ def generate(snapshot: Path | dict, output: Path, seconds=12., item_id=None, can
         completed += 1
         notify(item, 'done', file=str(path))
         print(f'PASS {path}', flush=True)
+    if intro:
+        from services.roundup_export import copy_prepared_intro
+        payload['intro_file']=copy_prepared_intro(intro,directory,cancel_check)
     if payload != manifest:
         save_manifest(manifest_path, payload, cancel_check)
     return manifest_path

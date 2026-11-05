@@ -126,7 +126,7 @@ def _matched_evidence(data, sources):
         quote = ' '.join(quote.split())
         if len(quote) < 16 or quote not in source['text']:
             raise AIResponseParseError('Quote must occur verbatim in the fetched announcement')
-        matched.append(source)
+        matched.append(dict(source,quote=quote))
         seen.add(identifier)
     return matched
 
@@ -216,6 +216,8 @@ def verify_news_dates(articles, settings, date_range, token):
                 logger.info('日期排除：%s；事件已于 %s 公布，范围 %s 至 %s；核验来源 %s',
                             article.news.title, first['published'], *date_range, first['url'])
                 continue
+            article.evidence=[{k:source[k] for k in ('url','title','published','quote') if k in source}
+                              for source in matches]
             retained.append(article)
             verified += 1
             logger.info('日期通过：%s；已检索公告中最早同一事实 %s；来源 %s',

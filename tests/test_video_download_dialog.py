@@ -191,26 +191,14 @@ class VideoDownloadDialogTests(unittest.TestCase):
             self.assertEqual(successes, [])
             self.assertEqual(len(failures)+len(cancellations), 1)
 
-    def test_existing_entry_pins_workspace_and_preserves_snapshot(self):
-        with patch('ui.video_cards_dialog.workspace_path', return_value=self.root):
-            cards = VideoCardsDialog(self.root/'output')
+    def test_cards_preserve_external_snapshot_without_nested_download(self):
+        cards = VideoCardsDialog(self.root/'output')
         source = Path(__file__).resolve().parents[1]/'plugins/premiere-uxp/example.premiere.json'
         original = source.read_bytes()
         cards.load_snapshot(source)
         cards.output_root = self.root/'elsewhere'
-        seen = []
-        def capture(dialog):
-            seen.append(dialog.workspace)
-            self.assertIs(cards.download_dialog, dialog)
-            self.assertEqual(dialog.tasks.count(), 0)
-            dialog.include_news.setChecked(True)
-            self.assertTrue(dialog.keyword.currentText())
-            return 0
-        with patch.object(VideoDownloadDialog, 'exec', capture):
-            button = next(b for b in cards.findChildren(QPushButton) if b.text() == tr('video_download.title'))
-            button.click()
-        self.assertEqual(seen, [self.root])
-        self.assertIsNone(cards.download_dialog)
+        self.assertTrue(cards.source_edit.text().startswith('外部快照'))
+        self.assertFalse(any(b.text()==tr('video_download.title') for b in cards.findChildren(QPushButton)))
         self.assertEqual(source.read_bytes(), original)
         cards.reject()
 

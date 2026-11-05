@@ -1,11 +1,17 @@
 import json
 import re
 import shutil
+from copy import deepcopy
+from functools import lru_cache
 from uuid import uuid4
 from pathlib import Path
 
 from resources import bundled_resource_path
 from resources import resource_path
+
+_CASC_NAMES = "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html"
+_ROCKET_LAB_SITE = "https://rocketlabcorp.com/updates/rocket-lab-launch-complex-1-ready-for-launches/"
+_CAS_SPACE_NAMES = "https://www.cas-space.com/article/610.html"
 
 DEFAULT_DICTIONARY = {
     "Starlink Group": {"translation": "Starlink Group", "type": "mission"},
@@ -29,21 +35,70 @@ DEFAULT_DICTIONARY = {
         "type": "orbit"
     },
     "Launch Successful": {"translation": "发射成功", "type": "status"},
+    "Long March 4B": {"translation": "长征四号乙", "type": "rocket", "source_url": _CASC_NAMES},
+    "Long March 6A": {"translation": "长征六号改", "type": "rocket", "source_url": _CASC_NAMES},
+    "Long March 8A": {"translation": "长征八号甲", "type": "rocket", "source_url": _CASC_NAMES},
+    "Yaogan 50-03": {"translation": "遥感五十号03星", "type": "mission", "source_url": _CASC_NAMES},
+    "Yaogan 53-07 to 09/56-19 to 21": {"translation": "遥感五十三号07—09星、遥感五十六号19—21星",
+                                      "type": "mission", "source_url": _CASC_NAMES},
+    "SatNet LEO Group 28": {"translation": "卫星互联网低轨28组卫星", "type": "mission", "source_url": _CASC_NAMES},
+    "Jiuquan Satellite Launch Center, People's Republic of China": {
+        "translation": "酒泉卫星发射中心", "type": "location", "source_url": _CASC_NAMES},
+    "Taiyuan Satellite Launch Center, People's Republic of China": {
+        "translation": "太原卫星发射中心", "type": "location", "source_url": _CASC_NAMES},
+    "Wenchang Space Launch Site, People's Republic of China": {
+        "translation": "文昌航天发射场", "type": "location", "source_url": _CASC_NAMES},
+    "Vandenberg SFB, CA, USA": {"translation": "范登堡太空军基地", "type": "location",
+                               "source_url": "https://news.cctv.com/2025/02/20/ARTIoFDPdyWmuuvE7ZfRDRg5250220.shtml"},
+    "Space Launch Complex 4E": {"translation": "SLC-4E 工位", "type": "location",
+                                "source_url": "https://www.spacex.com/launches/sl-15-18"},
+    "Rocket Lab Launch Complex 1, Mahia Peninsula, New Zealand": {
+        "translation": "Rocket Lab 1号发射场（新西兰马希亚半岛）", "type": "location", "source_url": _ROCKET_LAB_SITE},
+    "Rocket Lab Launch Complex 1A": {"translation": "1A 工位", "type": "location",
+                                   "source_url": "https://rocketlabcorp.com/assets/Uploads/F64-iQPS-Presskit-The-Sea-God-Sees.pdf"},
+    "Electron": {"translation": "电子号", "type": "rocket", "exact_only": True,
+                 "source_url": "https://news.cctv.com/2020/07/06/ARTIEb3uOFqrfc7Y1S6bmxdG200706.shtml"},
+    "Kinetica 2": {"translation": "力箭二号", "type": "rocket", "source_url": _CAS_SPACE_NAMES},
+    "Kinetica-2": {"translation": "力箭二号", "type": "rocket", "source_url": _CAS_SPACE_NAMES},
+    "CAS Space": {"translation": "中科宇航", "type": "organization", "source_url": _CAS_SPACE_NAMES},
+    "GSLV Mk. II": {"translation": "地球同步卫星运载火箭 Mk II", "type": "rocket",
+                    "source_url": "https://www.isro.gov.in/GSLV_Launchers.html"},
+    "Satish Dhawan Space Centre, India": {"translation": "印度萨蒂什达万航天中心", "type": "location",
+                                         "source_url": "https://news.cctv.com/2019/09/08/ARTIPxOq8ZpkbA6zkGiSPkXc190908.shtml"},
+    "Satish Dhawan Space Centre Second Launch Pad": {"translation": "2号工位", "type": "location",
+                                                    "source_url": "https://www.isro.gov.in/Mission_GSLVF18.html"},
+    "IRNSS-1L (NVS-03)": {"translation": "印度导航卫星 NVS-03", "type": "mission",
+                          "source_url": "https://www.isro.gov.in/Mission_GSLVF18.html"},
+    "Indian Space Research Organization": {"translation": "印度空间研究组织", "type": "organization",
+                                           "source_url": "https://www.isro.gov.in/LaunchMissions.html"},
 }
 
 
 def load_dictionary() -> dict[str, dict[str, str]]:
+    sources=(bundled_resource_path("translator","dictionary.json"),
+             resource_path("config","aerospace_terms.json"),_dictionary_path())
+    fingerprints=[]
+    for path in sources:
+        try:
+            stat=path.stat()
+            fingerprints.append((path,stat.st_mtime_ns,stat.st_size))
+        except FileNotFoundError:
+            fingerprints.append((path,None,None))
+    return deepcopy(_load_dictionary(tuple(fingerprints)))
+
+
+@lru_cache(maxsize=8)
+def _load_dictionary(fingerprints):
     # Resource defaults are a baseline; workspace edits and confirmed legacy terms win.
     entries = {key: dict(value) for key, value in DEFAULT_DICTIONARY.items()}
-    bundled = bundled_resource_path("translator", "dictionary.json")
+    (bundled,_,_),*sources=fingerprints
     entries.update(_read_entries(bundled, {}))
     defaults = {key.casefold(): value['translation'] for key, value in entries.items()}
-    legacy = resource_path("config", "aerospace_terms.json")
-    for source in (legacy, _dictionary_path()):
-        if not source.exists():
+    for source,modified,_ in sources:
+        if modified is None:
             continue
         # Never turn a damaged user dictionary into a new empty one.
-        raw = json.loads(source.read_text(encoding="utf-8"))
+        raw = json.loads(source.read_text(encoding="utf-8-sig"))
         if not isinstance(raw, dict):
             raise ValueError("术语词典格式无效，请从备份恢复")
         for key, entry in _normalize_entries(raw).items():
@@ -158,13 +213,14 @@ def dictionary_replace(
         if source.casefold() == original.casefold():
             return entry["translation"], True
 
-    if not dictionary:
+    phrases = {k: v for k, v in dictionary.items() if not v.get('exact_only')}
+    if not phrases:
         return original, False
-    folded = {k.casefold(): v['translation'] for k, v in dictionary.items()}
-    pattern = '|'.join(re.escape(k) for k in sorted(dictionary, key=len, reverse=True))
+    folded = {k.casefold(): v['translation'] for k, v in phrases.items()}
+    pattern = '|'.join(re.escape(k) for k in sorted(phrases, key=len, reverse=True))
     # One pass, at Latin word boundaries, preserves model numbers and replacement text.
     translated, count = re.subn(r'(?<![A-Za-z0-9])(?:' + pattern + r')(?![A-Za-z0-9])',
-                               lambda m: folded[m.group().casefold()], original, flags=re.I)
+                               lambda m: folded.get(m.group().casefold(), m.group()), original, flags=re.I)
     return translated, bool(count)
 
 

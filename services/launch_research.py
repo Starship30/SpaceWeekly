@@ -15,7 +15,7 @@ from ai.json_utils import request_json, AIResponseParseError
 from resources import resource_path
 from services.cancellation import TaskCancelledError
 from services.news_dates import _fetch_evidence, _official_url
-from translator.dictionary import load_dictionary, dictionary_replace
+from translator.dictionary import load_dictionary, dictionary_replace, exact_dictionary_translation
 from translator.search import create_search_provider, SearchProviderError, SearchRateLimitError
 from utils.time import parse_datetime
 from utils.text import mission_display_name
@@ -123,12 +123,23 @@ def display_names(context, entries=None):
     manual = (record.get('manual', {}) if record.get('human_status') == 'confirmed' and
               (record.get('human_fingerprint') == fingerprint(context) or
                identity.get('ll2_id') == context.get('ll2_id') and identity.get('english_name') == original) else {})
-    name = manual.get('chinese_name') or (translated if matched else '')
-    name = name or values.get('chinese_name') or mission_display_name(original)
+    visible = mission_display_name(original)
+    glossary = exact_dictionary_translation(original,entries) or exact_dictionary_translation(visible,entries)
+    if not glossary and matched and translated!=original and not values.get('chinese_name'):
+        glossary=mission_display_name(translated)
+    name = manual.get('chinese_name') or glossary or values.get('chinese_name') or visible
     result = {key: dictionary_replace(context.get(key, ''), entries)[0]
               for key in ('rocket', 'site', 'site_name', 'pad_name', 'provider', 'orbit')}
+    raw_pad = context.get('pad_name', '')
+    if result['pad_name'] == raw_pad and re.fullmatch(r'(?:Space Launch Complex|Launch Complex|Launch Area)\s+\d+[A-Z]?', raw_pad, re.I):
+        from services.roundup_style import pad_code
+        code = pad_code(raw_pad)
+        result['pad_name'] = code + ('号工位' if code.isdigit() else ' 工位')
+        if result['site'] == raw_pad:
+            result['site'] = result['pad_name']
     result.update(name=name, name_source='任务人工确认' if manual.get('chinese_name') else
-                  '术语词典' if matched else '有出处的任务名称' if values.get('chinese_name') else '原文，名称待核对')
+                  '术语词典' if glossary else '有出处的任务名称' if values.get('chinese_name') else
+                  '词典保留原文' if matched and translated==original else '原文，名称待核对')
     return result
 
 

@@ -112,7 +112,16 @@ class RoundupSyncTests(unittest.TestCase):
         self.audio(second,frames=12001,rate=44100)
         table=sync.build_timeline(self.draft)
         self.assertEqual(table['segments'][1]['start_sample'],103200)
-        self.assertEqual(table['total_samples'],103200+round(Fraction(12001*24000,44100)))
+        self.assertEqual(table['total_samples'],103200+round(Fraction(12001*24000,44100))+36000)
+        self.assertEqual(table['segments'][-1]['pause_samples'],36000)
+        self.draft['closing_hold_seconds']=1.25
+        adjusted=sync.build_timeline(self.draft)
+        self.assertEqual(adjusted['total_samples'],table['total_samples']-6000)
+        self.assertEqual(adjusted['segments'][-1]['speech_end_sample'],table['segments'][-1]['speech_end_sample'])
+        combined=sync.join_timelines([adjusted,table])
+        self.assertEqual(combined['segments'][2]['start_sample'],adjusted['total_samples'])
+        self.assertEqual(combined['segments'][2]['units'][0]['global_start_sample'],
+                         adjusted['total_samples']+table['segments'][0]['units'][0]['global_start_sample'])
         self.audio(frames=120000,amplitude=10)
         changed=sync.build_timeline(self.draft)
         self.assertEqual(changed['segments'][1]['start_sample'],127200)

@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from urllib import error
 from urllib import request
+from urllib.parse import urlsplit
 
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 60
@@ -82,8 +83,11 @@ def complete_with_metadata(
             {"role": "user", "content": prompt},
         ],
         "temperature": config.temperature,
-        "response_format": {"type": "json_object"},
     }
+    if (config.provider,urlsplit(config.base_url).hostname) in (
+        ("DeepSeek","api.deepseek.com"),("OpenAI","api.openai.com"),
+    ):
+        payload["response_format"] = {"type": "json_object"}
     if config.provider == "Claude":
         payload = {
             "model": config.model,
@@ -96,8 +100,11 @@ def complete_with_metadata(
     _check_cancel(cancel_token)
     elapsed = time.perf_counter() - started_at
 
+    choices = response_data.get("choices")
+    first = choices[0] if isinstance(choices,list) and choices and isinstance(choices[0],dict) else {}
     return {
         "content": _extract_content(response_data),
+        "finish_reason": first.get("finish_reason") or response_data.get("stop_reason"),
         "usage": response_data.get("usage", {}),
         "elapsed_seconds": round(elapsed, 2),
         "model": config.model,
@@ -357,6 +364,8 @@ def _extract_content(data: dict[str, object]) -> str:
 
     content = message.get("content")
 
+    if content is None:
+        return ""
     if not isinstance(content, str):
         raise ValueError("AI response content is invalid.")
 

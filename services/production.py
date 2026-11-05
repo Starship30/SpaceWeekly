@@ -56,10 +56,19 @@ def validate_session(value):
     for identifier,draft_voice in voices.items():
         validate_voice(draft_voice)
         if identifier!=draft_voice['news_id']:raise ValueError('新闻配音身份无效')
+    failures=value.get('news',{}).get('narration_failures',{})
+    if not isinstance(failures,dict) or any(not isinstance(row,dict) or not isinstance(row.get('原因'),str)
+                                            for row in failures.values()):
+        raise ValueError('新闻口播失败记录无效')
     if restored and any(not isinstance(getattr(a.news,key),str) for a in restored['articles'] for key in ('title','summary','source','published','url')):
         raise ValueError('Invalid news fields')
     cards=value.get('cards',{}).get('data')
     if cards:validate_snapshot(deepcopy(cards))
+    base=value.get('cards',{}).get('base')
+    if base is not None:
+        if not isinstance(base,dict) or not isinstance(base.get('items'),list) or not isinstance(base.get('job_id'),str):
+            raise ValueError('本期画面素材来源无效')
+        if base['items']:validate_snapshot(deepcopy(base))
     if value.get('cards',{}).get('sort_order','asc') not in ('input','asc','desc'):raise ValueError('素材排序无效')
     if not isinstance(value.get('daily',{}),dict) or not isinstance(value.get('view',{}),dict):
         raise ValueError('Invalid production controls')
@@ -68,7 +77,7 @@ def validate_session(value):
     if any(k not in defaults or type(v) is not type(defaults[k]) for k,v in value.get('daily',{}).items()):
         raise ValueError('Invalid edition settings')
     for key,item in value.get('view',{}).items():
-        if not isinstance(item,str if key=='mode' else int):raise ValueError('Invalid saved view')
+        if not isinstance(item,str if key in ('mode','news_article_id','launch_detail_id') else int):raise ValueError('Invalid saved view')
     staged=value.get('roundup_controls',{})
     if not isinstance(staged,dict) or any(not isinstance(v,(int,float) if k in ('timeout','pause') else str) for k,v in staged.items()):
         raise ValueError('Invalid pending voice controls')
@@ -76,6 +85,11 @@ def validate_session(value):
         raise ValueError('Invalid intro settings')
     if not isinstance(value.get('results',[]),list) or any(not isinstance(v,str) for v in value.get('results',[])):
         raise ValueError('Invalid generated files')
+    scopes=value.get('result_scopes',{})
+    if not isinstance(scopes,dict) or any(not isinstance(scope,str) for scope in scopes.values()):
+        raise ValueError('期次成果归属无效')
+    if value.get('intro_file') is not None and not isinstance(value['intro_file'],str):
+        raise ValueError('片头文件记录无效')
     if not isinstance(value.get('material_edits',{}),dict) or any(not isinstance(v,dict) or any(not isinstance(s,str) for s in v.values()) for v in value.get('material_edits',{}).values()):
         raise ValueError('Invalid pending research edits')
     return value
@@ -97,7 +111,7 @@ def restore_news(value):
     if value is None:
         return None
     def articles(rows):
-        return [Article(News(**r['news']), r['body'], r['parser'], r.get('launch_data')) for r in rows]
+        return [Article(News(**r['news']), r['body'], r['parser'], r.get('launch_data'),r.get('evidence',[])) for r in rows]
     sources=articles(value.get('source_articles',value['articles']))
     by_url={a.news.url:a for a in sources}
     return dict(articles=[by_url.get(a.news.url,a) for a in articles(value['articles'])], launch_articles=articles(value.get('launch_articles', [])),
@@ -108,16 +122,21 @@ def restore_news(value):
                 context=ExportContext(**value['context']) if value.get('context') else None)
 
 
-def prepare_news(feeds, token, *, prepared=None, collect_only=False):
+def prepare_news(feeds, token, *, prepared=None, collect_only=False, narration_skip=None):
     from services.weekly_report import generate_weekly
     result = []
     generate_weekly(feeds=feeds, export_sqlite=False, export_markdown_enabled=False,
                    export_word_enabled=False, cancel_token=token, prepared=prepared,
-                   collect_only=collect_only, defer_exports=True, result_callback=result.append)
-    token.check()
-    if not collect_only:
+                   collect_only=collect_only, defer_exports=True, result_callback=result.append,
+                   narration_skip=narration_skip)
+    if narration_skip is None:
+        token.check()
+    if not collect_only and not token.is_cancelled:
         from services.news_images import collect
-        collect(result[0]['articles'],token)
+        from services.cancellation import TaskCancelledError
+        try:collect(result[0]['articles'],token)
+        except TaskCancelledError:
+            if narration_skip is None:raise
     return result[0]
 
 

@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFileDialog, QFormLayout
 from PIL import Image, ImageDraw
 
 from i18n import tr
-from resources import workspace_path
 from services.cancellation import CancellationToken, TaskCancelledError, no_cancel
 from tools import video_cards
 from ui.widgets.combo_box import RoundedComboBox as QComboBox
@@ -26,7 +25,7 @@ class VideoCardsWorker(QThread):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, data, output, seconds, selected_ids, parent=None, encoding='png', sort_order='asc'):
+    def __init__(self, data, output, seconds, selected_ids, parent=None, encoding='png', sort_order='asc',intro=None):
         super().__init__(parent)
         self.data = copy.deepcopy(data)
         self.output = Path(output)
@@ -35,6 +34,7 @@ class VideoCardsWorker(QThread):
         self.token = CancellationToken()
         self.encoding = encoding
         self.sort_order = sort_order
+        self.intro = intro
 
     def cancel(self):
         self.token.cancel()
@@ -43,7 +43,7 @@ class VideoCardsWorker(QThread):
         try:
             result = video_cards.generate(self.data, self.output, self.seconds,
                 cancel_check=self.token.check, selected_ids=self.selected_ids,
-                on_progress=self.progress.emit, encoding=self.encoding, sort_order=self.sort_order)
+                on_progress=self.progress.emit, encoding=self.encoding, sort_order=self.sort_order,intro=self.intro)
         except TaskCancelledError:
             self.cancelled.emit()
         except Exception as error:
@@ -59,14 +59,12 @@ class VideoCardsDialog(ProductionComponent):
         self.resize(1240, 920)
         self.setMinimumSize(1000, 800)
         self.output_root = Path(output_dir)/'video-cards'
-        self.workspace_root = workspace_path() or Path(output_dir).resolve().parent
         self.data = None
         self.source = None
         self.index = -1
         self.worker = None
-        self.intro_dialog = None
-        self.download_dialog = None
         self.manifest = None
+        self.manifest_scope = self._render_scope = None
         self._changing = False
         self._close_requested = False
         self._preview_card = None
@@ -104,11 +102,15 @@ class VideoCardsDialog(ProductionComponent):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
         header = QHBoxLayout()
-        title = QLabel(tr('video.title'))
-        title.setObjectName('PanelTitle')
-        header.addWidget(title)
-        header.addStretch()
+        self.source_edit = QLineEdit()
+        self.source_edit.setReadOnly(True)
+        self.source_edit.setPlaceholderText('当前期次暂无可用画面素材')
+        header.addWidget(self.source_edit,1)
+        self.generate_button = self._button('video.generate_selected', self._start)
+        self.generate_button.setObjectName('PrimaryButton')
+        header.addWidget(self.generate_button)
         self.more_menu = QMenu(self)
+        self.more_menu.addAction('导入外部快照…',self._choose_snapshot)
         self.more_menu.addAction(tr('video.add_launch'), self._add_launch)
         self.save_snapshot_action = self.more_menu.addAction(tr('video.save_snapshot'), self._save_snapshot)
         self.save_snapshot_action.setEnabled(False)
@@ -118,16 +120,7 @@ class VideoCardsDialog(ProductionComponent):
         self.more.setAutoDefault(False)
         self.more.setMenu(self.more_menu)
         header.addWidget(self.more)
-        header.addWidget(self._button('video.intro', self._open_intro))
-        header.addWidget(self._button('video_download.title', self._open_download))
         layout.addLayout(header)
-        top = QHBoxLayout()
-        self.source_edit = QLineEdit()
-        self.source_edit.setReadOnly(True)
-        self.source_edit.setPlaceholderText(tr('video.load_first'))
-        top.addWidget(self.source_edit, 1)
-        top.addWidget(self._button('video.open_snapshot', self._choose_snapshot))
-        layout.addLayout(top)
         note = QLabel(tr('video.window_hint'))
         note.setObjectName('Eyebrow')
         note.setToolTip(tr('video.edits_note'))
@@ -293,12 +286,9 @@ class VideoCardsDialog(ProductionComponent):
         self.open_output.setEnabled(self.output_root.is_dir())
         footer.addWidget(self.open_output)
         footer.addStretch()
-        self.generate_button = self._button('video.generate_selected', self._start)
-        self.generate_button.setObjectName('PrimaryButton')
         self.cancel_button = self._button('video.cancel', self._cancel)
         self.cancel_button.setEnabled(False)
         self.cancel_button.hide()
-        footer.addWidget(self.generate_button)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self._button('video.close', self.reject))
         outer.addLayout(footer)
@@ -308,6 +298,9 @@ class VideoCardsDialog(ProductionComponent):
         filename, _ = QFileDialog.getOpenFileName(self, tr('video.open_snapshot'),
             str(self.source.parent if self.source else self.output_root.parent), 'JSON (*.json)')
         if filename:
+            if self.data is not None and QMessageBox.question(self,'切换素材来源',
+                '打开外部快照会切换当前素材列表。可先在“更多”中保存当前素材快照。继续吗？')!=QMessageBox.StandardButton.Yes:
+                return
             self.load_snapshot(Path(filename))
 
     def load_snapshot(self, path, *, sort_order=None):
@@ -332,11 +325,11 @@ class VideoCardsDialog(ProductionComponent):
         mode=self.sort_order.currentData()
         data = dict(data, items=video_cards.sort_items(data['items'],mode,input_order=order),input_order=order,
                     order_policy='selected_articles_input_order' if mode=='input' else f'video_type_then_published_{mode}')
-        self.source, self.data, self.index = Path(path), data, -1
-        self.editor_panel.setEnabled(True)
-        self.save_snapshot_action.setEnabled(True)
-        self.manifest = None
-        self.source_edit.setText(str(path))
+        self.source, self.data, self.index = Path(path) if path else None, data if ids else None, -1
+        self.editor_panel.setEnabled(bool(ids))
+        self.save_snapshot_action.setEnabled(bool(ids))
+        self.source_edit.setText('外部快照 · '+self.source.name if self.source else '当前期次' if ids else '')
+        self.source_edit.setToolTip(str(self.source) if self.source else '随本期稿件和发射任务更新')
         self.items.clear()
         for item in data['items']:
             row = QListWidgetItem()
@@ -345,7 +338,7 @@ class VideoCardsDialog(ProductionComponent):
             row.setCheckState(Qt.CheckState.Checked if selected_ids is None or item['id'] in selected_ids
                              else Qt.CheckState.Unchecked)
             self.items.addItem(row)
-        self._update_item_labels()
+        if ids:self._update_item_labels()
         self._changing = False
         self.items.setCurrentRow(next((i for i, item in enumerate(data['items'])
                                        if item['id'] == current_id), 0))
@@ -374,42 +367,8 @@ class VideoCardsDialog(ProductionComponent):
             url='https://example.invalid/launch/'+identifier, categories=[], video_type='launch',
             launch={key: '' for key in self.launch_fields}))
         selected.add('launch-manual:'+identifier)
-        self._set_data(data, self.source or self.output_root.parent/'launch-cards.json',
+        self._set_data(data, self.source,
                        selected, 'launch-manual:'+identifier)
-
-    def _open_intro(self):
-        if hasattr(self, 'open_intro'):
-            self.open_intro()
-            return
-        if self.worker is not None:
-            return
-        from ui.video_intro_dialog import VideoIntroDialog
-        dialog = VideoIntroDialog(self.output_root.parent/'video-intro', self)
-        self.intro_dialog = dialog
-        dialog.exec()
-        self.intro_dialog = None
-        dialog.deleteLater()
-        if self._close_requested:
-            super().reject()
-
-    def _open_download(self):
-        if hasattr(self, 'open_download'):
-            self.open_download()
-            return
-        if self.worker is not None:
-            return
-        from ui.video_download_dialog import VideoDownloadDialog
-        self._store_editor()
-        items = list(self.data['items']) if self.data else []
-        if self.index >= 0 and items:
-            items.insert(0, items.pop(self.index))
-        dialog = VideoDownloadDialog(self.workspace_root, items, self)
-        self.download_dialog = dialog
-        dialog.exec()
-        self.download_dialog = None
-        dialog.deleteLater()
-        if self._close_requested:
-            super().reject()
 
     def _type_changed(self):
         is_launch = self.kind.currentData() == 'launch'
@@ -557,7 +516,7 @@ class VideoCardsDialog(ProductionComponent):
         if self.data is None:
             return
         filename, _ = QFileDialog.getSaveFileName(self, tr('video.save_snapshot'),
-            str(self.output_root.parent/(self.source.stem+'.edited.json')), 'JSON (*.json)')
+            str(self.output_root.parent/((self.source.stem if self.source else 'SpaceWeekly')+'.edited.json')), 'JSON (*.json)')
         if not filename:
             return
         try:
@@ -575,7 +534,7 @@ class VideoCardsDialog(ProductionComponent):
             self.output_edit.setText(directory)
             self.open_output.setEnabled(True)
 
-    def _start(self):
+    def _start(self,*,intro=None):
         if self.worker is not None or self.data is None:
             return
         self._store_editor()
@@ -603,7 +562,8 @@ class VideoCardsDialog(ProductionComponent):
         self.status.setText(tr('video.working'))
         self.log.appendPlainText(tr('video.snapshot_saved', path=edited))
         self.worker = VideoCardsWorker(data, self.output_root, self.seconds.value(), selected, self,
-                                      encoding=self.encoding.currentData(), sort_order=self.sort_order.currentData())
+                                      encoding=self.encoding.currentData(), sort_order=self.sort_order.currentData(),intro=intro)
+        self._render_scope = self.edition_scope() if hasattr(self,'edition_scope') else None
         self.worker.progress.connect(self._on_progress)
         self.worker.finished_ok.connect(self._done)
         self.worker.failed.connect(self._failed)
@@ -628,6 +588,7 @@ class VideoCardsDialog(ProductionComponent):
 
     def _done(self, path):
         self.manifest = Path(path)
+        self.manifest_scope = self._render_scope
         self.progress_bar.setValue(100)
         self.status.setText(tr('video.done', path=path))
         self.log.appendPlainText(tr('video.done', path=path))
@@ -661,14 +622,6 @@ class VideoCardsDialog(ProductionComponent):
     def reject(self):
         self._stop_preview()
         self._refresh_timer.stop()
-        if self.download_dialog is not None:
-            self._close_requested = True
-            self.download_dialog.reject()
-            return
-        if self.intro_dialog is not None:
-            self._close_requested = True
-            self.intro_dialog.reject()
-            return
         if self.worker is not None:
             self._close_requested = True
             self._cancel()
@@ -676,7 +629,7 @@ class VideoCardsDialog(ProductionComponent):
         super().reject()
 
     def closeEvent(self, event):
-        if self.worker is not None or self.intro_dialog is not None or self.download_dialog is not None:
+        if self.worker is not None:
             self.reject()
             event.ignore()
         else:

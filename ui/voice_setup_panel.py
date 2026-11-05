@@ -43,11 +43,13 @@ class VoiceSetupPanel(QWidget):
         self.start_button=QPushButton('开始自动配置');self.start_button.setObjectName('PrimaryButton');self.start_button.clicked.connect(lambda:self.guard(self.deploy))
         self.start_button.setEnabled(False)
         actions.addWidget(self.detect_button);actions.addWidget(self.start_button);actions.addStretch();body.addLayout(actions)
+        base=QPushButton('准备参考音色组件（约 2.52 GB，Hugging Face）')
+        base.clicked.connect(lambda:self.guard(self.prepare_reference_model));body.addWidget(base,0)
         body.addStretch(1)
         self.tabs.addTab(page,'自动配置')
         existing_page=QWidget();existing_layout=QVBoxLayout(existing_page)
         use=QPushButton('检查并使用这些设置');use.clicked.connect(lambda:self.guard(self.use_existing));existing_layout.addWidget(use)
-        self.operation_buttons=[use]
+        self.operation_buttons=[use,base]
         existing_layout.addWidget(existing);self.tabs.addTab(existing_page,'使用已有环境')
         maintenance=QWidget();maintenance_layout=QVBoxLayout(maintenance)
         note=QLabel('检查与修复采用“自动配置”中选定的方案。重建时保留上次配置，待新环境验证通过后切换。')
@@ -65,6 +67,8 @@ class VoiceSetupPanel(QWidget):
             button=QPushButton(text);button.setObjectName('TextButton');button.clicked.connect(lambda _=False,fn=action:self.guard(fn));cleanup.addWidget(button);self.operation_buttons.append(button)
         cleanup.addStretch();maintenance_layout.addLayout(cleanup);maintenance_layout.addStretch(1)
         self.tabs.addTab(maintenance,'检查与修复')
+        from ui.voice_profiles_panel import VoiceProfilesPanel
+        self.my_voices=VoiceProfilesPanel(self);self.tabs.addTab(self.my_voices,'我的音色')
         self.status=QLabel('尚未配置');self.status.setWordWrap(True);layout.addWidget(self.status)
         self.progress=QProgressBar();self.progress.hide();layout.addWidget(self.progress)
         bottom=QHBoxLayout();self.cancel=QPushButton('取消配置');self.cancel.clicked.connect(self.cancel_work);self.cancel.hide();bottom.addWidget(self.cancel)
@@ -98,10 +102,10 @@ class VoiceSetupPanel(QWidget):
         return dict(root=self.root.text().strip(),device=self.device.currentData(),quality=self.quality.currentData(),source=self.source.currentData())
 
     def start(self,kind,action):
-        if self.worker or self.workspace.roundup.worker:raise ValueError('请先等待或取消当前语音任务')
+        if self.worker or self.workspace.worker or self.workspace.roundup.worker:raise ValueError('请先等待或取消当前语音任务')
         worker=VoiceSetupWorker(None,{},self)
         def run(data,token):
-            if kind!='detect':self.workspace.roundup.tts_provider.unload()
+            if kind not in ('detect','reference'):self.workspace.roundup.tts_provider.unload()
             return action(token,worker.progress.emit)
         worker.action=run;worker.progress.connect(self.on_progress);worker.finished.connect(lambda:self.finished(kind,worker))
         self.worker=worker;self.cancel.show();self.progress.setRange(0,0);self.progress.show()
@@ -110,6 +114,12 @@ class VoiceSetupPanel(QWidget):
 
     def busy_controls(self,busy):
         for widget in (self.root,self.browse,self.device,self.quality,self.source,self.start_button,self.detect_button,*self.operation_buttons):widget.setEnabled(not busy)
+        self.my_voices.busy(busy)
+
+    def prepare_reference_model(self):
+        root=self.root.text().strip()
+        if not root:raise ValueError('请选择参考音色组件的保存位置')
+        self.start('base',lambda token,emit:service.VoiceDeployment(root,token,emit).prepare_base())
 
     def inspect(self):
         options=self.values()
@@ -170,6 +180,11 @@ class VoiceSetupPanel(QWidget):
             message=redact(worker.error)
             self.status.setText('未完成：'+message if len(message)<200 else '配置未完成，可重试；详细原因见日志，已有缓存保留')
         elif kind=='detect':self.show_plan(worker.value)
+        elif kind=='base':
+            self.status.setText('参考音色模型已下载并校验，请生成试听')
+            self.tabs.setCurrentWidget(self.my_voices)
+        elif kind=='reference':
+            self.my_voices.ready(worker.value);self.status.setText('参考音色试听已生成')
         elif kind in ('deploy','existing'):
             self.result=worker.value
             try:self.adopt(worker.value);self.refresh_state()
@@ -185,12 +200,12 @@ class VoiceSetupPanel(QWidget):
         r._store_segment()
         self.workspace.checkpoint();selected=r.segment_list.currentRow()
         if active.get('tts',{}).get('ready'):
-            old_speaker=r.speaker.currentText();old_style=r.style.text()
+            old_speaker=r.speaker_id();old_style=r.style.text()
             r.draft['tts'].update({k:active['tts'][k] for k in ('python','model','speaker','style','device','timeout')})
             capabilities=active['tts'].get('capabilities',{})
             supported=capabilities.get('speakers',[])
             chosen=next((s for s in supported if s.casefold()==old_speaker.casefold()),None)
-            if chosen:r.draft['tts']['speaker']=old_speaker
+            if chosen or old_speaker.startswith('my:'):r.draft['tts']['speaker']=old_speaker
             if capabilities.get('style'):r.draft['tts']['style']=old_style
         if active.get('align',{}).get('ready'):
             r.draft.setdefault('aligner',{}).update({k:active['align'][k] for k in ('python','model','device','language','timeout')})

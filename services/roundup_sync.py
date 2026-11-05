@@ -248,6 +248,13 @@ def segment_schedule(draft, segment, timing=None):
     return value
 
 
+def closing_hold(draft):
+    value = draft.get('closing_hold_seconds', 1.5)
+    if type(value) not in (int, float) or not 1 <= value <= 2:
+        raise ValueError('发射收尾停留应为1至2秒')
+    return value
+
+
 def build_timeline(draft):
     rows, cursor = [], 0
     pause = float(draft.get('pause_seconds', .3))
@@ -256,7 +263,8 @@ def build_timeline(draft):
     for index, segment in enumerate(draft['segments']):
         row = segment_schedule(draft, segment)
         duration = row['duration_samples']
-        silence = round(pause*RATE) if index+1 < len(draft['segments']) else 0
+        final_pause = closing_hold(draft) if content_namespace(draft)=='roundup' else 0
+        silence = round((pause if index+1 < len(draft['segments']) else final_pause)*RATE)
         row.update(start_sample=cursor, speech_end_sample=cursor+duration, end_sample=cursor+duration+silence,
             pause_samples=silence, start_seconds=cursor/RATE, speech_end_seconds=(cursor+duration)/RATE,
             end_seconds=(cursor+duration+silence)/RATE)
@@ -272,6 +280,31 @@ def build_timeline(draft):
         precision='unit' if rows and all(r['precision']=='unit' for r in rows) else
                   'mixed' if any(r['precision']=='unit' for r in rows) else 'paragraph' if rows and all(r['audio'] for r in rows) else 'preview',
         gap_rule='hold_previous_until_next_start', animation_rule='within_existing_time', subtitles='unit_or_paragraph')
+
+
+def join_timelines(timelines):
+    """Offset each section in samples, keeping local alignment positions intact."""
+    from copy import deepcopy
+    result = deepcopy(timelines[0])
+    result.update(segments=[], total_samples=0, all_audio_current=True)
+    for timeline in timelines:
+        offset = result['total_samples']
+        for original in timeline['segments']:
+            row = deepcopy(original)
+            for prefix in ('start', 'speech_end', 'end'):
+                row[prefix+'_sample'] += offset
+                row[prefix+'_seconds'] = row[prefix+'_sample']/RATE
+            for unit in row['units']:
+                for prefix in ('global_start', 'global_end'):
+                    unit[prefix+'_sample'] += offset
+                    unit[prefix+'_seconds'] = unit[prefix+'_sample']/RATE
+            result['segments'].append(row)
+        result['total_samples'] += timeline['total_samples']
+        result['all_audio_current'] &= timeline['all_audio_current']
+    result['duration_seconds'] = result['total_samples']/RATE
+    precisions = {timeline['precision'] for timeline in timelines}
+    result['precision'] = precisions.pop() if len(precisions)==1 else 'mixed'
+    return result
 
 
 def row_at(timeline, seconds):

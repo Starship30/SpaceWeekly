@@ -32,6 +32,7 @@ OFFICIAL_DOMAINS = (
     "isro.gov.in",
     "cnsa.gov.cn",
     "cas.cn",
+    "cas-space.com",
     "jaxa.jp",
     "landspace.com",
     "spacepioneer.cc",

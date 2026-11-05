@@ -78,7 +78,7 @@ class JsonResponseTests(unittest.TestCase):
     def test_empty_response_retries_then_succeeds(self):
         provider = Mock(model="test-model")
 
-        with patch("ai.providers.complete", side_effect=["", '{"translation":"星舰"}']):
+        with patch("ai.providers.complete_with_metadata", side_effect=[dict(content=""),dict(content='{"translation":"星舰"}')]):
             data = request_json(
                 "prompt",
                 provider,
@@ -92,7 +92,7 @@ class JsonResponseTests(unittest.TestCase):
         provider = Mock(model="test-model")
         error = APIRequestError("test", "temporary failure", status_code=503)
 
-        with patch("ai.providers.complete", side_effect=error):
+        with patch("ai.providers.complete_with_metadata", side_effect=error):
             with self.assertRaises(APIRequestError):
                 request_json("prompt", provider, module_name="translator_test")
 

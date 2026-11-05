@@ -1,4 +1,4 @@
-"""Conservative, file-only cleanup of known regenerable workspace caches."""
+"""Inventory and file-only cleanup of known workspace products."""
 from contextlib import contextmanager
 import json
 from pathlib import Path
@@ -13,7 +13,10 @@ from services.launch_data import write_json
 LOCK=RLock()
 ACTIVE=0
 DAY=86400
-LABELS={'preview':'临时音频预览','thumbnail':'图片缩略图','network':'可重新获取的网页副本','temporary':'下载临时文件'}
+LABELS={'preview':'临时预览与缩略音频','thumbnail':'图片缩略图','network':'可重新获取的网页副本','temporary':'下载与失败任务临时文件',
+        'images':'新闻配图','downloads':'下载的视频素材','generated':'配音、字幕和画面素材','exports':'导出成果'}
+FORMAL={'images','downloads','generated','exports'}
+OUTPUT_NAME=r'SpaceWeekly_\d{4}-\d{2}-\d{2}_\d{3,}'
 DEFAULTS=dict(version=1,enabled=True,interval_days=3,retention_days=3,last_check=0,last_reminder=0,last_clean=0,snooze_until=0,files={})
 
 
@@ -55,18 +58,99 @@ def category(relative):
     return None
 
 
-def managed(path):
+def safe_relative(path):
     path=Path(path);base=root()
     try:
         relative=path.absolute().relative_to(base)
         # Reject reparse/symlink paths, including directory junctions escaping the workspace.
         if path.resolve()!=path.absolute() or any(p.is_symlink() or getattr(p,'is_junction',lambda:False)() for p in (path,*path.parents) if p!=base):return None
-    except (ValueError,OSError):return None
+    except (ValueError,OSError,RuntimeError):return None
+    return relative
+
+
+def managed(path,receipts=None):
+    relative=safe_relative(path)
+    if relative is None:return None
     parts=relative.parts
     if (len(parts)==4 and parts[:1]==('cache',) and parts[1] in ('roundup_pcm','news_pcm','roundup_playback','news_playback')
-            and re.fullmatch(r'[a-f0-9]{64}',parts[2]) and parts[3] in ('audio.wav','audio.json','narration.wav','narration.json')):
+            and re.fullmatch(r'[a-f0-9]{64}',parts[2]) and (parts[3] in ('audio.wav','audio.json','narration.wav','narration.json')
+                 or re.fullmatch(r'timeline-[a-f0-9]{64}\.json',parts[3]))):
         return 'preview'
+    if len(parts)==4 and parts[:2]==('cache','voice_samples') and re.fullmatch(r'[a-f0-9]{32}',parts[2]):
+        if parts[3] in ('reference.wav','sample.wav') or re.fullmatch(r'original\.[a-z0-9]+|'+OUTPUT_NAME+r'\.wav',parts[3]):
+            return 'preview'
+    if len(parts)==4 and parts[0]=='cache' and re.fullmatch(r'(news|roundup)_(audio|alignment)',parts[1]) and re.fullmatch(r'[a-f0-9]{64}',parts[2]):
+        if re.fullmatch(r'audio\.json|alignment\.json|'+OUTPUT_NAME+r'\.wav',parts[3]):return 'generated'
+    if len(parts)==2 and parts[0]=='output' and re.fullmatch(OUTPUT_NAME+r'\.(?:premiere\.json|docx|md|mp4|mov|srt|wav)',parts[1]):
+        if parts[1].endswith('.premiere.json'):
+            try:
+                candidate=root()/relative
+                if candidate.stat().st_size>16*1024*1024:return None
+                data=json.loads(candidate.read_text(encoding='utf-8'))
+                if not isinstance(data,dict) or data.get('protocol_version')!='1.0' or not isinstance(data.get('items'),list):return None
+            except (OSError,ValueError):return None
+        return 'exports'
+    if len(parts)==3 and parts[:2] in (('output','video-intro'),('output','video-cards')) and re.fullmatch(OUTPUT_NAME+r'\.intro\.mp4',parts[2]):
+        return 'generated'
+    if len(parts)==2 and parts[0]=='output' and re.fullmatch(r'\.'+OUTPUT_NAME+r'(?:\.premiere)?\.[a-f0-9]{32}\.tmp\.(?:json|docx|md|mp4|mov|wav)',parts[1]):
+        return 'temporary'
+    if receipts and relative in receipts:return receipts[relative]
     return category(relative)
+
+
+def receipts():
+    base=root();owned={};image_refs=set();uncertain=False
+    def read(path):
+        if safe_relative(path) is None or path.stat().st_size>16*1024*1024:raise ValueError('无效清单路径')
+        data=json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data,dict):raise ValueError('无效清单内容')
+        return data
+    def add(path,kind):
+        relative=safe_relative(path)
+        if relative is not None:owned[relative]=kind
+    path=base/'news-images/manifest.json'
+    try:
+        images=read(path);linked={identifier for row in images['news'].values()
+            for identifier in [row.get('selected'),*row.get('assets',[])]}
+        for key,asset in images['images'].items():
+            relative=Path(asset['path'])
+            if len(relative.parts)==2 and relative.parts[0]=='news-images' and re.fullmatch(r'[a-f0-9]{64}\.(?:png|jpe?g|webp|gif)',relative.name):
+                add(base/relative,'images')
+                if key in linked:image_refs.add((base/relative).resolve())
+    except FileNotFoundError:pass
+    except (OSError,ValueError,TypeError,AttributeError,KeyError):uncertain=True
+    for path in (base/'video-downloads').glob('*/metadata.json'):
+        try:
+            record=read(path)
+            if not record.get('original_url'):continue
+            if record.get('status')=='completed':
+                video=Path(record.get('file_path') or path.parent/'media.mp4')
+                if video.suffix.lower()=='.mp4' and video.parent in (base/'video-downloads',path.parent):add(video,'downloads')
+            elif record.get('status') in ('failed','cancelled'):
+                for file in path.parent.glob('media*'):
+                    if re.fullmatch(r'media(?:\.[\w-]+){1,4}',file.name):add(file,'temporary')
+        except (OSError,ValueError,TypeError):uncertain=True
+    for path in (base/'output/video-cards').glob('*/manifest.json'):
+        try:
+            record=read(path)
+            if record.get('audio_policy')!='silent_no_audio_stream':continue
+            for row in record.get('cards',[]):
+                name=Path(row.get('file',''))
+                if len(name.parts)<=2 and re.fullmatch(OUTPUT_NAME+r'\.(?:launch|news)\.mov',name.name):
+                    if len(name.parts)==1 or name.parts[0] in ('news','launches'):add(path.parent/name,'generated')
+            add(path,'exports')
+        except (OSError,ValueError,TypeError,AttributeError):uncertain=True
+    for path in (base/'output').glob('SpaceWeekly_*/manifest.json'):
+        if not re.fullmatch(r'SpaceWeekly_(?:roundup|news_voice)_\d{8}_\d{6}_[a-f0-9]{8}',path.parent.name):continue
+        try:
+            record=read(path)
+            if record.get('state') not in ('incomplete','complete','exporting'):continue
+            for file in path.parent.iterdir():
+                if (re.fullmatch(OUTPUT_NAME+r'\.(?:(?:news|launch|roundup)\.mov|(?:intro\.)?mp4)',file.name)
+                        or re.fullmatch(r'\d{2,}\.wav|(?:script|reading_script)\.md|reading\.txt|(?:paragraphs|subtitles)\.srt|(?:voice|narration)\.wav|(?:draft|snapshot|timeline|shots|reading_map|manifest|material_states|writing_input|polish_history)\.json',file.name)):
+                    add(file,'exports')
+        except (OSError,ValueError,TypeError):uncertain=True
+    return owned,image_refs,uncertain
 
 
 def touch(path,now=None):
@@ -95,38 +179,47 @@ def using_media():
         with LOCK:ACTIVE-=1
 
 
-def references(extra=()):
+def references(extra=(),owned=None):
     """Protect saved drafts, histories and packages; unknown/unreadable references fail closed."""
     base=root();paths=set();hashes=set();uncertain=False
-    def visit(value):
+    known=owned or {}
+    def visit(value,folder=base):
         if isinstance(value,dict):
-            for v in value.values():visit(v)
+            for v in value.values():visit(v,folder)
         elif isinstance(value,list):
-            for v in value:visit(v)
+            for v in value:visit(v,folder)
         elif isinstance(value,str):
             if re.fullmatch(r'[a-f0-9]{64}',value):hashes.add(value)
+            if not value or len(value)>1024 or '\n' in value or '://' in value:return
             try:
                 p=Path(value)
-                if p.is_absolute():paths.add(p.resolve())
-                elif value.startswith('cache/') or value.startswith('cache\\'):paths.add((base/p).resolve())
-            except (OSError,ValueError):pass
-    files=list((base/'config').glob('**/*.json'))+list((base/'output').glob('**/*.json'))+[base/'cache/production-recovery.json']
+                if p.is_absolute():
+                    if p.is_relative_to(base):paths.add(p)
+                elif p.parts and p.parts[0] in ('cache','news-images','video-downloads','output'):paths.add((base/p).resolve())
+                elif folder!=base and (folder/p).relative_to(base) in known:paths.add(folder/p)
+            except (OSError,ValueError,RuntimeError):pass
+    files=[base/'config/production-session.json',base/'cache/production-recovery.json']
+    for directory in ('production-versions','roundup-drafts','news-drafts'):
+        files.extend((base/'output'/directory).glob('*.json'))
+    files.extend(base/relative for relative in (owned or {}) if relative.parts[0]=='output' and relative.suffix=='.json')
     for path in files:
         if path.name=='cache-maintenance.json':continue
         try:
             if path.stat().st_size>16*1024*1024:uncertain=True;continue
-            visit(json.loads(path.read_text(encoding='utf-8')))
+            if safe_relative(path) is None:uncertain=True;continue
+            visit(json.loads(path.read_text(encoding='utf-8')),path.parent)
         except FileNotFoundError:continue
         except (OSError,ValueError):uncertain=True
     visit(extra)
     return paths,hashes,uncertain
 
 
-def protected(path,refs,active=False):
+def protected(path,refs,active=False,*,ignore_active=False):
     paths,hashes,uncertain=refs
-    if active or ACTIVE or uncertain:return True
-    if path.resolve() in paths or path.parent.name in hashes:return True
-    if path.suffix=='.json':return protected(path.with_suffix('.wav'),refs,active)
+    if active or (ACTIVE and not ignore_active) or uncertain:return True
+    if (path.resolve() in paths or path.parent.name in hashes
+            or path.parent in paths and path.parent.name.startswith(('SpaceWeekly_roundup_','SpaceWeekly_news_voice_'))):return True
+    if path.suffix=='.json':return protected(path.with_suffix('.wav'),refs,active,ignore_active=ignore_active)
     sidecar=path.with_suffix('.json')
     if sidecar.exists():
         try:
@@ -136,30 +229,45 @@ def protected(path,refs,active=False):
     return False
 
 
-def scan(token,*,now=None,extra=(),active=False,record_check=True):
-    now=time.time() if now is None else now;base=root();rows=[];refs=references(extra)
+def scan(token,*,now=None,extra=(),active=False,in_use=(),record_check=True):
+    now=time.time() if now is None else now;base=root();rows=[];inventory=[]
+    owned,image_refs,uncertain=receipts();paths,hashes,warning=references(extra,owned)
+    refs=(paths|image_refs,hashes,False);blocked=bool(active or ACTIVE or warning or uncertain)
+    playback={Path(path).resolve() for path in in_use if path}
     with LOCK:data=load()
     discovered={}
-    for directory in ('news_thumbnails','news_http','news_image_downloads','roundup_pcm','news_pcm','roundup_playback','news_playback'):
+    paths_to_check={base/path for path in owned}
+    paths_to_check.update((base/'output').glob('*'))
+    for name in ('video-intro','video-cards'):paths_to_check.update((base/'output'/name).glob('*.intro.mp4'))
+    for directory in ('news_thumbnails','news_http','news_image_downloads','roundup_pcm','news_pcm','roundup_playback','news_playback',
+                      'news_audio','roundup_audio','news_alignment','roundup_alignment','voice_samples'):
         folder=base/'cache'/directory
-        for path in folder.glob('*/*' if directory.endswith(('_pcm','_playback')) else '*'):
-            token.check();kind=managed(path)
-            if not kind or not path.is_file():continue
-            try:info=path.stat()
-            except FileNotFoundError:continue
-            relative=str(path.relative_to(base));record=data['files'].get(relative)
-            if not record:
-                # Legacy files have unknown use history: observe once, then wait a full retention period.
-                record=dict(first_seen=now);discovered[relative]=record
-            used=max(record.get('last_used',record.get('first_seen',now)),info.st_mtime)
-            if now-used<data['retention_days']*DAY or protected(path,refs,active):continue
-            rows.append(dict(path=relative,category=kind,size=info.st_size,mtime_ns=info.st_mtime_ns,last_used=used))
+        paths_to_check.update(folder.glob('*/*' if directory.endswith(('_pcm','_playback','_audio','_alignment','_samples')) else '*'))
+    for path in sorted(paths_to_check):
+        token.check();kind=managed(path,owned)
+        if not kind or not path.is_file():continue
+        try:info=path.stat()
+        except FileNotFoundError:continue
+        relative=str(path.relative_to(base));record=data['files'].get(relative)
+        if not record and kind not in FORMAL:
+            # Legacy caches have unknown use history. Observe once before applying retention.
+            record=dict(first_seen=now);discovered[relative]=record
+        record=record or {}
+        used=max(record.get('last_used',record.get('first_seen',info.st_mtime)),info.st_mtime)
+        old=now-used>=data['retention_days']*DAY
+        referenced=protected(path,refs,ignore_active=True)
+        locked=blocked or path in playback or path.with_suffix('.wav') in playback
+        default=old and not referenced and not locked and kind not in FORMAL
+        row=dict(path=relative,category=kind,size=info.st_size,mtime_ns=info.st_mtime_ns,last_used=used,
+                 referenced=referenced,blocked=locked,default=default,old=old)
+        inventory.append(row)
+        if default:rows.append(row)
     with LOCK:
         current=load()
         for path,value in discovered.items():current['files'].setdefault(path,value)
         if record_check:current['last_check']=now;current['snooze_until']=0
         if record_check or discovered:write_json(resource_path('config','cache-maintenance.json'),current)
-    return dict(files=rows,count=len(rows),bytes=sum(r['size'] for r in rows),reference_warning=refs[2])
+    return dict(files=rows,inventory=inventory,count=len(rows),bytes=sum(r['size'] for r in rows),reference_warning=warning or uncertain)
 
 
 def due(now=None):
@@ -177,21 +285,30 @@ def snooze(now=None):
     return update(snooze_until=now+DAY)
 
 
-def clean(rows,token,*,now=None,extra=(),active=lambda:False):
+def clean(rows,token,*,now=None,extra=(),active=lambda:False,in_use=(),allow_formal=False,allow_referenced=False):
     now=time.time() if now is None else now;result=dict(deleted=0,bytes=0,failed=[],cancelled=False)
     from services.cancellation import TaskCancelledError
-    for row in rows:
+    owned,image_refs,uncertain=receipts()
+    paths,hashes,warning=references(extra,owned);refs=(paths|image_refs,hashes,False)
+    playback={Path(path).resolve() for path in in_use if path}
+    # Keep inventory receipts when a file in their package could not be removed.
+    for row in sorted(rows,key=lambda r:Path(r['path']).name=='manifest.json'):
         try:token.check()
         except TaskCancelledError:result['cancelled']=True;break
         path=root()/row['path']
         try:
-            refs=references(extra)
             with LOCK:
                 data=load()
-                if not managed(path) or protected(path,refs,active()):raise ValueError('文件受保护或有任务正在使用')
+                kind=managed(path,owned);formal=kind in FORMAL
+                if not kind or kind!=row['category'] or uncertain or warning or active() or ACTIVE or path in playback or path.with_suffix('.wav') in playback:
+                    raise ValueError('文件受保护或有任务正在使用')
+                if (formal and not allow_formal) or (protected(path,refs) and (not allow_referenced or not row.get('referenced'))):
+                    raise ValueError('文件受引用保护或未明确选择')
+                if path.name=='manifest.json' and any(Path(failure['path']).is_relative_to(path.parent.relative_to(root())) for failure in result['failed']):
+                    raise ValueError('所属素材有未删除项，保留清单')
                 info=path.stat();record=data['files'].get(str(path.relative_to(root())),{})
                 used=max(record.get('last_used',record.get('first_seen',now)),info.st_mtime)
-                if info.st_size!=row['size'] or info.st_mtime_ns!=row['mtime_ns'] or now-used<data['retention_days']*DAY:
+                if info.st_size!=row['size'] or info.st_mtime_ns!=row['mtime_ns'] or (not formal and now-used<data['retention_days']*DAY):
                     raise ValueError('文件已变化或近期使用，请重新检查')
                 path.unlink();result['deleted']+=1;result['bytes']+=info.st_size
                 data['files'].pop(str(path.relative_to(root())),None);data['last_clean']=now

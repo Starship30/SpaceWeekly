@@ -81,6 +81,7 @@ class VideoIntroDialog(ProductionComponent):
         self._preview_timer.setInterval(33)
         self._preview_timer.timeout.connect(self._tick_preview)
         self.result_path = None
+        self.result_scope = self._render_scope = None
         self._closing = False
         self._logo_key = object()
         self._logo_data = None
@@ -409,6 +410,7 @@ class VideoIntroDialog(ProductionComponent):
         self.progress.setValue(0)
         self.status.setText(tr('video.working'))
         self.worker = IntroWorker(self.output, options, self)
+        self._render_scope = self.edition_scope() if hasattr(self,'edition_scope') else None
         self.worker.progress.connect(lambda fraction: self.progress.setValue(round(fraction*95)))
         self.worker.succeeded.connect(self._done)
         self.worker.failed.connect(lambda error: self.status.setText(tr('video.failed', error=error)))
@@ -418,6 +420,7 @@ class VideoIntroDialog(ProductionComponent):
 
     def _done(self, path):
         self.result_path = Path(path)
+        self.result_scope = self._render_scope
         self.open.setEnabled(True)
         self.progress.setValue(100)
         self.status.setText(tr('video.intro_done', path=path))

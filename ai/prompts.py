@@ -79,6 +79,7 @@ Return exactly one strict JSON object with only these fields:
 
 Rules:
 - summary, keywords, and category labels must be in English.
+- Write a screen summary in one or two sentences about the event and its latest development. Avoid spoken introductions or transitions.
 - Use 3 to 8 concise keywords.
 - category must be a JSON array containing zero to {maximum_categories} items.
 - Select category values only from this exact list: {allowed_categories}
@@ -102,6 +103,7 @@ Body: {article.body}
 
 规则：
 - summary、keywords 和 category 必须使用简体中文。
+- 摘要用于快速浏览和屏幕展示，一至两句突出事件与最新进展，通常约50至100字。资料简短时可更短，不写口播开场、过渡或背景堆叠。
 - 返回 3 到 8 个简洁关键词。
 - category 必须是 JSON 数组，允许为空，最多 {maximum_categories} 项。
 - category 只能逐字选择以下统一分类：{allowed_categories}

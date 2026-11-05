@@ -266,6 +266,18 @@ class LaunchResearchTests(unittest.TestCase):
         self.assertEqual(entry['translation'], '用户确认名')
         self.assertEqual(entry['human_status'], 'confirmed')
 
+    def test_installer_default_names_and_user_mission_name_without_provider_suffix(self):
+        with patch.object(dictionary,'bundled_resource_path',return_value=self.root/'no-bundled-dictionary'):
+            entry=research.display_names(dict(self.context,rocket='Electron',
+                site_name='Rocket Lab Launch Complex 1, Mahia Peninsula, New Zealand'))
+            self.assertEqual(entry['rocket'],'电子号')
+            self.assertIn('1号发射场',entry['site_name'])
+            self.assertEqual(dictionary.dictionary_replace('Electron beam test')[0],'Electron beam test')
+            dictionary.save_dictionary({'The Sea God Surveys':dict(translation='已确认中文名',type='mission',human_status='confirmed')})
+            item=dict(self.context,english_name='The Sea God Surveys (iQPS Launch 9)')
+            self.assertEqual(research.display_names(item)['name'],'已确认中文名')
+            self.assertEqual(research.display_names(item)['name_source'],'术语词典')
+
     def test_cancellation_propagates_without_publishing_partial_cache(self):
         def cancel(*_args, **_kwargs):
             self.token.cancel()

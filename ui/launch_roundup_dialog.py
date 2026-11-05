@@ -18,7 +18,7 @@ from services.launch_data import load_existing, refresh_collection, save_collect
 from services import launch_roundup as roundup
 from services.roundup_audio import current_audio, generate_audio, speech_text, reading_text
 from services.roundup_polish import polish_segments, apply_polish, organize_segments
-from services.roundup_export import export_package
+from services.roundup_export import export_complete_video, export_package
 from ai.qwen_tts import QwenTTSProvider, capabilities
 
 
@@ -275,6 +275,7 @@ class LaunchRoundupDialog(ProductionComponent):
         for control in (self.python, self.model, self.style):
             control.textChanged.connect(self._voice_changed)
         self.speaker.currentTextChanged.connect(self._voice_changed)
+        self.speaker.currentIndexChanged.connect(self._speaker_controls)
         self.device.currentTextChanged.connect(self._voice_changed)
         self.timeout.valueChanged.connect(self._voice_changed)
         self.pronunciations.textChanged.connect(self._voice_changed)
@@ -292,7 +293,7 @@ class LaunchRoundupDialog(ProductionComponent):
         self.export_controls = QWidget()
         export_layout = QVBoxLayout(self.export_controls)
         self._button(export_layout, '导出稿件与快照（含可用配音）', lambda: self._export(False))
-        self._button(export_layout, '导出配音与画面素材包', lambda: self._export(True))
+        self._button(export_layout, '导出带配音的 MP4', lambda: self._export(True))
         export_layout.addWidget(QLabel(tr('production.legacy.60')))
         layout.addWidget(self.export_controls)
         layout.addStretch()
@@ -315,7 +316,6 @@ class LaunchRoundupDialog(ProductionComponent):
         voice = self.draft['tts']
         self.python.setText(voice['python'])
         self.model.setText(voice['model'])
-        self.speaker.setCurrentText(voice['speaker'])
         self.style.setText(voice.get('style', ''))
         device=voice.get('device','cpu')
         if self.device.findText(device)<0:self.device.addItem(device)
@@ -330,7 +330,7 @@ class LaunchRoundupDialog(ProductionComponent):
             self.align_device.setText(aligner['device']);self.align_language.setCurrentText(aligner['language'])
             self.align_timeout.setValue(int(aligner['timeout']))
         self._loading = False
-        self._capabilities()
+        self.refresh_speakers(voice['speaker'])
         self._voice_dirty = False
         self._show_tasks()
         self._show_segments()
@@ -346,18 +346,21 @@ class LaunchRoundupDialog(ProductionComponent):
         self.tasks.setRowCount(0)
         items = {i['ll2_id']: i for i in self.draft['snapshot']['items']}
         from services.launch_research import confirmed_values
+        from services.roundup_style import event_result
+        from translator.dictionary import load_dictionary
+        terms=load_dictionary()
         from utils.time import format_datetime
         for row, selection in enumerate(self.draft['selection']):
             self.tasks.insertRow(row)
             item = items[selection['id']]
-            names = roundup.display_names(item)
+            names = roundup.display_names(item,terms)
             name = names['name']
             classification = {'actual': '实际发射', 'planned': '计划', 'delayed': '延期', 'cancelled': '取消', 'pending': '待确认'}
             state = roundup.material_status(item)
             values = ['', '', name, classification[roundup.category(item, roundup.parse_datetime(self.draft['as_of']))], selection['group'], format_datetime(item.get('net', ''), self.draft.get('timezone', 'Asia/Shanghai')),
                       item.get('site_country', ''), item.get('provider', ''),
                       state['preparation_label'], state['source_label'], state['independent_label'], state['human_label'],
-                      names['rocket'], roundup.event_context(item, self.draft)['launch_result']]
+                      names['rocket'], event_result(item,self.draft)]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
                 cell.setData(Qt.ItemDataRole.UserRole,selection['id']);cell.setToolTip(str(value))
@@ -374,9 +377,9 @@ class LaunchRoundupDialog(ProductionComponent):
         self.tasks.setColumnWidth(2, min(320, self.tasks.columnWidth(2)))
         if hasattr(self,'task_column_sizes'):self.task_column_sizes()
         self._loading = False
-        if selected_id:
-            row=next((n for n,s in enumerate(self.draft['selection']) if s['id']==selected_id),-1)
-            if row>=0:self.tasks.setCurrentCell(row,2)
+        if self.draft['selection']:
+            row=next((n for n,s in enumerate(self.draft['selection']) if s['id']==selected_id),0)
+            self.tasks.setCurrentCell(row,2)
         self.tasks.verticalScrollBar().setValue(scroll)
         self._show_stats()
 
@@ -504,7 +507,7 @@ class LaunchRoundupDialog(ProductionComponent):
 
     def voice_settings(self):
         voice=dict(tts=dict(python=self.python.text().strip(), model=self.model.text().strip(),
-            speaker=self.speaker.currentText().strip(), style=self.style.text() if not self.style.isHidden() else '',
+            speaker=self.speaker_id(), style=self.style.text() if not self.style.isHidden() else '',
             device=self.device.currentText(), timeout=self.timeout.value()))
         rules = json.loads(self.pronunciations.toPlainText())
         speech_text('', rules)
@@ -539,9 +542,10 @@ class LaunchRoundupDialog(ProductionComponent):
     def _new_snapshot(self, collection):
         voice, rules = deepcopy(self.draft['tts']), deepcopy(self.draft['pronunciations'])
         aligner=deepcopy(self.draft.get('aligner',{}))
+        hold=self.draft.get('closing_hold_seconds',1.5)
         self.collection = collection
         self.draft = roundup.create_draft(collection, self.start.date().toString('yyyy-MM-dd'), self.end.date().toString('yyyy-MM-dd'), self.settings.display_timezone)
-        self.draft.update(tts=voice, pronunciations=rules,aligner=aligner)
+        self.draft.update(tts=voice, pronunciations=rules,aligner=aligner,closing_hold_seconds=hold)
         self._show_draft()
 
     def _refresh(self):
@@ -784,19 +788,37 @@ class LaunchRoundupDialog(ProductionComponent):
             self._capabilities()
 
     def _capabilities(self):
-        previous = self.speaker.currentText() or 'Vivian'
+        self.refresh_speakers()
+
+    def speaker_id(self):
+        return self.speaker.currentData() or self.speaker.currentText().strip()
+
+    def _speaker_controls(self,*_):
+        supported=getattr(self,'_preset_style',False) and not self.speaker_id().startswith('my:')
+        self.style.setVisible(supported);self.style_label.setVisible(supported)
+
+    def refresh_speakers(self,previous=None):
+        from services.voice_profiles import list_profiles
+        from PySide6.QtCore import QSignalBlocker
+        previous=previous or self.speaker_id() or 'Vivian'
+        speakers=[]
         try:
             info = capabilities(self.model.text().strip())
-            self.style.setVisible(info['style'])
-            self.style_label.setVisible(info['style'])
-            self.speaker.clear()
-            self.speaker.addItems(info['speakers'])
-            self.speaker.setCurrentText(previous)
+            self._preset_style=info['style'];speakers=info['speakers']
             self.voice_info.setText('已读取本地配置（尚未加载权重）。模型大小：' + info['size'])
         except (OSError, ValueError, KeyError) as error:
-            self.style.hide()
-            self.style_label.hide()
+            self._preset_style=False
             self.voice_info.setText(str(error))
+        with QSignalBlocker(self.speaker):
+            self.speaker.clear();self.speaker.addItems(speakers)
+            for profile in list_profiles():self.speaker.addItem('我的音色 · '+profile['name'],profile['id'])
+            index=self.speaker.findData(previous) if previous.startswith('my:') else self.speaker.findText(previous)
+            if index<0:
+                self.speaker.addItem('已移除的参考音色' if previous.startswith('my:') else previous,previous if previous.startswith('my:') else None)
+                index=self.speaker.count()-1
+            self.speaker.setCurrentIndex(index)
+        self._speaker_controls()
+        if not self._loading:self._voice_changed()
 
     def _save_voice(self):
         self._sync(validate=False)
@@ -821,10 +843,10 @@ class LaunchRoundupDialog(ProductionComponent):
         needed = [s for s in self.draft['segments'] if (not identifier or s['id'] == identifier)
                   and (force or not current_audio(self.draft, s))]
         if needed:
-            if hasattr(self,'request_voice_setup') and (not settings['model'] or not settings['python']
-                    or not Path(settings['python']).is_file() or not Path(settings['model']).is_dir()):
+            from services.voice_profiles import PREFIX,configured,load
+            if hasattr(self,'request_voice_setup') and not configured(settings):
                 self.request_voice_setup();self.status.setText('请先自动配置语音，或检查已有环境；稿件和无声预览仍可使用');return
-            capabilities(settings['model'])
+            capabilities(load(settings['speaker'])['model'] if settings['speaker'].startswith(PREFIX) else settings['model'])
             if not settings['python'] or not Path(settings['python']).is_file():
                 raise ValueError('请在语音页配置独立 TTS 环境的 python.exe；参见 tools/ROUNDUP.md。稿件可直接导出。')
         def synthesize(data, token):
@@ -885,9 +907,13 @@ class LaunchRoundupDialog(ProductionComponent):
 
     def _export(self, visuals):
         self._sync()
-        output = self.export_directory() if hasattr(self, 'export_directory') else QFileDialog.getExistingDirectory(self, '导出到目录（自动新建独立成果文件夹）', self.settings.output_dir)
+        output = self.export_directory() if hasattr(self, 'export_directory') else QFileDialog.getExistingDirectory(self, '选择导出目录', self.settings.output_dir)
         if output:
-            self._start_job('export', lambda data, token: export_package(data, output, token, visuals=visuals), deepcopy(self.draft))
+            if visuals:
+                self._start_job('export', lambda data, token: export_complete_video([data], output, token), deepcopy(self.draft))
+            else:
+                intro=self.export_intro() if hasattr(self,'export_intro') else None
+                self._start_job('export', lambda data, token: export_package(data, output, token, visuals=False,intro=intro), deepcopy(self.draft))
 
     def _start_job(self, kind, action, payload):
         if self.worker is not None:
@@ -952,6 +978,7 @@ class LaunchRoundupDialog(ProductionComponent):
                         self.draft[key] = worker.payload[key]
                 roundup.apply_segments(self.draft, worker.value, single_id=self._single_id if kind == 'segment' else None)
                 if kind == 'script':
+                    roundup.sync_names(self.draft)
                     self._show_tasks()
                 self._show_segments()
                 self.tabs.setCurrentIndex(1)
@@ -978,7 +1005,7 @@ class LaunchRoundupDialog(ProductionComponent):
                 self.preview_ready.emit(worker.value)
             elif kind == 'export':
                 self.last_export_path=str(worker.value)
-                self.status.setText('已导出：' + str(worker.value) + '（无完整配音时不生成整段WAV/SRT）')
+                self.status.setText('已导出：' + str(worker.value))
         except Exception as error:
             self.status.setText(str(error))
         finally:

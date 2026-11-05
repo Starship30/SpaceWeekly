@@ -310,6 +310,7 @@ class RoundupVisualsTests(unittest.TestCase):
     def test_short_final_scene_finishes_its_motion_before_audio_end(self):
         prepared=visuals.prepare_frames(self.draft(2),dict(task_ids=['launch-1','launch-2'],preview_seconds=6.1))
         self.assertEqual(visuals.frame_at(prepared,6.1).tobytes(),prepared['pictures'][1].tobytes())
+        self.assertEqual(visuals.frame_at(prepared,7.59).tobytes(),prepared['pictures'][1].tobytes())
 
     def test_different_list_windows_clip_selector_motion_without_touching_header(self):
         draft=self.draft(17);segment=dict(task_ids=[i['ll2_id'] for i in draft['snapshot']['items']],preview_seconds=102)

@@ -93,6 +93,8 @@ def affiliation(item):
     country = item.get('operator_country', '').strip()
     country = {'China': '中国', 'United States of America': '美国', 'United States': '美国',
                'New Zealand': '新西兰', 'Japan': '日本', 'India': '印度', 'Russia': '俄罗斯'}.get(country, country)
+    from translator.dictionary import exact_dictionary_translation
+    provider = exact_dictionary_translation(provider) or provider
     return dict(label=(country + ' ' + provider + '方面').strip() if provider else '其他任务',
                 rank=3, basis='LL2机构国家字段' if country else '机构归属不足，未推断国家')
 
@@ -146,10 +148,18 @@ def payload_display(item):
     if match:
         name = dictionary_replace(match[2].strip())[0]
         return f'{match[1]}颗{name}星座卫星'
+    match = re.match(r'(?:A batch of\s+)?(\d+)\s+Low Earth Orbit communication satellites\b', text, re.I)
+    if match:
+        return f'{match[1]}颗近地轨道通信卫星'
+    if re.fullmatch(r'Synthetic aperture radar Earth observation satellite for Japanese Earth imaging company iQPS\.?', text, re.I):
+        return '日本 iQPS 合成孔径雷达地球观测卫星'
+    if re.match(r'This is a replacement satellite for the Indian Regional Navigation Satellite System\.', text, re.I):
+        return '印度区域导航卫星系统的替换卫星'
     match = re.match(r'(.{2,60}?) is (?:a\s+)+space-based[^.]+radio frequency', text, re.I)
     if match and re.search(r'SIGINT|specific radio signals|radio frequency mapping', text, re.I):
         return dictionary_replace(match[1])[0] + '射频信号监测卫星'
-    return dictionary_replace(text)[0]
+    translated,matched = dictionary_replace(text)
+    return translated if matched and not re.search(r'\b[A-Za-z]{2,}\s+[A-Za-z]{2,}\b',translated) else text
 
 
 def rocket_recovery(item):
@@ -181,10 +191,7 @@ def event_context(item, draft):
               '中午' if local.hour < 13 else '下午' if local.hour < 18 else '傍晚' if local.hour < 20 else '晚上') if local else ''
     pad = item.get('pad_name', '')
     code = pad_code(pad)
-    result = {3: '发射成功', 4: '发射失败', 7: '发射部分失败'}.get(item.get('status_id'), '')
-    if not result:
-        from services.launch_roundup import category
-        result = {'planned': '计划发射', 'delayed': '延期', 'cancelled': '取消', 'actual': '已发射，结果待确认', 'pending': '状态待确认'}[category(item, parse_datetime(draft.get('as_of', '')))]
+    result = event_result(item,draft)
     count, basis = payload_count(item)
     return dict(task_id=item['ll2_id'], group=affiliation(item), payload_count=count, payload_count_basis=basis,
         display_time=local.isoformat() if local else '',
@@ -198,6 +205,14 @@ def event_context(item, draft):
         recovery=item.get('recovery', ''), pad_spoken=spoken_pad(names['pad_name'], code),
         spoken_payload=spoken_payload(item, draft, names['name']), orbit=orbit,
         orbit_basis='mission_target' if orbit else '')
+
+
+def event_result(item,draft):
+    result={3:'发射成功',4:'发射失败',7:'发射部分失败'}.get(item.get('status_id'))
+    if result:return result
+    from services.launch_roundup import category
+    return {'planned':'计划发射','delayed':'延期','cancelled':'取消','actual':'已发射，结果待确认',
+            'pending':'状态待确认'}[category(item,parse_datetime(draft.get('as_of','')))]
 
 
 def spoken_pad(name, code):

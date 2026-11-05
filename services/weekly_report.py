@@ -56,7 +56,7 @@ def generate_weekly(
     export_word_enabled: bool | None = None,
     cancel_token: CancellationToken | None = None,
     *, prepared: dict | None = None, collect_only: bool = False,
-    defer_exports: bool = False, result_callback=None,
+    defer_exports: bool = False, result_callback=None, narration_skip=None,
 ) -> list[Article]:
     """Generate a report with separate AI screening and content stages."""
 
@@ -205,9 +205,17 @@ def generate_weekly(
         if launch_video_items:
             launch_video_items = _localize_launch_video_items(launch_video_items, translator, token)
         if result_callback:
+            proposals, failures, narration_states = {}, {}, {}
+            if narration_skip is not None:
+                from services.news_voice import propose_missing
+                from models.news import news_id
+                proposals, failures, narration_states = propose_missing(selected_articles, settings, token, narration_skip)
+                for article in prepared['articles'] if prepared is not None else parsed_articles:
+                    narration_states.setdefault(news_id(article.news.url),'skipped')
             result_callback(dict(articles=selected_articles, launch_articles=launch_articles,
                                  launch_video_items=launch_video_items or [], summaries=ai_summaries,
-                                 assessments=assessments, context=context,source_scope=source_scope))
+                                 assessments=assessments, context=context,source_scope=source_scope,
+                                 narration_proposals=proposals,narration_failures=failures,narration_states=narration_states))
     else:
         _export_reports(
             selected_articles,
@@ -551,6 +559,8 @@ def _generate_selected_content(
         logger.warning("AI 配置不完整，跳过入选新闻摘要生成")
         return api_calls
 
+    from translator.dictionary import load_dictionary, dictionary_replace
+    glossary = load_dictionary() if settings.language == 'zh_CN' else {}
     for index, article in enumerate(articles, start=1):
         cancel_token.check()
 
@@ -558,12 +568,16 @@ def _generate_selected_content(
         api_calls += 1
 
         try:
-            summaries[article.news.url] = generate_content(
+            summary = generate_content(
                 article,
                 settings,
                 custom_prompt=custom_prompt,
                 cancel_token=cancel_token,
             )
+            if glossary:
+                summary = replace(summary, summary=dictionary_replace(summary.summary,glossary)[0],
+                                  keywords=[dictionary_replace(word,glossary)[0] for word in summary.keywords])
+            summaries[article.news.url] = summary
         except TaskCancelledError:
             raise
         except Exception as exc:
@@ -584,8 +598,10 @@ def _localize_selected_titles(
     cancel_token: CancellationToken,
     summaries: dict[str, AISummary] | None = None,
 ) -> tuple[dict[str, str], int]:
+    from translator.dictionary import load_dictionary, dictionary_replace
+    glossary = load_dictionary() if settings.language == 'zh_CN' else {}
     localized = {
-        article.news.url: clean_ai_text(article.news.title)
+        article.news.url: dictionary_replace(clean_ai_text(article.news.title),glossary)[0]
         for article in articles
     }
 
@@ -625,7 +641,7 @@ def _localize_selected_titles(
             continue
 
         for item_id, title in translated.items():
-            localized[urls[item_id]] = title
+            localized[urls[item_id]] = dictionary_replace(title,glossary)[0]
 
     return localized, api_calls
 
@@ -759,11 +775,14 @@ def _localize_launch_video_items(items, translator, cancel_token):
         record = dict(item, launch=dict(item['launch']))
         context = record.get('launch_context')
         if context and getattr(getattr(translator, 'settings', None), 'language', 'zh_CN') == 'zh_CN':
+            from services.roundup_style import payload_display
             values = confirmed_values(context.get('research', {}), context)
             names = display_names(context)
             record['summary'] = names['name']
             record['title'] = names['rocket']
             record['launch'].update(site=names['site'], orbit=names['orbit'])
+            if context.get('payload'):
+                record['launch']['payload'] = payload_display(context)
             if values.get('summary'):
                 record['launch']['description_zh'] = values['summary']
         if translator is None:

@@ -3,9 +3,9 @@ from copy import deepcopy
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QCheckBox,QLabel,QPushButton,
-    QTableWidget,QTableWidgetItem,QHeaderView,QDialogButtonBox)
+    QTableWidget,QTableWidgetItem,QHeaderView,QDialogButtonBox,QDoubleSpinBox)
 
-from services.roundup_sync import build_timeline
+from services.roundup_sync import build_timeline,closing_hold
 from tools.roundup_visuals import group_cues,shot_plan,visual_settings
 from ui.component import SegmentedTabs,configure_table
 
@@ -19,8 +19,12 @@ class RoundupShotsDialog(QDialog):
         self.setWindowTitle('镜头编排');self.resize(860,600)
         layout=QVBoxLayout(self)
         self.enabled=QCheckBox('显示独立的国家或公司分组过场');layout.addWidget(self.enabled)
-        hint=QLabel('默认不显示独立标题页。旁白进入下一分组时，选框下滑并更新该组摘要；配音和时间不变。')
+        hint=QLabel('默认关闭独立标题页。旁白进入下一分组时，选框下滑并更新该组摘要。分组过场设置保留原配音时点。')
         hint.setWordWrap(True);layout.addWidget(hint)
+        hold_row=QHBoxLayout();hold_row.addWidget(QLabel('发射部分收尾停留'))
+        self.hold=QDoubleSpinBox();self.hold.setRange(1,2);self.hold.setDecimals(2);self.hold.setSingleStep(.1)
+        self.hold.setSuffix(' 秒');self.hold.setValue(closing_hold(self.draft));self._last_hold=self.hold.value()
+        hold_row.addWidget(self.hold);hold_row.addStretch();layout.addLayout(hold_row)
         tabs=SegmentedTabs();layout.addWidget(tabs,1)
         self.groups=QTableWidget(0,3);configure_table(self.groups)
         self.groups.setHorizontalHeaderLabels(['保留过场','国家或公司','讲解位置'])
@@ -41,6 +45,7 @@ class RoundupShotsDialog(QDialog):
         buttons.accepted.connect(self.apply);buttons.rejected.connect(self.reject);layout.addWidget(buttons)
         self.enabled.toggled.connect(self.edit);self.groups.itemChanged.connect(self.edit)
         self.undo.clicked.connect(self.undo_edit);self.defaults.clicked.connect(self.reset)
+        self.hold.valueChanged.connect(self.edit_hold)
         self.render()
 
     def render(self):
@@ -53,7 +58,7 @@ class RoundupShotsDialog(QDialog):
             for col,text in ((1,cue['label']),(2,f"{cue['start_seconds']:.2f}—{cue['end_seconds']:.2f} 秒")):
                 item=QTableWidgetItem(text);item.setFlags(item.flags()&~Qt.ItemFlag.ItemIsEditable);self.groups.setItem(n,col,item)
         self.groups.blockSignals(False);self.undo.setEnabled(bool(self.history))
-        view=dict(self.draft,visuals=self.options);table=shot_plan(view,self.timeline)
+        view=dict(self.draft,visuals=self.options,closing_hold_seconds=self.hold.value());table=shot_plan(view,build_timeline(view))
         from services.launch_research import display_names
         names={i['ll2_id']:display_names(i)['name'] for i in self.draft['snapshot']['items']}
         self.shots.setRowCount(len(table['shots']))
@@ -73,16 +78,25 @@ class RoundupShotsDialog(QDialog):
             if self.groups.item(n,0).checkState()==Qt.CheckState.Checked:removed.discard(cue['key'])
             else:removed.add(cue['key'])
         value=dict(group_cards=self.enabled.isChecked(),removed_groups=sorted(removed))
-        if value!=self.options:self.history.append(deepcopy(self.options));self.options=value;self.render()
+        if value!=self.options:self.history.append((deepcopy(self.options),self._last_hold));self.options=value;self.render()
+
+    def edit_hold(self,value):
+        self.history.append((deepcopy(self.options),self._last_hold))
+        self._last_hold=value;self.render()
+
+    def restore_options(self,options,hold):
+        self.options=options;self._last_hold=hold
+        self.hold.blockSignals(True);self.hold.setValue(hold);self.hold.blockSignals(False);self.render()
 
     def undo_edit(self):
-        if self.history:self.options=self.history.pop();self.render()
+        if self.history:self.restore_options(*self.history.pop())
 
     def reset(self):
-        self.history.append(deepcopy(self.options));self.options=visual_settings({});self.render()
+        self.history.append((deepcopy(self.options),self._last_hold));self.restore_options(visual_settings({}),1.5)
 
     def apply(self):
-        if self.options!=visual_settings(self.draft):
+        if self.options!=visual_settings(self.draft) or self.hold.value()!=closing_hold(self.draft):
             self.production.checkpoint();self.draft['visuals']=deepcopy(self.options)
+            self.draft['closing_hold_seconds']=self.hold.value()
             self.production._stop_preview();self.production._frame_key=None;self.production._changed()
         self.accept()

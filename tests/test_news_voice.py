@@ -7,7 +7,7 @@ from dataclasses import replace
 from unittest.mock import Mock,patch
 
 import resources
-from ai.json_utils import AIResponseParseError
+from ai.json_utils import AIResponseParseError,AIResponseValidationError,AITruncatedResponseError,request_json
 from models.article import Article
 from models.news import News,news_id
 from services import news_voice as news,roundup_sync as sync,launch_roundup as launch
@@ -111,20 +111,78 @@ class NewsVoiceTests(unittest.TestCase):
     def test_proposal_uses_real_json_request_contract(self):
         settings=replace(default_settings(),deepseek_api_key='fixture-not-a-real-key',deepseek_model='fixture-model')
         response=dict(spoken='2022年发现一块质量约800克的陨石。',quotes=['2022年发现陨石。'])
-        with patch('ai.providers.complete',return_value=json.dumps(response,ensure_ascii=False)) as complete:
+        with patch('ai.providers.complete_with_metadata',return_value=dict(content=json.dumps(response,ensure_ascii=False))) as complete:
             result=news.propose(self.article,settings,self.token)
         self.assertEqual(result,response)
         self.assertIs(complete.call_args.kwargs['cancel_token'],self.token)
         self.assertEqual(self.draft['segments'][0]['spoken'],'')
 
+    def test_proposal_receives_original_body_and_preserves_supplemental_quote_source(self):
+        quote='实验室将样本与既有标本进行比较。'
+        url='https://science.nasa.gov/fixture'
+        self.article.evidence=[dict(quote=quote,url=url,title='补充原始资料')]
+        response=dict(spoken='陨石重约800克，研究人员将样本与既有标本比较。',quotes=['质量约800克。',quote])
+        with patch('ai.providers.complete_with_metadata',return_value=dict(content=json.dumps(response))) as complete:
+            result=news.propose(self.article,default_settings(),self.token)
+        prompt=complete.call_args.args[0]
+        self.assertIn(self.article.body,prompt)
+        self.assertIn(url,prompt)
+        self.assertEqual(result['quote_sources'][quote]['url'],url)
+
     def test_proposal_accepts_title_evidence_and_repairs_an_invalid_quote(self):
         self.article.news.title='NASA资助的火星陨石研究'
         response=dict(spoken='2022年发现一块质量约800克的陨石。',quotes=[self.article.news.title,'2022年发现陨石。'])
         invalid=dict(response,quotes=['This invented sentence is not in the source'])
-        with patch('ai.providers.complete',side_effect=[json.dumps(invalid),json.dumps(response)]) as complete:
+        with patch('ai.providers.complete_with_metadata',side_effect=[dict(content=json.dumps(value)) for value in (invalid,response)]) as complete:
             result=news.propose(self.article,default_settings(),self.token)
         self.assertEqual(result,response);self.assertEqual(complete.call_count,2)
         self.assertIn('口播稿缺少对应来源原句',complete.call_args.args[0])
+
+    def test_proposal_accepts_typography_and_keeps_original_source_quote(self):
+        self.article.body='Virgin Galactic’s spacecraft lifted off —\u00a0beneath the wings of its carrier aircraft.'
+        response=dict(spoken='维珍银河的飞行器由载机携带升空。',
+                      quotes=["Virgin Galactic's spacecraft lifted off — beneath the wings of its carrier aircraft."])
+        with patch('ai.providers.complete_with_metadata',return_value=dict(content=json.dumps(response))) as complete:
+            result=news.propose(self.article,default_settings(),self.token)
+        self.assertEqual(result['quotes'],[self.article.body])
+        self.assertEqual(complete.call_count,1)
+
+    def test_real_failed_replies_keep_mission_numbers_separate_from_quantities(self):
+        rows=json.loads((Path(__file__).parent/'fixtures/news_narration_20261104.json').read_text(encoding='utf-8'))
+        for row in rows:
+            source=row['source']
+            article=Article(News('来源',source['title'],source['reported_at'],source['source_text'],source['source_url']),'','rss')
+            for content in row['responses']:
+                with self.subTest(log=row['log'],content=content):
+                    with patch('ai.providers.complete_with_metadata',return_value=dict(content=content,finish_reason='stop')) as complete:
+                        self.assertEqual(news.propose(article,default_settings(),self.token)['spoken'],json.loads(content)['spoken'])
+                    complete.assert_called_once()
+        proposal=dict(spoken='阿耳忒弥斯三号搭载3颗卫星。',quotes=[article.news.title])
+        with patch('ai.providers.complete_with_metadata',return_value=dict(content=json.dumps(proposal),finish_reason='stop')):
+            with self.assertRaisesRegex(AIResponseValidationError,'来源没有支持的数字'):news.propose(article,default_settings(),self.token)
+        proposal['spoken']='阿波罗三号任务已经发射。'
+        with patch('ai.providers.complete_with_metadata',return_value=dict(content=json.dumps(proposal))):
+            with self.assertRaisesRegex(AIResponseValidationError,'来源不支持的任务编号'):news.propose(article,default_settings(),self.token)
+
+    def test_length_finish_reason_is_logged_and_credentials_are_redacted(self):
+        config=Mock(model='fixture',api_key='fixture-secret')
+        with patch('ai.providers.complete_with_metadata',return_value=dict(content='{"spoken":"fixture-secret"}',finish_reason='length')):
+            with self.assertRaises(AITruncatedResponseError) as error:
+                request_json('诊断输入 fixture-secret',config,module_name='news_narration',max_attempts=1)
+        log=error.exception.diagnostic_path.read_text(encoding='utf-8')
+        self.assertIn('length',log);self.assertNotIn('fixture-secret',log)
+
+    def test_cancelled_batch_preserves_finished_proposals(self):
+        settings=replace(default_settings(),deepseek_api_key='fixture',deepseek_base_url='https://example.invalid',deepseek_model='fixture')
+        other=deepcopy(self.article);other.news.url+='-other'
+        proposal=dict(spoken='第一条口播。',quotes=[self.article.body])
+        def first(*args):
+            self.token.cancel()
+            return proposal
+        with patch.object(news,'propose',side_effect=first) as propose:
+            proposals,failures,states=news.propose_missing([self.article,other],settings,self.token,set())
+        self.assertEqual(proposals,{self.draft['news_id']:proposal});self.assertFalse(failures)
+        self.assertEqual(states[news_id(other.news.url)],'cancelled');propose.assert_called_once()
 
     def test_export_uses_actual_wav_and_paragraph_subtitles_without_fake_precision(self):
         self.spoken();news.synthesize(self.draft,self.provider,None,self.token)

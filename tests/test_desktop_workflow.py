@@ -103,10 +103,20 @@ class DesktopWorkflowTests(unittest.TestCase):
             self.p.updates.exit_action='uninstall';self.p.updates.coordinate_exit()
             leave.assert_called_once_with('uninstall')
 
-    def test_launch_backup_mode_reuses_task_ids_and_stops_narrated_preview(self):
+    def enable_materials(self):
+        self.p.video_workflow.setCurrentIndex(self.p.video_workflow.findData('materials'))
+        self.p.apply_preferences()
+
+    def test_launch_materials_mode_reuses_task_ids_and_stops_narrated_preview(self):
         self.p.content.setCurrentIndex(1)
         original=deepcopy(self.p.roundup.draft)
-        self.assertIn('模式二',self.p.media.tabText(1))
+        self.assertEqual(self.p.media.tabText(1),'画面素材')
+        self.assertFalse(self.p.media.isTabVisible(1))
+        self.assertTrue(self.p.roundup.export_controls.isHidden())
+        self.enable_materials()
+        self.assertTrue(self.p.media.isTabVisible(1))
+        self.assertFalse(self.p.roundup.export_controls.isHidden())
+        self.assertIn('无声',self.p.cards_mode_note.text())
         self.p.media_route(0)
         with patch.object(self.p,'_release_preview') as stop:
             self.p.media.setCurrentIndex(1)
@@ -119,6 +129,27 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertTrue(all(i['video_type']=='launch' and 'audio' not in i for i in cards))
         self.assertEqual(self.p.roundup.draft,original)
         self.assertIsNone(self.p.roundup.tts_provider.process)
+
+    def test_roundup_video_export_uses_single_file_exporter(self):
+        self.p.content.setCurrentIndex(1)
+        dialog=self.p.roundup
+        video=self.root/'output/SpaceWeekly_2026-11-02_001.mp4'
+        video.touch()
+        legacy=self.root/'output/SpaceWeekly_roundup_old'
+        legacy.mkdir()
+        self.p.add_result(legacy,self.p.export_scope())
+        with patch('ui.launch_roundup_dialog.export_complete_video',return_value=video) as complete, \
+                patch('ui.launch_roundup_dialog.export_package') as package:
+            dialog._export(True);self.wait_idle()
+        complete.assert_called_once()
+        self.assertEqual(complete.call_args.args[:2],([dialog.draft],str(self.root/'output')))
+        package.assert_not_called()
+        self.p._poll()
+        self.assertEqual(self.p.output_files.count(),1)
+        self.assertEqual(self.p.output_files.item(0).data(Qt.ItemDataRole.UserRole),str(video))
+        self.p.history_toggle.setChecked(True)
+        self.assertEqual(self.p.output_files.count(),1)
+        self.assertEqual(self.p.output_files.item(0).data(Qt.ItemDataRole.UserRole),str(legacy))
 
     def test_voice_setup_background_navigation_cancel_and_existing_fields(self):
         panel=self.p.voice_setup;r=self.p.roundup
@@ -264,12 +295,14 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertEqual(r.confirmed_values(item['research'],item)['chinese_name'],'人工核实的任务名')
 
     def test_cards_and_downloads_use_current_launch_ids_without_nested_windows(self):
-        self.p.content.setCurrentIndex(1);self.p.cards_from_script()
+        from PySide6.QtWidgets import QPushButton
+        self.enable_materials()
+        self.p.content.setCurrentIndex(1);self.p.media_route(1)
         self.assertEqual({i['id'] for i in self.p.cards.data['items']},{'ll2:launch-1','ll2:launch-2','ll2:launch-3'})
-        self.p.cards._open_intro();self.assertEqual(self.p.media.currentIndex(),2)
-        self.p.cards._open_download();self.assertEqual(self.p.media.currentIndex(),3)
+        self.p.media.setCurrentIndex(2);self.assertIn('片头',self.p.media.tabText(2))
+        self.p.media.setCurrentIndex(3);self.assertIn('视频下载',self.p.media.tabText(3))
         self.assertEqual(len(self.p.downloads.snapshot_items),3)
-        self.assertIsNone(self.p.cards.intro_dialog);self.assertIsNone(self.p.cards.download_dialog)
+        self.assertFalse(any(b.text() in ('制作片头','视频下载') for b in self.p.cards.findChildren(QPushButton)))
 
     def test_corrupt_recovery_is_retained_without_partial_controller_adoption(self):
         self.p.save();before=deepcopy(self.p.roundup.draft)
@@ -297,6 +330,62 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertEqual(self.p.news.sources.count(),2);self.assertEqual(self.p.news.articles.count(),1)
         self.p.news.sources.item(1).setCheckState(Qt.CheckState.Checked)
         self.assertEqual(len(self.p.news.selected_bundle(for_write=True)['articles']),2)
+
+    def test_source_dates_survive_an_older_edition_and_reload(self):
+        p=self.p
+        p.save()
+        dashboard=p.dashboard
+        dashboard.start_date_edit.setDate(QDate(2026,10,22))
+        dashboard.end_date_edit.setDate(QDate(2026,10,31))
+        dashboard.launch_range_combo.setCurrentIndex(dashboard.launch_range_combo.findData('past_week'))
+        self.assertEqual(json.loads((self.root/'config/source-date-ranges.json').read_text(encoding='utf-8'))['start_date'],'2026-10-22')
+        reopened=MainWindow()
+        try:
+            settings=reopened.production.current_settings()
+            self.assertEqual((settings.date_mode,settings.start_date,settings.end_date),('custom','2026-10-22','2026-10-31'))
+            self.assertEqual(settings.launch_range,'past_week')
+        finally:
+            reopened.production.timer.stop();reopened.production.intro.refresh.stop()
+            reopened._closing=True;reopened.close()
+
+    def test_weekly_write_generates_missing_narration_and_retains_drafts(self):
+        from models.news import news_id
+        from services import news_voice,weekly_report
+        p=self.p;bundle=self.bundle();first=bundle['articles'][0]
+        other=Article(News('Fixture','Other news','2026-10-24','Second summary','https://example.invalid/other'),'Other body','fixture')
+        failed=Article(News('Fixture','Failed news','2026-10-25','Third summary','https://example.invalid/failed'),'Third body','fixture')
+        bundle['articles'].extend([other,failed]);bundle['source_articles']=list(bundle['articles'])
+        p.news.adopt(bundle,collected=True);p.news.oral.setPlainText('人工保留的口播。')
+        p.news.articles.item(1).setCheckState(Qt.CheckState.Unchecked)
+        self.assertEqual(p.news.generate.text(),'生成新闻稿（3 条）')
+        self.assertEqual(len(p.news.script_included),2)
+        settings=replace(self.settings,deepseek_api_key='fixture',deepseek_base_url='https://example.invalid',deepseek_model='fixture',news_filter_level='All')
+        p.settings=settings
+        proposal=dict(spoken='自动生成的第二条口播。',quotes=[other.body])
+        with patch.object(weekly_report,'_resolve_runtime_model',side_effect=lambda settings,token:settings), \
+             patch.object(weekly_report,'_screen_articles',side_effect=lambda articles,*args:(articles,0)), \
+             patch.object(weekly_report,'_generate_selected_content',return_value=0), \
+             patch.object(weekly_report,'_localize_selected_titles',return_value=({},0)), \
+             patch('services.news_images.collect'), \
+             patch.object(news_voice,'propose',side_effect=[proposal,ValueError('本条校验失败')]) as propose:
+            p.news.generate.click();self.wait_idle()
+        self.assertEqual([call.args[0].news.url for call in propose.call_args_list],[other.news.url,failed.news.url])
+        self.assertEqual(p.news.voices[news_id(first.news.url)]['segments'][0]['spoken'],'人工保留的口播。')
+        second=p.news.voices[news_id(other.news.url)]
+        self.assertEqual(second['segments'][0]['spoken'],proposal['spoken'])
+        self.assertEqual(second['segments'][0]['source_refs'][0]['quote'],other.body)
+        self.assertNotIn('approved_text',second)
+        self.assertEqual(p.news.batch_hint.text(),'已生成1条，已有1条，失败1条')
+        self.assertTrue(p.inspector.isHidden())
+        self.assertEqual(p.news.failed_articles(),[failed])
+        self.assertEqual(p.news.retry.text(),'重试失败项（1 条）')
+        self.assertNotIn(other.news.url,p.news.script_included)
+        with patch.object(news_voice,'propose',return_value=dict(spoken='重试后已生成。',quotes=[failed.body])) as retry:
+            p.news.retry.click();self.wait_idle()
+        retry.assert_called_once()
+        self.assertEqual(retry.call_args.args[0].news.url,failed.news.url)
+        self.assertFalse(p.news.failed_articles())
+        self.assertEqual(p.news.voices[news_id(other.news.url)],second)
 
     def test_news_offline_export_and_dates_scope_are_preserved(self):
         bundle=self.bundle();token=CancellationToken()
@@ -342,16 +431,36 @@ class DesktopWorkflowTests(unittest.TestCase):
         p.news.articles.item(1).setCheckState(Qt.CheckState.Unchecked)
         self.assertEqual(len(p.news.included),3)
         p.news.articles.setCurrentRow(2);url=p.news.current_article().news.url
-        p.news.oral.setPlainText('人工口播仍属于第三条新闻。');p.news.move_article(-1);p.news.move_article(-1)
+        self.assertEqual(p.news.proposal.text(),'生成本条口播')
+        p.news.oral.setPlainText('人工口播仍属于第三条新闻。')
+        self.assertEqual(p.news.proposal.text(),'重写本条口播')
+        p.news.editor_tabs.setCurrentIndex(1)
+        p.news.title.setText('第三条的屏幕标题');p.news.summary.setPlainText('第三条的屏幕摘要')
+        p.news.script_actions[1].click()
+        self.assertFalse(p.news.script_included)
+        self.assertEqual(p.news.editor_tabs.currentIndex(),1)
+        self.assertEqual(p.news.current_article().news.url,url)
+        self.assertEqual(p.news.summary.toPlainText(),'第三条的屏幕摘要')
+        p.news.script_actions[0].click()
+        self.assertEqual(len(p.news.script_included),3)
+        p.news.articles.item(1).setCheckState(Qt.CheckState.Unchecked)
+        checked=set(p.news.script_included)
+        p.news.editor_tabs.setCurrentIndex(0)
+        self.assertEqual(p.news.script_included,checked)
+        p.news.articles.setCurrentRow(0);p.news.articles.setCurrentRow(2)
+        self.assertEqual(p.news.current_title.text(),'第三条的屏幕标题')
+        p.news.script_actions[2].click();p.news.script_actions[2].click()
+        self.assertEqual(p.news.script_included,checked)
         self.assertEqual(p.news.current_article().news.url,url)
         self.assertEqual([a.news.url for a in p.news.bundle['source_articles']],sources)
         self.assertNotEqual([a.news.url for a in p.news.bundle['articles']],sources)
         self.assertEqual(p.news.oral.toPlainText(),'人工口播仍属于第三条新闻。')
+        self.assertEqual(p.news.summary.toPlainText(),'第三条的屏幕摘要')
         ordered=[a.news.url for a in p.news.selected_bundle()['articles']]
         self.assertEqual(ordered,[url,'https://example.invalid/news'])
         self.assertTrue(p.news.articles.item(0).text().startswith('01  '))
         self.assertTrue(p.news.articles.item(1).text().startswith('02  '))
-        p.cards_from_script()
+        self.enable_materials();p.media_route(1)
         self.assertEqual(p.cards.sort_order.currentData(),'input')
         self.assertEqual([item['url'] for item in p.cards.data['items']],ordered)
         p.cards.sort_order.setCurrentIndex(p.cards.sort_order.findData('desc'))
@@ -384,6 +493,21 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertIsNone(p.news.voice_draft()['screen_item']['image'])
         p.news.image_use.setChecked(True)
         self.assertIsNotNone(p.news.voice_draft()['screen_item']['image'])
+
+    def test_current_cards_follow_new_screen_text_and_keep_local_overrides(self):
+        p=self.p;p.news.adopt(self.bundle())
+        self.enable_materials()
+        p.media_route(1)
+        self.assertIsNone(p.cards.source)
+        self.assertFalse(list(Path(p.settings.output_dir).glob('*.premiere.json')))
+        p.navigation.setCurrentRow(1);p.news.title.setText('修改稿件屏幕标题')
+        p.media_route(1)
+        self.assertEqual(p.cards.data['items'][0]['title'],'修改稿件屏幕标题')
+        p.cards.summary_edit.setPlainText('画面专用摘要')
+        p.navigation.setCurrentRow(1);p.news.title.setText('第二次修改稿件屏幕标题')
+        p.media_route(1)
+        self.assertEqual(p.cards.data['items'][0]['title'],'第二次修改稿件屏幕标题')
+        self.assertEqual(p.cards.data['items'][0]['summary'],'画面专用摘要')
 
     def test_draft_open_and_pending_recovery_validate_before_adoption(self):
         path=self.root/'draft.json';r.save_draft(self.p.roundup.draft,path)

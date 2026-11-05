@@ -9,11 +9,12 @@ from PySide6.QtWidgets import QTableWidget
 from PySide6.QtWidgets import QTableWidgetItem
 from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QPlainTextEdit
-from PySide6.QtWidgets import QLineEdit, QTabWidget, QWidget
+from PySide6.QtWidgets import QLabel, QLineEdit, QTabWidget, QWidget
 from PySide6.QtCore import Qt
 import json
 
 from i18n import tr
+from resources import resource_path
 from translator.dictionary import add_pending_term
 from translator.dictionary import confirm_pending_term
 from translator.dictionary import load_dictionary
@@ -59,6 +60,9 @@ class TermEditorDialog(QDialog):
         self.search=QLineEdit();self.search.setPlaceholderText('查询原文或中文名称')
         self.search.textChanged.connect(self._filter)
         layout.addWidget(self.search)
+        path=QLabel('个人词典随当前工作区保存')
+        path.setToolTip(str(resource_path('translator','dictionary.json')))
+        layout.addWidget(path)
         tabs=SegmentedTabs();layout.addWidget(tabs,1)
         terms=QWidget();terms_layout=QVBoxLayout(terms);terms_layout.addWidget(self.table)
         tabs.addTab(terms,'术语词典与待确认候选')

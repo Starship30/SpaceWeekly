@@ -67,6 +67,7 @@ class AppSettings:
     news_event_date_check_enabled: bool = True
     title_prompt: str = ""
     roundup_prompt: str = ""
+    video_workflow: str = "complete"
 
 
 def default_settings() -> AppSettings:
@@ -236,6 +237,7 @@ def load_settings() -> AppSettings:
             1,
             int(data.get("web_search_timeout") or defaults.web_search_timeout),
         ),
+        video_workflow=_choice_setting(data.get("video_workflow"),"complete",{"complete","materials"}),
         web_search_max_results=max(
             1,
             min(

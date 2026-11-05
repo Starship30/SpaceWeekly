@@ -55,7 +55,8 @@ class ShotTests(unittest.TestCase):
         self.assertEqual(plan['shots'][1]['scene']['display'],'summary')
         self.assertIsNone(plan['shots'][1]['scene']['focus_id'])
         self.assertIn(1,plan['short_shots']);self.assertEqual(plan['shots'][1]['animation'],'update')
-        self.assertEqual(plan['total_samples'],96000)
+        self.assertEqual(plan['total_samples'],96000+36000)
+        self.assertEqual(plan['shots'][-1]['end_sample'],plan['total_samples'])
 
     def test_transition_and_paragraph_pause_hold_summary_to_the_audio_end(self):
         self.table()

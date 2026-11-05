@@ -1,0 +1,41 @@
+[
+  {
+    "log": "news_narration_20261104_162741_369065_9998c3.log",
+    "source": {
+      "title": "China releases timeline for lunar landing on the Moon, targeting \"before 2030\"",
+      "source_text": "The plan does not include a mission similar to Apollo 8 or Artemis II.",
+      "reported_at": "2026-11-02T17:09:13Z",
+      "source_url": "https://arstechnica.com/space/2026/11/china-releases-timeline-for-lunar-landing-on-the-moon-targeting-before-2030/"
+    },
+    "responses": [
+      "{\"spoken\": \"中国公布了载人登月的时间表，目标是在2030年前实现登月。根据计划，其中不包括类似阿波罗8号或阿耳忒弥斯2号那样的任务。\", \"quotes\": [\"China releases timeline for lunar landing on the Moon, targeting \\\"before 2030\\\"\", \"The plan does not include a mission similar to Apollo 8 or Artemis II.\"]}",
+      "{\"spoken\":\"中国公布了载人登月时间表，目标是在2030年之前实现登月。公布的方案不包含类似阿波罗8号或阿耳忒弥斯2号那样的任务。\",\"quotes\":[\"The plan does not include a mission similar to Apollo 8 or Artemis II.\"]}"
+    ]
+  },
+  {
+    "log": "news_narration_20261104_163034_458100_e67753.log",
+    "source": {
+      "title": "Isaacman outlines Artemis III multi-launch checkout sequence and Blue Origin priority",
+      "source_text": "NASA Administrator Jared Isaacman has spoken on the planned architecture and contingencies for the Artemis…\r\nThe post Isaacman outlines Artemis III multi-launch checkout sequence and Blue Origin priority appeared first on NASASpaceFlight.com.",
+      "reported_at": "2026-11-01T03:36:55Z",
+      "source_url": "https://www.nasaspaceflight.com/2026/10/isaacman-artemis-launch-sequence-blue-priority/"
+    },
+    "responses": [
+      "{\"spoken\": \"美国航天局局长贾里德·艾萨克曼介绍了“阿蒂米斯3号”任务计划中的多次发射检查流程，并提到蓝色起源的优先事项。他谈及的是该任务的既定架构和应急方案。\", \"quotes\": [\"Isaacman outlines Artemis III multi-launch checkout sequence and Blue Origin priority\"]}",
+      "{\"spoken\": \"美国宇航局局长贾里德·艾萨克曼就阿尔忒弥斯三号任务的计划架构和应急预案作了说明，其中涉及多次发射的检查流程，以及蓝色起源的优先级安排。相关计划属于规划内容，具体安排尚未确认。\", \"quotes\": [\"Isaacman outlines Artemis III multi-launch checkout sequence and Blue Origin priority\"]}"
+    ]
+  },
+  {
+    "log": "news_narration_20261104_162750_918793_d35bff.log",
+    "source": {
+      "title": "Isaacman outlines Artemis III multi-launch checkout sequence and Blue Origin priority",
+      "source_text": "NASA Administrator Jared Isaacman has spoken on the planned architecture and contingencies for the Artemis…\r\nThe post Isaacman outlines Artemis III multi-launch checkout sequence and Blue Origin priority appeared first on NASASpaceFlight.com.",
+      "reported_at": "2026-11-01T03:36:55Z",
+      "source_url": "https://www.nasaspaceflight.com/2026/10/isaacman-artemis-launch-sequence-blue-priority/"
+    },
+    "responses": [
+      "{\"spoken\":\"美国航天局局长贾里德·艾萨克曼介绍了阿尔忒弥斯三号计划的架构安排和应急预案，其中涉及多次发射的检查流程，以及蓝色起源的优先事项。\",\"quotes\":[\"Isaacman outlines Artemis III multi-launch checkout sequence and Blue Origin priority\"]}",
+      "{\"spoken\": \"美国国家航空航天局局长贾里德·艾萨克曼介绍了阿尔忒弥斯三号任务计划采用的多发射检查流程，以及把蓝色起源列为优先事项的安排。他还谈到了这一计划架构的应急预案。\", \"quotes\": [\"Isaacman outlines Artemis III multi-launch checkout sequence and Blue Origin priority\", \"NASA Administrator Jared Isaacman has spoken on the planned architecture and contingencies for the Artemis…\"]}"
+    ]
+  }
+]

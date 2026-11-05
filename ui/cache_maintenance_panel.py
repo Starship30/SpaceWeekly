@@ -1,4 +1,5 @@
-"""Workspace cache review and non-destructive periodic reminder in existing settings."""
+"""Workspace storage review and non-destructive periodic reminder."""
+from datetime import datetime
 from PySide6.QtCore import Qt,QTimer
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,QCheckBox,QSpinBox,QPushButton,QTableWidget,QTableWidgetItem,QMessageBox
 from ui.component import configure_table
@@ -14,23 +15,25 @@ def size_text(value):
 class CacheMaintenancePanel(QWidget):
     def __init__(self,workspace):
         super().__init__();self.workspace=workspace;self.worker=None;self.result=None;self.automatic=False;self.reminder=None
-        layout=QVBoxLayout(self);layout.addWidget(QLabel('新闻图片与缓存'))
-        hint=QLabel('正式配图保存在当前工作区的 news-images。清理仅处理已识别的可再生成缓存，保护稿件、素材、词典、语音模型和制作成果。')
+        layout=QVBoxLayout(self);layout.addWidget(QLabel('工作区存储'))
+        hint=QLabel('默认勾选超过保留期且无引用的临时文件。勾选正式素材或成果后，请先核对影响再确认删除。')
         hint.setWordWrap(True);layout.addWidget(hint)
         form=QFormLayout();self.enabled=QCheckBox('定期提醒清理');self.interval=QSpinBox();self.retention=QSpinBox()
-        for spin in (self.interval,self.retention):spin.setRange(1,365);spin.setSuffix(' 天')
+        for spin in (self.interval,self.retention):spin.setRange(1,365);spin.setSuffix(' 天');spin.setMaximumWidth(120)
         warning=''
         try:data=cache.load()
         except (OSError,ValueError) as error:data=dict(cache.DEFAULTS);warning='维护记录读取失败，原文件保留：'+str(error)
         self.enabled.setChecked(data['enabled']);self.interval.setValue(data['interval_days']);self.retention.setValue(data['retention_days'])
         form.addRow(self.enabled);form.addRow('检查提醒周期',self.interval);form.addRow('未使用缓存保留',self.retention);layout.addLayout(form)
         for signal in (self.enabled.toggled,self.interval.valueChanged,self.retention.valueChanged):signal.connect(self.save_preferences)
-        row=QHBoxLayout();self.scan_button=QPushButton('检查可清理内容');self.scan_button.clicked.connect(lambda:self.workspace.guard(self.scan))
+        row=QHBoxLayout();self.scan_button=QPushButton('检查存储占用');self.scan_button.clicked.connect(lambda:self.workspace.guard(self.scan))
         self.clean_button=QPushButton('清理所选类别');self.clean_button.clicked.connect(lambda:self.workspace.guard(self.clean))
         self.cancel_button=QPushButton('取消检查或清理');self.cancel_button.clicked.connect(self.cancel)
         row.addWidget(self.scan_button);row.addWidget(self.clean_button);row.addWidget(self.cancel_button);row.addStretch();layout.addLayout(row)
-        self.table=QTableWidget(0,3);configure_table(self.table);self.table.setHorizontalHeaderLabels(['缓存类别','文件数','预计释放'])
+        self.table=QTableWidget(0,5);configure_table(self.table);self.table.setHorizontalHeaderLabels(['用途','文件数','占用','引用／锁定','最近时间'])
+        self.table.horizontalHeaderItem(3).setToolTip('有引用文件数／运行中或受保护的文件数')
         self.table.horizontalHeader().setStretchLastSection(True);self.table.setColumnWidth(0,260);layout.addWidget(self.table,1)
+        self.table.cellDoubleClicked.connect(self.category_details)
         self.status=QLabel('尚未检查；提醒不会自动删除文件。');self.status.setWordWrap(True);layout.addWidget(self.status)
         last=data.get('last_result')
         if isinstance(last,dict):
@@ -52,6 +55,11 @@ class CacheMaintenancePanel(QWidget):
         if hasattr(p,'preview_player'):extra.append(p.preview_player.source().toLocalFile())
         return extra
 
+    def playback(self):
+        return [player.source().toLocalFile()
+                for player in (getattr(self.workspace,'preview_player',None),getattr(self.workspace.roundup,'player',None))
+                if player is not None and player.source().isLocalFile()]
+
     def check_due(self):
         if not isValid(self.workspace):return
         if self.worker or self.workspace._pending_leave or not self.workspace.isVisible():return
@@ -60,25 +68,40 @@ class CacheMaintenancePanel(QWidget):
         except (OSError,ValueError) as error:self.status.setText('清理提醒检查失败：'+str(error))
 
     def set_running(self,running):
-        self.scan_button.setEnabled(not running);self.clean_button.setEnabled(not running and bool(self.result and self.result['files']));self.cancel_button.setEnabled(running)
+        self.scan_button.setEnabled(not running);self.clean_button.setEnabled(not running and bool(self.result and any(not r['blocked'] for r in self.result['inventory'])));self.cancel_button.setEnabled(running)
 
     def scan(self,*,automatic=False):
         if self.worker:return
-        self.automatic=automatic;extra=self.references();active=self.active()
-        self.worker=RoundupWorker(lambda _,token:cache.scan(token,extra=extra,active=active),{},self,protect_cache=False)
-        self.worker.finished.connect(self.finished);self.status.setText('正在检查可再生成缓存…');self.set_running(True);self.worker.start()
+        self.automatic=automatic;extra=self.references();active=self.active();playback=self.playback()
+        self.worker=RoundupWorker(lambda _,token:cache.scan(token,extra=extra,active=active,in_use=playback),{},self,protect_cache=False)
+        self.worker.finished.connect(self.finished);self.status.setText('正在检查工作区存储…');self.set_running(True);self.worker.start()
+
+    def category_details(self,row,_):
+        if not self.result:return
+        item=self.table.item(row,0)
+        files=self.category_rows[item.data(Qt.ItemDataRole.UserRole)]
+        box=QMessageBox(QMessageBox.Icon.Information,item.text(),f'{len(files)} 个文件。展开查看路径、时间及引用。',parent=self)
+        box.setDetailedText('\n'.join(f"{r['path']}  ·  {size_text(r['size'])}  ·  "
+            f"{datetime.fromtimestamp(r['last_used']):%Y-%m-%d %H:%M}  ·  "
+            f"{'有引用' if r['referenced'] else '无引用'}{'  ·  暂受保护' if r['blocked'] else ''}" for r in files))
+        box.exec()
 
     def clean(self):
         if self.worker or not self.result:return
-        kinds={self.table.item(n,0).data(Qt.ItemDataRole.UserRole) for n in range(self.table.rowCount()) if self.table.item(n,0).checkState()==Qt.CheckState.Checked}
-        rows=[r for r in self.result['files'] if r['category'] in kinds]
+        groups={self.table.item(n,0).data(Qt.ItemDataRole.UserRole) for n in range(self.table.rowCount()) if self.table.item(n,0).checkState()==Qt.CheckState.Checked}
+        rows=[r for key in groups for r in self.category_rows[key] if not r['blocked'] and (r['old'] or r['category'] in cache.FORMAL)]
         if not rows:return
-        box=QMessageBox(QMessageBox.Icon.Question,'确认清理',f'清理 {len(rows)} 个缓存文件，预计释放 {size_text(sum(r["size"] for r in rows))}？\n删除前会重新检查引用、文件变化和运行状态。',parent=self)
-        yes=box.addButton('清理所选缓存',QMessageBox.ButtonRole.AcceptRole);box.addButton('取消',QMessageBox.ButtonRole.RejectRole);box.exec()
+        linked=sum(r['referenced'] for r in rows);formal=sum(r['category'] in cache.FORMAL for r in rows)
+        message=f'删除 {len(rows)} 个文件，预计释放 {size_text(sum(r["size"] for r in rows))}？'
+        if formal or linked:message+=f'\n其中 {formal} 个是素材或成果，{linked} 个仍有引用。删除后可能需要重新下载、生成或导出。'
+        box=QMessageBox(QMessageBox.Icon.Question,'确认清理',message,parent=self)
+        box.setDetailedText('\n'.join(r['path'] for r in rows))
+        yes=box.addButton('删除所选文件',QMessageBox.ButtonRole.AcceptRole);box.addButton('取消',QMessageBox.ButtonRole.RejectRole);box.exec()
         if box.clickedButton()!=yes:return
-        extra=self.references();self.automatic=False
-        self.worker=RoundupWorker(lambda _,token:cache.clean(rows,token,extra=extra,active=self.active),{'clean':True},self,protect_cache=False)
-        self.worker.finished.connect(self.finished);self.status.setText('正在清理所选缓存…');self.set_running(True);self.worker.start()
+        extra=self.references();playback=self.playback();self.automatic=False
+        self.worker=RoundupWorker(lambda _,token:cache.clean(rows,token,extra=extra,active=self.active,in_use=playback,
+            allow_formal=bool(formal),allow_referenced=bool(linked)),{'clean':True},self,protect_cache=False)
+        self.worker.finished.connect(self.finished);self.status.setText('正在清理所选文件…');self.set_running(True);self.worker.start()
 
     def cancel(self):
         if self.worker:self.worker.token.cancel()
@@ -95,21 +118,31 @@ class CacheMaintenancePanel(QWidget):
             self.status.setText(text);self.status.setToolTip('\n'.join(r['path']+'：'+r['reason'] for r in result['failed']))
         else:
             self.result=worker.value;self.table.setRowCount(0)
-            for kind,label in cache.LABELS.items():
-                rows=[r for r in self.result['files'] if r['category']==kind]
-                if not rows:continue
-                n=self.table.rowCount();self.table.insertRow(n);item=QTableWidgetItem(label);item.setData(Qt.ItemDataRole.UserRole,kind)
-                item.setFlags(Qt.ItemFlag.ItemIsEnabled|Qt.ItemFlag.ItemIsUserCheckable);item.setCheckState(Qt.CheckState.Checked);self.table.setItem(n,0,item)
-                for col,text in ((1,str(len(rows))),(2,size_text(sum(r['size'] for r in rows)))):
+            self.category_rows={}
+            for r in self.result['inventory']:
+                suffix=' · 有引用' if r['referenced'] and r['category'] not in cache.FORMAL else ''
+                self.category_rows.setdefault(cache.LABELS[r['category']]+suffix,[]).append(r)
+            for label in sorted(self.category_rows):
+                rows=self.category_rows[label]
+                n=self.table.rowCount();self.table.insertRow(n);item=QTableWidgetItem(label);item.setData(Qt.ItemDataRole.UserRole,label)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled|Qt.ItemFlag.ItemIsSelectable|Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked if any(r['default'] for r in rows) else Qt.CheckState.Unchecked);self.table.setItem(n,0,item)
+                for col,text in ((1,str(len(rows))),(2,size_text(sum(r['size'] for r in rows))),
+                                 (3,f"{sum(r['referenced'] for r in rows)} ／ {sum(r['blocked'] for r in rows)}"),
+                                 (4,datetime.fromtimestamp(max(r['last_used'] for r in rows)).strftime('%Y-%m-%d %H:%M'))):
                     cell=QTableWidgetItem(text);cell.setFlags(Qt.ItemFlag.ItemIsEnabled);self.table.setItem(n,col,cell)
                 item.setToolTip('\n'.join(r['path'] for r in rows))
-            self.status.setText(f'可清理 {self.result["count"]} 个文件，预计释放 {size_text(self.result["bytes"])}。'+('部分引用记录无法读取，已保守保护相关缓存。' if self.result['reference_warning'] else ''))
-            if self.automatic and self.result['count']:self.show_reminder()
+            self.status.setText(f'默认勾选 {self.result["count"]} 个文件，预计释放 {size_text(self.result["bytes"])}。双击类别查看文件。'+('部分清单无法读取，已暂停删除。' if self.result['reference_warning'] else ''))
+            if self.automatic and (self.result['count'] or any(r['old'] and r['category'] in cache.FORMAL for r in self.result['inventory'])):self.show_reminder()
         worker.deleteLater();self.set_running(False)
 
     def show_reminder(self):
+        files=self.result['inventory']
+        video=sum(r['size'] for r in files if r['category'] in ('downloads','generated'))
+        exports=sum(r['size'] for r in files if r['category']=='exports')
         cache.reminded();box=QMessageBox(QMessageBox.Icon.Information,'缓存清理提醒',
-            f'发现 {self.result["count"]} 个超过保留期的缓存文件，可释放约 {size_text(self.result["bytes"])}。正式素材会保留。',parent=self.workspace)
+            f'旧缓存可清理 {self.result["count"]} 个，约 {size_text(self.result["bytes"])}。\n'
+            f'已下载视频及生成素材占用 {size_text(video)}，导出成果占用 {size_text(exports)}。',parent=self.workspace)
         view=box.addButton('查看并清理',QMessageBox.ButtonRole.AcceptRole);later=box.addButton('稍后提醒',QMessageBox.ButtonRole.RejectRole)
         off=box.addButton('关闭定期提醒',QMessageBox.ButtonRole.DestructiveRole)
         def chosen(_):

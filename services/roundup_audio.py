@@ -32,13 +32,20 @@ def content_namespace(draft):
 
 def audio_key(draft, segment, *, legacy_rules=False):
     settings = dict(draft['tts'])
+    from services.voice_profiles import PREFIX,load
+    custom=settings.get('speaker','').startswith(PREFIX)
+    if custom:
+        profile=load(settings['speaker'])
+        settings.update(model=profile['model'],style='',reference_hash=profile['sha256'],
+                        reference_text=profile['text'])
     root = Path(settings.get('model') or '.')
     stamps = []
     if settings.get('model') and root.is_dir():
         for path in sorted(p for p in root.rglob('*') if p.is_file()):
             stamps.append((str(path.relative_to(root)), path.stat().st_size, path.stat().st_mtime_ns))
     worker = bundled_resource_path('tools', 'qwen_tts_worker.py')
-    worker_hash = file_hash(worker) if worker.is_file() else 'missing-worker'
+    # The preset synthesis path is unchanged. Retain the published preset cache identity.
+    worker_hash = (file_hash(worker) if worker.is_file() else 'missing-worker') if custom else '506842d175efe027da2e223ab21f8795dac9c483a9bb3b068ee18eb0d7dde8e5'
     runtime = Path(settings.get('python') or '.')
     runtime_stamp = runtime.stat().st_mtime_ns if runtime.is_file() else None
     identity = dict(engine='qwen-customvoice-subprocess-v1', text=reading_text(draft, segment),
@@ -73,11 +80,11 @@ def current_audio(draft, segment):
     value = segment.get('audio')
     if not isinstance(value, dict):
         return None
-    key = audio_key(draft, segment)
-    if value.get('key') != key and value.get('key') != audio_key(draft, segment, legacy_rules=True):
-        return None
-    path = Path(value.get('path', ''))
     try:
+        key = audio_key(draft, segment)
+        if value.get('key') != key and value.get('key') != audio_key(draft, segment, legacy_rules=True):
+            return None
+        path = Path(value.get('path', ''))
         frames, rate = wav_info(path)
         if file_hash(path) != value.get('sha256'):
             return None
@@ -123,7 +130,7 @@ def generate_audio(draft, provider, token, *, segment_id=None, force=False, on_p
                     # Legacy or edited narration remains synthesizable, with synchronization explicitly pending.
                     pass
                 result = generate_speech(SpeechRequest(text,
-                    model=draft['tts']['model'], voice=draft['tts']['speaker'], style=draft['tts'].get('style', '')),
+                    model=draft['tts']['model'] or 'local-reference', voice=draft['tts']['speaker'], style=draft['tts'].get('style', '')),
                     directory, provider=provider, cancel_check=token.check)
                 frames, rate = wav_info(result.path)
                 segment['audio'] = dict(key=key, path=str(result.path.resolve()), duration_seconds=frames / rate,

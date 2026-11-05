@@ -86,9 +86,24 @@ def sync_names(draft, *, update_manual=False):
         if not update_manual and (segment.get('audio') or segment.get('edited') or (narration or {}).get('origin') == 'manual_edit'):
             pending.append(segment['id'])
             continue
+        old_spoken = narration_text(segment)
         segment.update(fields)
         if narration:
             narration.update(text=reading, based_on=narration_basis(segment))
+        if segment.get('units') and segment.get('units_basis') == digest(old_spoken):
+            units = deepcopy(segment['units'])
+            offset = 0
+            for unit in units:
+                text = unit['text']
+                leading = text[:len(text)-len(text.lstrip())]
+                trailing = text[len(text.rstrip()):]
+                text = leading + dictionary_replace(text, replacements)[0] + trailing
+                unit.update(text=text, start=offset, end=offset+len(text),
+                            screen=dictionary_replace(unit['screen'], replacements)[0])
+                offset += len(text)
+            spoken = narration_text(segment)
+            if ''.join(unit['text'] for unit in units) == spoken:
+                segment.update(units=units, units_basis=digest(spoken))
     # Keep old bindings until edited paragraphs have explicitly adopted the new wording.
     if not pending:
         draft['name_bindings'] = current
@@ -575,7 +590,7 @@ def _review_claims(segments, config, token, draft):
               + json.dumps(dict(claims=evidence, paragraphs=[dict(id=p['id'], text=p['spoken'], task_ids=p['task_ids']) for p in segments],
                                 chronological_groups=thematic_groups(draft),
                                 task_contexts=[dict(m['original'], event=event_context(m['original'], draft)) for m in writing_materials(draft)],
-                                display_names={i['ll2_id']: confirmed_values(i.get('research', {}), i).get('chinese_name') or i['english_name']
+                                display_names={i['ll2_id']: display_names(i)['name']
                                                for i in draft['snapshot']['items']}), ensure_ascii=False))
     data = request_json(prompt, config, module_name='roundup_fact_review', cancel_token=token, max_attempts=1, validator=validate)
     validate(data)
@@ -669,7 +684,7 @@ def generate_script(draft, settings, token, *, single_id=None):
         '可用[[name:ID]]保留正式任务名，或[[event:ID]]使用程序事实句。不得新造未核对中文专名。'
         '火箭与任务名称保留原写法，已确认对应可用display_names；通用场地词可忠实翻译。'
         '屏幕文字保留完整型号/工位编号。可在朗读中转换数字读法，但任务编号不任意增减；不凭编号推载荷数量。'
-        'screen必须逐项含完整原始rocket和pad_code（若有），可与spoken使用不同claim。'
+        'screen逐项保留event.rocket中的完整型号和pad_code（若有），可与spoken使用不同claim。'
         'event.payload_count非空时自然交代数量，多颗可用一箭N星；单颗且载荷已明确时不再补“一颗卫星”。'
         '只需口播必要的载荷名，可省去冗长宣传任务名；正式全名及编号在screen保留，不能自造中文简称。'
         '不要先念“执行某任务”再重复载荷名；采用event.spoken_payload时不再追加卫星单位或重复数量。工位用event.pad_spoken。'
@@ -733,8 +748,9 @@ def validate_draft(draft):
     if not isinstance(draft, dict) or draft.get('version') != 1:
         raise ValueError('不支持的综述草稿版本')
     range_bounds(draft['start'], draft['end'], draft.get('timezone', 'Asia/Shanghai'))
-    from services.roundup_sync import validate_aligner
+    from services.roundup_sync import closing_hold,validate_aligner
     validate_aligner(draft.get('aligner',{}))
+    closing_hold(draft)
     from tools.roundup_visuals import visual_settings
     visual_settings(draft)
     if not isinstance(draft.get('segments'), list) or not isinstance(draft.get('selection'), list):

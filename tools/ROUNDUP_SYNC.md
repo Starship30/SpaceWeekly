@@ -79,11 +79,9 @@ D:\Tools\spaceweekly-aligner\Scripts\python.exe -m pip install -r D:\Desktop\Spa
 
 ## 导出与检查
 
-保留 MOV、分段 WAV、稿件和清单，增加 `timeline.json` 和同步版本 / 状态。
-音频齐备时导出整期 `narration.wav`，SRT 按有效讲解单元生成；无单元时间的段落使用段落级字幕。
-`subtitle_precision` 分别记录 `unit`、`mixed`、`paragraph` 或 `preview`，没有逐字精度声明。
-沿用 `paragraphs.srt` 文件名以兼容旧交付；具体精度以清单为准。
-默认画面导出且整期音频齐备时，另外合成带音轨 MP4；字幕另存，没有烧进右侧卡片。
+完整视频要求当前配音齐备，每次导出一个带配音的 MP4，内嵌可选字幕轨。字幕按有效讲解单元生成，无单元时间的部分使用段落级字幕。
+拼接音频和统一时间表留在工作区缓存，供预览和检查使用。
+查看旧版素材包时，可通过 `timeline.json` 与 `paragraphs.srt` 核对当时使用的时间表和字幕。
 
 帧边界采用整数采样点的累计向上取整：`ceil(global_sample * 30 / 24000)`。
 每一帧用对应的全局帧时刻计算局部时间，渲染耗时不参与时序。

@@ -104,11 +104,12 @@ def shot_plan(draft,timeline=None):
             emit(origin,view(segment,ids,'task' if len(ids)==1 else 'summary'),segment)
     for n,shot in enumerate(shots):
         end=shots[n+1]['start_sample'] if n+1<len(shots) else timeline['total_samples']
+        animation_end=min(end,timeline['segments'][-1]['speech_end_sample'])
         shot.update(end_sample=end,start_seconds=shot['start_sample']/rate,end_seconds=end/rate,
-            duration_seconds=(end-shot['start_sample'])/rate)
+            duration_seconds=(end-shot['start_sample'])/rate,animation_end_sample=animation_end)
         before=shots[n-1]['scene'] if n else None
         shot['animation']=('none' if before is None else 'update' if
-            shot['duration_seconds']<SHORT_SHOT_SECONDS or shot['scene']['display']=='summary' else 'card')
+            (animation_end-shot['start_sample'])/rate<SHORT_SHOT_SECONDS or shot['scene']['display']=='summary' else 'card')
     return dict(version=SHOT_VERSION,sample_rate=rate,total_samples=timeline['total_samples'],
         settings=options,short_threshold_seconds=SHORT_SHOT_SECONDS,shots=shots,
         short_shots=[n for n,s in enumerate(shots) if s['duration_seconds']<SHORT_SHOT_SECONDS],
@@ -333,7 +334,7 @@ def preview_frame(draft,segment,elapsed=0,*,card_gap=DEFAULT_CARD_GAP):
     return frame_at(prepare_frames(draft,segment,card_gap=card_gap),elapsed)
 
 
-def prepare_frames(draft,segment,*,timing=None,card_gap=DEFAULT_CARD_GAP):
+def prepare_frames(draft,segment,*,timing=None,card_gap=DEFAULT_CARD_GAP,timeline=None):
     """Cache only images; preview and export use the same clock and transition."""
     if type(card_gap) is not int or not 0<=card_gap<=RIGHT_MASK.height*2:
         raise ValueError('卡片间距须为不超过两张卡片高度的非负整数')
@@ -347,14 +348,15 @@ def prepare_frames(draft,segment,*,timing=None,card_gap=DEFAULT_CARD_GAP):
         selected=next(s for s in segments if s['id']==segment['id'])
         selected.update(audio=timing.get('audio'),preview_seconds=timing['duration_seconds'])
         view=dict(view,segments=segments)
-    timeline=build_timeline(view);schedule=next(r for r in timeline['segments'] if r['segment_id']==segment['id'])
+    timeline=timeline if view is draft and timeline is not None else build_timeline(view)
+    schedule=next(r for r in timeline['segments'] if r['segment_id']==segment['id'])
     table=shot_plan(view,timeline);all_shots=table['shots'];rate=table['sample_rate'];origin=schedule['start_sample']
     first=max(0,bisect_right([s['start_sample'] for s in all_shots],origin)-1)
     shots=[s for s in all_shots[first:] if s['start_sample']<schedule['end_sample']]
     timing=dict(audio=schedule['audio'],timing_source=schedule['timing_source'],
         duration_seconds=(schedule['end_sample']-origin)/rate)
     starts=[(s['start_sample']-origin)/rate for s in shots]
-    ends=[(s['end_sample']-origin)/rate for s in shots]
+    ends=[(s['animation_end_sample']-origin)/rate for s in shots]
     previous=_scene(view,segment,all_shots[first-1]['scene'],timing) if first else None
     scenes=[_scene(view,segment,s['scene'],timing) for s in shots]
     return dict(pictures=[scene['image'] for scene in scenes],scenes=scenes,previous=previous,timing=timing,

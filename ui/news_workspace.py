@@ -7,7 +7,7 @@ from PySide6.QtGui import QPixmap,QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget,
     QListWidgetItem, QSplitter, QTextBrowser, QLineEdit, QPlainTextEdit, QLabel, QMessageBox,QFileDialog,QMenu,QInputDialog,
-    QCheckBox,QToolButton)
+    QCheckBox,QToolButton,QDialog,QSizePolicy)
 
 from i18n import tr
 from models.ai_summary import AISummary
@@ -23,7 +23,9 @@ class NewsWorkspace(QWidget):
     write_requested = Signal()
     changed = Signal()
     narration_requested=Signal()
-    voice_requested=Signal()
+    voice_requested=Signal(str)
+    retry_requested=Signal()
+    diagnostic_requested=Signal(object)
     article_changed=Signal()
     image_requested=Signal(object,object)
 
@@ -34,7 +36,7 @@ class NewsWorkspace(QWidget):
         self.script_included = set()
         self.edited = set()
         self._running = False
-        self.voices={};self.voice_settings=None
+        self.voices={};self.voice_settings=None;self.narration_failures={}
         self._loading = False
         self.data_page = QWidget()
         layout = QVBoxLayout(self.data_page)
@@ -72,16 +74,20 @@ class NewsWorkspace(QWidget):
         self.script_page = QWidget()
         layout = QVBoxLayout(self.script_page)
         row = QHBoxLayout()
-        self.generate = QPushButton(tr('production.write_news'))
+        self.generate = QPushButton('生成新闻稿')
         self.generate.setObjectName('PrimaryButton')
         self.generate.clicked.connect(self._generate)
         row.addWidget(self.generate)
-        self.script_hint = QLabel(tr('production.news_empty'))
+        self.script_hint = QLabel('生成范围取自资料页勾选')
         self.script_hint.setWordWrap(True)
         row.addWidget(self.script_hint, 1)
         layout.addLayout(row)
+        self.batch_hint=QLabel();self.batch_hint.setWordWrap(True);self.batch_hint.hide();layout.addWidget(self.batch_hint)
         split = QSplitter()
+        split.setHandleWidth(14)
+        split.setChildrenCollapsible(False)
         list_page=QWidget();list_layout=QVBoxLayout(list_page);list_layout.setContentsMargins(0,0,0,0)
+        list_heading=QLabel('本期新闻');list_heading.setObjectName('SectionTitle');list_layout.addWidget(list_heading)
         controls=QHBoxLayout();self.script_actions=[]
         for text,action in (('全选',lambda:self._check_scripts(True)),('全不选',lambda:self._check_scripts(False)),
                             ('上移',lambda:self.move_article(-1)),('下移',lambda:self.move_article(1))):
@@ -95,9 +101,21 @@ class NewsWorkspace(QWidget):
         self.articles.currentRowChanged.connect(self._article)
         list_layout.addWidget(self.articles,1)
         self.selection_hint=QLabel();self.selection_hint.setWordWrap(True);list_layout.addWidget(self.selection_hint)
+        self.selection_hint.setToolTip('勾选决定本期导出和失败重试的范围，高亮行决定右侧正在编辑的新闻。')
+        self.retry=QPushButton('重试失败项')
+        self.retry.setToolTip('仅重试本期已勾选且口播生成失败的新闻。')
+        self.retry.clicked.connect(self.retry_requested.emit)
+        list_layout.addWidget(self.retry,0,Qt.AlignmentFlag.AlignLeft)
         list_page.setMinimumWidth(260);split.addWidget(list_page)
+        right_page=QWidget();right_layout=QVBoxLayout(right_page);right_layout.setContentsMargins(0,0,0,0)
+        self.current_title=QLabel();self.current_title.setObjectName('SectionTitle')
+        self.current_title.setAccessibleName('当前新闻标题')
+        self.current_title.setTextFormat(Qt.TextFormat.PlainText);self.current_title.setWordWrap(True)
+        self.current_title.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
+        right_layout.addWidget(self.current_title)
         editor = QWidget()
         form = QVBoxLayout(editor)
+        form.setContentsMargins(0,8,0,0)
         form.addWidget(QLabel(tr('production.title')))
         self.title = QLineEdit()
         form.addWidget(self.title)
@@ -111,27 +129,42 @@ class NewsWorkspace(QWidget):
         self.citation.setOpenExternalLinks(True)
         self.citation.setMaximumHeight(130)
         form.addWidget(self.citation)
-        self.editor_tabs=SegmentedTabs();self.editor_tabs.addTab(editor,'屏幕文字与摘要')
+        self.editor_tabs=SegmentedTabs()
         voice_page=QWidget();voice_layout=QVBoxLayout(voice_page);actions=QHBoxLayout()
-        self.proposal=QPushButton('生成本条口播稿');self.proposal.clicked.connect(self.narration_requested.emit);actions.addWidget(self.proposal)
-        listen=QPushButton('配音与预览');listen.clicked.connect(self.voice_requested.emit);actions.addWidget(listen);actions.addStretch(1)
-        voice_layout.addLayout(actions);voice_layout.addWidget(QLabel('新闻口播稿（确认后用于配音，摘要不自动朗读）'))
+        voice_layout.setContentsMargins(0,8,0,0)
+        self.proposal=QPushButton('生成本条口播');self.proposal.clicked.connect(self.narration_requested.emit);actions.addWidget(self.proposal)
+        self.proposal.setToolTip('为列表当前打开的这条新闻生成口播提案。')
+        self.go_voice=QPushButton('前往配音');self.go_voice.clicked.connect(self._go_voice);actions.addWidget(self.go_voice);actions.addStretch(1)
+        voice_layout.addLayout(actions);voice_layout.addWidget(QLabel('新闻口播稿（配音时朗读）'))
         self.oral=QPlainTextEdit();voice_layout.addWidget(self.oral,1)
-        voice_layout.addWidget(QLabel('最终 TTS 输入（术语、日期、数字及读法处理后）'))
-        self.final_input=QPlainTextEdit();self.final_input.setReadOnly(True);voice_layout.addWidget(self.final_input,1)
+        reading_row=QHBoxLayout()
+        self.reading_toggle=QPushButton('展开最终读法预览');self.reading_toggle.setCheckable(True);reading_row.addWidget(self.reading_toggle)
+        self.reading_toggle.setToolTip('修改口播，或在语音设置中调整发音规则。')
+        self.spoken_versions=QPushButton('查看口播修改记录');self.spoken_versions.clicked.connect(self._show_versions)
+        self.spoken_versions.hide();reading_row.addWidget(self.spoken_versions);reading_row.addStretch(1)
+        voice_layout.addLayout(reading_row)
+        self.final_input=QPlainTextEdit();self.final_input.setReadOnly(True);self.final_input.setMaximumHeight(134)
+        self.final_input.hide();voice_layout.addWidget(self.final_input)
+        self.reading_toggle.toggled.connect(self.final_input.setVisible)
+        self.reading_toggle.toggled.connect(lambda shown:self.reading_toggle.setText('收起最终读法预览' if shown else '展开最终读法预览'))
+        detail_row=QHBoxLayout()
         self.voice_hint=QLabel();self.voice_hint.setWordWrap(True);voice_layout.addWidget(self.voice_hint)
+        self.failure_reason=QLabel();self.failure_reason.setWordWrap(True);detail_row.addWidget(self.failure_reason,1)
+        self.failure_details=QPushButton('查看失败详情');self.failure_details.clicked.connect(self._show_failure);detail_row.addWidget(self.failure_details)
+        voice_layout.addLayout(detail_row)
         self.oral.textChanged.connect(self._edit_oral)
-        self.editor_tabs.addTab(voice_page,'口播与最终朗读');split.addWidget(self.editor_tabs)
+        self.editor_tabs.addTab(voice_page,'口播稿');self.editor_tabs.addTab(editor,'屏幕文字与摘要')
+        right_layout.addWidget(self.editor_tabs,1);split.addWidget(right_page)
         split.setStretchFactor(1, 3)
+        split.setSizes([290,680])
         layout.addWidget(split, 1)
         self.title.textChanged.connect(self._edit)
         self.summary.textChanged.connect(self._edit)
-        self._index = -1
-        self._article(-1)
+        self._article()
 
     def set_running(self,running):
         self._running=running
-        self.collect.setEnabled(not running);self.generate.setEnabled(not running)
+        self.collect.setEnabled(not running)
         self.proposal.setEnabled(not running and self.current_article() is not None)
         self._update_script_rows()
         self.title.setReadOnly(running);self.summary.setReadOnly(running);self.oral.setReadOnly(running)
@@ -147,11 +180,18 @@ class NewsWorkspace(QWidget):
         self.write_requested.emit()
 
     def adopt(self, bundle, *, collected=False):
+        proposals=bundle.pop('narration_proposals',{})
+        failures=bundle.pop('narration_failures',{})
+        states=bundle.pop('narration_states',{})
+        if collected:self.batch_hint.hide()
         previous=[a.news.url for a in self.bundle['articles']] if self.bundle and not collected else []
         if collected or not self.bundle:
             bundle['source_articles']=list(bundle['articles'])
         else:
             originals=self.bundle.get('source_articles',self.bundle['articles'])
+            verified={a.news.url:a.evidence for a in bundle['articles'] if a.evidence}
+            for article in originals:
+                if article.news.url in verified:article.evidence=verified[article.news.url]
             by_url={a.news.url:a for a in originals}
             bundle['articles']=[by_url.get(a.news.url,a) for a in bundle['articles']]
             bundle['source_articles']=originals
@@ -161,13 +201,71 @@ class NewsWorkspace(QWidget):
         self.included = {a.news.url for a in bundle['articles']}
         self.script_included=(self.script_included & self.included)|(self.included-set(previous))
         self.edited.clear()
+        self.apply_narrations(proposals,failures,states)
         self.refresh()
         self.changed.emit()
 
+    def apply_narrations(self,proposals,failures,states):
+        self.narration_failures.update(failures)
+        if proposals and self.voice_settings is not None:
+            voice=self.voice_settings()
+            for article in self.bundle['articles']:
+                identifier=news_id(article.news.url)
+                draft=self.voices.get(identifier)
+                if identifier in proposals and (draft is None or not news_voice.has_existing_spoken(draft)):
+                    if draft is None:draft=self.voices[identifier]=news_voice.create(article,voice)
+                    news_voice.apply_proposal(draft,proposals[identifier])
+                    self.narration_failures.pop(identifier,None)
+        if states:
+            message='，'.join(f'{label}{list(states.values()).count(key)}条' for key,label in (
+                ('generated','已生成'),('existing','已有'),('skipped','跳过'),('failed','失败'),('cancelled','取消'))
+                if key in states.values())
+            self.batch_hint.setText(message);self.batch_hint.setVisible(bool(message))
+        self.refresh_voice()
+
+    def failed_articles(self):
+        failed=[]
+        for article in (self.bundle or {}).get('articles',[]):
+            identifier=news_id(article.news.url)
+            draft=self.voices.get(identifier)
+            if article.news.url in self.script_included and identifier in self.narration_failures:
+                if not draft or not news_voice.has_existing_spoken(draft):failed.append(article)
+        return failed
+
+    def select_article(self,identifier):
+        for index in range(self.articles.count()):
+            if news_id(self.articles.item(index).data(Qt.ItemDataRole.UserRole))==identifier:
+                self.articles.setCurrentRow(index)
+                return True
+        return False
+
+    def _go_voice(self):
+        article=self.current_article()
+        if article:self.voice_requested.emit(news_id(article.news.url))
+
+    def _show_failure(self):
+        article=self.current_article()
+        failure=self.narration_failures.get(news_id(article.news.url)) if article else None
+        if failure:self.diagnostic_requested.emit(failure)
+
+    def _show_versions(self):
+        draft=self.voice_draft()
+        if not draft:return
+        dialog=QDialog(self);dialog.setWindowTitle('口播修改记录');dialog.resize(620,360)
+        layout=QVBoxLayout(dialog);layout.addWidget(QLabel('改写或开始人工修改前的版本'))
+        text=QPlainTextEdit();text.setReadOnly(True)
+        text.setPlainText('\n\n'.join(row['at']+'\n'+row['text'] for row in reversed(draft.get('spoken_history',[]))))
+        layout.addWidget(text,1)
+        close=QPushButton('关闭');close.clicked.connect(dialog.accept);layout.addWidget(close,0,Qt.AlignmentFlag.AlignRight)
+        dialog.exec()
+
     def refresh(self):
+        item=self.articles.currentItem()
+        previous=item.data(Qt.ItemDataRole.UserRole) if item else None
         self._loading = True
-        self.sources.clear()
-        self.articles.clear()
+        with QSignalBlocker(self.sources),QSignalBlocker(self.articles):
+            self.sources.clear()
+            self.articles.clear()
         if self.bundle:
             for article in self.bundle.get('source_articles',self.bundle['articles']):
                 item = QListWidgetItem(article.news.title)
@@ -180,13 +278,13 @@ class NewsWorkspace(QWidget):
                 self.articles.addItem(item)
         count = self.sources.count()
         self.data_hint.setText(tr('production.news_count', count=count) if count else tr('production.news_empty'))
-        self.script_hint.setText(tr('production.news_prepared') if self.bundle and self.bundle.get('context') else tr('production.news_unwritten'))
         self._loading = False
         self._update_script_rows()
         self.sources.setCurrentRow(0 if count else -1)
-        self.articles.setCurrentRow(0 if count else -1)
-        if not count:
-            self._article(-1)
+        if previous is None or not self.select_article(news_id(previous)):
+            self.articles.setCurrentRow(0 if self.articles.count() else -1)
+        if not self.articles.count():
+            self._article()
 
     def _title(self, article):
         context = self.bundle.get('context')
@@ -196,7 +294,17 @@ class NewsWorkspace(QWidget):
         if self._loading or not self.bundle:
             return
         self.included = {a.news.url for n, a in enumerate(self.bundle.get('source_articles',self.bundle['articles'])) if self.sources.item(n).checkState() == Qt.CheckState.Checked}
+        self._update_batch_scope()
         self.changed.emit()
+
+    def _update_batch_scope(self):
+        bundle=self.bundle or {}
+        sources=bundle.get('source_articles',bundle.get('articles',[]))
+        count=sum(article.news.url in self.included for article in sources)
+        launches=len(bundle.get('launch_articles',[]))
+        self.generate.setText(f'生成新闻稿（{count} 条）')
+        self.generate.setEnabled(not self._running and bool(count or launches))
+        self.script_hint.setText('生成范围取自资料页勾选'+(f'，另含 {launches} 项发射资料' if launches else ''))
 
     def _update_script_rows(self):
         rows=self.bundle['articles'] if self.bundle else []
@@ -205,14 +313,22 @@ class NewsWorkspace(QWidget):
             for article,item in zip(rows,[self.articles.item(i) for i in range(self.articles.count())]):
                 included=article.news.url in self.script_included
                 if included:number+=1
-                title=self._title(article);item.setText((f'{number:02d}  ' if included else '')+title);item.setToolTip(title)
+                title=self._title(article);identifier=news_id(article.news.url);draft=self.voices.get(identifier)
+                status=('失败' if identifier in self.narration_failures else '待生成'
+                        if not draft or not draft['segments'][0]['spoken'].strip() else
+                        {'generated':'已生成','manual':'人工修改'}.get(draft.get('oral_origin'),'已有口播'))
+                item.setText((f'{number:02d}  ' if included else '')+status+' · '+title);item.setToolTip(status+' · '+title)
                 flag=Qt.ItemFlag.ItemIsUserCheckable
                 item.setFlags(item.flags() & ~flag if self._running else item.flags() | flag)
-        self.selection_hint.setText(f'已选 {number} / {len(rows)} 条；新闻条按此顺序编号。')
+        self.selection_hint.setText(f'已勾选 {number} / {len(rows)} 条，素材按此顺序编号。')
         index=self.articles.currentRow()
         for button in self.script_actions[:2]:button.setEnabled(not self._running and bool(rows))
         self.script_actions[2].setEnabled(not self._running and index>0)
         self.script_actions[3].setEnabled(not self._running and 0<=index<len(rows)-1)
+        failed=len(self.failed_articles())
+        self.retry.setText(f'重试失败项（{failed} 条）')
+        self.retry.setEnabled(not self._running and bool(failed))
+        self._update_batch_scope()
 
     def _choose_script(self, *_):
         if self._loading or self._running:return
@@ -230,10 +346,12 @@ class NewsWorkspace(QWidget):
     def move_article(self,offset):
         index=self.articles.currentRow();target=index+offset
         if self._running or not self.bundle or not 0<=index<len(self.bundle['articles']) or not 0<=target<len(self.bundle['articles']):return
+        identifier=news_id(self.articles.item(index).data(Qt.ItemDataRole.UserRole))
         with QSignalBlocker(self.articles):
             self.bundle['articles'].insert(target,self.bundle['articles'].pop(index))
-            item=self.articles.takeItem(index);self.articles.insertItem(target,item);self.articles.setCurrentRow(target)
-        self._article(target);self.changed.emit()
+            item=self.articles.takeItem(index);self.articles.insertItem(target,item)
+            self.select_article(identifier)
+        self._article();self.changed.emit()
 
     def _source(self, index):
         if not self.bundle or index < 0:
@@ -306,11 +424,10 @@ class NewsWorkspace(QWidget):
         from resources import resource_path
         path=resource_path('news-images');path.mkdir(parents=True,exist_ok=True);QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-    def _article(self, index):
-        self._index = index
+    def _article(self, *_):
+        article=self.current_article()
         self._loading = True
-        if self.bundle and index >= 0:
-            article = self.bundle['articles'][index]
+        if article:
             summary = self.bundle.get('summaries', {}).get(article.news.url)
             self.title.setText(self._title(article))
             self.summary.setPlainText(summary.summary if summary else article.news.summary)
@@ -319,18 +436,22 @@ class NewsWorkspace(QWidget):
         else:
             self.title.clear(); self.summary.clear(); self.citation.clear()
             self.origin.setText(tr('production.news_empty'))
-        self.title.setEnabled(index >= 0)
-        self.summary.setEnabled(index >= 0)
+        self.title.setEnabled(article is not None)
+        self.summary.setEnabled(article is not None)
+        self.oral.setEnabled(article is not None);self.go_voice.setEnabled(article is not None)
         self._loading = False
-        self.proposal.setEnabled(index>=0 and not self._running)
+        self.proposal.setEnabled(article is not None and not self._running)
         self._update_script_rows()
         self.refresh_voice();self.article_changed.emit()
 
     def current_article(self):
-        return self.bundle['articles'][self._index] if self.bundle and 0<=self._index<len(self.bundle['articles']) else None
+        row=self.articles.currentItem()
+        if not row or not self.bundle:return None
+        url=row.data(Qt.ItemDataRole.UserRole)
+        return next((article for article in self.bundle['articles'] if article.news.url==url),None)
 
-    def voice_draft(self):
-        article=self.current_article()
+    def voice_draft(self,article=None):
+        article=article or self.current_article()
         if article is None or self.voice_settings is None:return None
         identifier=news_id(article.news.url);voice=self.voice_settings()
         if identifier not in self.voices:self.voices[identifier]=news_voice.create(article,voice)
@@ -346,8 +467,16 @@ class NewsWorkspace(QWidget):
         return draft
 
     def refresh_voice(self):
+        article=self.current_article()
+        title=(self._title(article) or '未填写标题') if article else '请选择一条新闻'
+        self.current_title.setText(title);self.current_title.setToolTip('<p>'+escape(title)+'</p>')
+        failure=self.narration_failures.get(news_id(article.news.url)) if article else None
+        self.failure_reason.setText(failure['原因'] if failure else '')
+        self.failure_reason.setVisible(bool(failure));self.failure_details.setVisible(bool(failure))
         try:
             draft=self.voice_draft();text=draft['segments'][0]['spoken'] if draft else ''
+            self.proposal.setText('重写本条口播' if text.strip() else '生成本条口播')
+            self.spoken_versions.setVisible(bool(draft and draft.get('spoken_history')))
             self.oral.blockSignals(True)
             if self.oral.toPlainText()!=text:self.oral.setPlainText(text)
             self.oral.blockSignals(False)
@@ -360,12 +489,15 @@ class NewsWorkspace(QWidget):
         if self._loading:return
         draft=self.voice_draft()
         if draft is None:return
-        news_voice.set_spoken(draft,self.oral.toPlainText());self.refresh_voice();self.changed.emit()
+        news_voice.set_spoken(draft,self.oral.toPlainText())
+        if draft['segments'][0]['spoken'].strip():self.narration_failures.pop(draft['news_id'],None)
+        self._update_script_rows();self.refresh_voice();self.changed.emit()
 
     def _edit(self):
-        if self._loading or self._index < 0 or not self.bundle:
+        if self._loading:
             return
-        article = self.bundle['articles'][self._index]
+        article=self.current_article()
+        if article is None:return
         url = article.news.url
         context = self.bundle.get('context')
         if context:
@@ -395,7 +527,7 @@ class NewsWorkspace(QWidget):
 
     def snapshot(self):
         return dict(bundle=serialize_news(self.bundle), included=sorted(self.included), script_included=sorted(self.script_included),
-                    edited=sorted(self.edited),voices=deepcopy(self.voices))
+                    edited=sorted(self.edited),voices=deepcopy(self.voices),narration_failures=deepcopy(self.narration_failures))
 
     def restore(self, value):
         self.bundle = restore_news(value.get('bundle'))
@@ -403,4 +535,5 @@ class NewsWorkspace(QWidget):
         self.script_included=set(value.get('script_included',[a.news.url for a in self.bundle['articles']] if self.bundle else []))
         self.edited = set(value.get('edited', []))
         self.voices=deepcopy(value.get('voices',{}))
+        self.narration_failures=deepcopy(value.get('narration_failures',{}))
         self.refresh()

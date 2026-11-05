@@ -81,6 +81,15 @@ class ReadingTests(unittest.TestCase):
         b['payload'] = 'Unlinked satellite assertion'
         self.assertEqual(style.event_context(b,self.draft)['spoken_payload'],'')
 
+    def test_name_refresh_keeps_existing_unit_ids_and_task_associations(self):
+        segment=self.prepare()
+        before=[(u['id'],u['task_ids']) for u in segment['units']]
+        with patch.object(r,'load_dictionary',return_value={'Test rocket A':dict(translation='测试甲号火箭')}):
+            r.sync_names(self.draft)
+        self.assertIn('测试甲号火箭',segment['spoken'])
+        units=reading_units(self.draft,segment)
+        self.assertEqual([(u['id'],u['task_ids']) for u in units],before)
+
     def test_proposal_never_overwrites_manual_text_until_applied_and_invalidates_clock(self):
         segment = self.prepare()
         segment['spoken'] = '人工原稿，测试五十号03星卫星，发射一颗卫星。'

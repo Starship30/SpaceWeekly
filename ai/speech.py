@@ -19,6 +19,9 @@ class SpeechRequest:
     voice: str = ""
     language: str = "zh_CN"
     style: str = ""
+    reference_audio: str = ""
+    reference_text: str = ""
+    reference_sha256: str = ""
 
 
 @dataclass(frozen=True)

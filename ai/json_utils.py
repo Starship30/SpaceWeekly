@@ -21,6 +21,14 @@ class AIEmptyResponseError(AIResponseParseError):
     """Raised when a provider returned no content at all."""
 
 
+class AIResponseValidationError(AIResponseParseError):
+    """A valid JSON object failed schema or content checks."""
+
+
+class AITruncatedResponseError(AIResponseParseError):
+    """The provider reported an output length limit."""
+
+
 def request_json(
     prompt: str,
     provider_config,
@@ -33,13 +41,15 @@ def request_json(
 ) -> dict[str, object]:
     """Request strict JSON with bounded parse/empty-response retries."""
 
-    from ai.providers import complete
+    from ai.providers import complete_with_metadata
 
     raw_outputs: list[str] = []
     errors: list[str] = []
 
     attempts = max(1, min(int(max_attempts), 4))
     last_error: AIResponseParseError | None = None
+    secret = getattr(provider_config,"api_key","")
+    redact = lambda value: value.replace(secret,"[已隐藏]") if isinstance(secret,str) and secret else value
 
     for attempt in range(attempts):
         request_prompt = prompt
@@ -55,35 +65,40 @@ def request_json(
                 "Markdown code fence."
             )
 
-        content = complete(
+        response = complete_with_metadata(
             request_prompt,
             provider_config,
             cancel_token=cancel_token,
         )
+        content = response["content"]
+        finish = response.get("finish_reason")
         raw_outputs.append(content)
 
+        stage = "解析"
         try:
+            if finish in ("length","max_tokens"):
+                raise AITruncatedResponseError("模型返回被截断")
+            if finish in ("content_filter","aborted","insufficient_system_resource"):
+                raise AIResponseParseError("模型未完成回复")
             data = parse_json_object(content)
 
             if validator is not None:
+                stage = "校验"
                 validator(data)
 
             return data
         except AIResponseParseError as exc:
-            last_error = exc
-            errors.append(str(exc))
-            reason = (
-                "EMPTY_RESPONSE"
-                if isinstance(exc, AIEmptyResponseError)
-                else "INVALID_JSON"
-            )
+            if isinstance(exc,AIResponseValidationError):
+                stage = "校验"
+            last_error = AIResponseValidationError(str(exc)) if stage=="校验" else exc
+            errors.append(redact(f"{stage}失败（结束原因 {finish or '未提供'}）：{exc}"))
             label = "Translator" if module_name.startswith("translator") else "AI"
             logger.warning(
                 "[%s] llm=FAIL attempt=%s error=%s detail=%s",
                 label,
                 attempt + 1,
-                reason,
-                exc,
+                stage,
+                redact(str(exc)),
             )
 
             if attempt + 1 < attempts:
@@ -93,18 +108,16 @@ def request_json(
                 )
 
     raw_path = save_raw_response(
-        raw_outputs,
+        [redact(value) for value in raw_outputs],
         module_name=module_name,
         model=provider_config.model,
-        prompt=prompt,
-        errors=errors,
+        prompt=redact(prompt),
+        errors=[redact(value) for value in errors],
     )
-    message = f"AI JSON 重试后仍解析失败；诊断已保存到 {raw_path}"
-
-    if isinstance(last_error, AIEmptyResponseError):
-        raise AIEmptyResponseError(message)
-
-    raise AIResponseParseError(message)
+    message = ("模型内容未通过校验：" if isinstance(last_error,AIResponseValidationError) else "")+redact(str(last_error))
+    failure = type(last_error)(message)
+    failure.diagnostic_path = raw_path
+    raise failure from None
 
 
 def parse_json_object(content: str) -> dict[str, object]:
@@ -115,18 +128,26 @@ def parse_json_object(content: str) -> dict[str, object]:
     if not cleaned:
         raise AIEmptyResponseError("AI 返回内容为空")
 
-    candidates = _repair_candidates(cleaned)
+    # Quoted strings are indivisible tokens, including escaped quotes and commas.
+    def remove_trailing(match):
+        if match[0].startswith('"') or cleaned[:match.start()].rstrip().endswith(('{','[',',',':')):
+            return match[0]
+        return ''
+    def invalid_constant(value):
+        raise AIResponseParseError(f"模型返回了无效的 JSON 数值 {value}")
+    repaired = re.sub(r'"(?:[^"\\]|\\.)*"|,\s*(?=[}\]])',remove_trailing,cleaned,flags=re.S)
     last_error: json.JSONDecodeError | None = None
 
-    for candidate in candidates:
+    for candidate in (cleaned,repaired):
         try:
-            data = json.loads(candidate, strict=False)
+            data = json.loads(candidate,parse_constant=invalid_constant)
         except json.JSONDecodeError as exc:
             last_error = exc
             continue
 
-        if isinstance(data, dict):
-            return data
+        if not isinstance(data,dict):
+            raise AIResponseValidationError("模型返回必须是 JSON 对象")
+        return data
 
     detail = str(last_error) if last_error is not None else "response is not an object"
     raise AIResponseParseError(f"AI 返回内容无法解析为 JSON：{detail}")
@@ -142,6 +163,7 @@ def save_raw_response(
 ) -> Path:
     """Persist safe AI diagnostics after the retry path is exhausted."""
 
+    from logging_config import _redact
     outputs = raw_outputs if isinstance(raw_outputs, list) else [raw_outputs]
     output_dir = resource_path("logs", "ai_raw")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -168,9 +190,9 @@ def save_raw_response(
             ]
         )
 
-    path.write_text("\n".join(sections), encoding="utf-8")
+    path.write_text(_redact("\n".join(sections)), encoding="utf-8")
     logger.error(
-        "AI JSON 重试失败，Prompt 和原始输出已保存：%s（模型：%s）",
+        "AI 响应未通过检查，已保存请求和原始输出：%s（模型：%s）",
         path,
         model or "-",
     )
@@ -188,69 +210,7 @@ def _strip_code_fence(content: str) -> str:
     if fenced:
         text = fenced.group(1).strip()
 
-    first = text.find("{")
-    last = text.rfind("}")
-
-    if first >= 0 and last > first:
-        return text[first:last + 1]
-
     return text
-
-
-def _repair_candidates(text: str) -> list[str]:
-    candidates = [text]
-    normalized = (
-        text.replace("\u201c", '"')
-        .replace("\u201d", '"')
-        .replace("\u2018", "'")
-        .replace("\u2019", "'")
-    )
-    normalized = re.sub(r",\s*([}\]])", r"\1", normalized)
-    candidates.append(normalized)
-    closed = _close_unterminated_json(normalized)
-
-    if closed not in candidates:
-        candidates.append(closed)
-
-    return candidates
-
-
-def _close_unterminated_json(text: str) -> str:
-    escaped = False
-    in_string = False
-    stack: list[str] = []
-
-    for character in text:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-            continue
-
-        if character == '"':
-            in_string = True
-        elif character in "[{":
-            stack.append(character)
-        elif character == "]" and stack and stack[-1] == "[":
-            stack.pop()
-        elif character == "}" and stack and stack[-1] == "{":
-            stack.pop()
-
-    repaired = text.rstrip()
-
-    if escaped:
-        repaired = repaired[:-1]
-
-    if in_string:
-        repaired += '"'
-
-    while stack:
-        repaired += "]" if stack.pop() == "[" else "}"
-
-    return repaired
 
 
 def _cancelable_wait(cancel_token, seconds: float) -> None:

@@ -10,6 +10,7 @@ class QwenRuntime:
         self.model = self.sf = self.torch = self.key = None
         self.load_count = 0
         self.capabilities={}
+        self.reference_key=self.reference_prompt=None
 
     def _load(self, job):
         import torch
@@ -24,15 +25,17 @@ class QwenRuntime:
     def release(self):
         self.model, self.key = None, None
         self.capabilities={}
+        self.reference_key=self.reference_prompt=None
         gc.collect()
         if self.torch is not None and self.torch.cuda.is_available():
             self.torch.cuda.empty_cache()
 
     def generate(self, job, notify):
         config = json.loads((Path(job['model']) / 'config.json').read_text(encoding='utf-8'))
-        if config.get('tts_model_type') != 'custom_voice':
-            raise ValueError('Only local CustomVoice models are supported')
-        if job.get('style') and config.get('tts_model_size') != '1b7':
+        kind=config.get('tts_model_type')
+        if kind not in ('custom_voice','base'):
+            raise ValueError('Only local CustomVoice and Base models are supported')
+        if job.get('style') and (kind!='custom_voice' or config.get('tts_model_size') != '1b7'):
             raise ValueError('This model does not support instruct')
         if job.get('device') not in ('cpu', 'cuda:0'):
             raise ValueError('Device must be cpu or cuda:0')
@@ -47,14 +50,21 @@ class QwenRuntime:
             except BaseException:
                 self.release()
                 raise
-        speakers = self.model.get_supported_speakers() or []
+        speakers = (self.model.get_supported_speakers() or []) if kind=='custom_voice' else []
         if speakers and job['voice'].casefold() not in {v.casefold() for v in speakers}:
             raise ValueError('Unsupported speaker: ' + job['voice'])
-        self.capabilities=dict(speakers=speakers,style=config.get('tts_model_size')=='1b7',device=job['device'])
+        self.capabilities=dict(speakers=speakers,style=kind=='custom_voice' and config.get('tts_model_size')=='1b7',kind=kind,device=job['device'])
         notify('ready')
         notify('generating')
-        wavs, rate = self.model.generate_custom_voice(text=job['text'], language='Chinese', speaker=job['voice'],
-                                                    **({'instruct': job['style']} if job.get('style') else {}))
+        if kind=='base':
+            key=(job['reference_audio'],job['reference_sha256'],job['reference_text'])
+            if key!=self.reference_key:
+                self.reference_prompt=self.model.create_voice_clone_prompt(ref_audio=key[0],ref_text=key[2],x_vector_only_mode=False)
+                self.reference_key=key
+            wavs,rate=self.model.generate_voice_clone(text=job['text'],language='Chinese',voice_clone_prompt=self.reference_prompt)
+        else:
+            wavs, rate = self.model.generate_custom_voice(text=job['text'], language='Chinese', speaker=job['voice'],
+                                                        **({'instruct': job['style']} if job.get('style') else {}))
         self.sf.write(job['output'], wavs[0], rate, subtype='PCM_16')
 
 

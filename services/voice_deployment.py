@@ -179,7 +179,7 @@ class VoiceDeployment:
         self.state['stages'][stage]=dict(status='running',message=message,**fields)
         stamp=time.monotonic()
         if changed or stamp-self._last_write>.7:
-            write_json(self.root/'deployment.json',self.state);self._last_write=stamp
+            write_json(self.state_file,self.state);self._last_write=stamp
         if stamp-self._last_progress>.08 or not fields.get('total_bytes'):
             self.on_progress(dict(stage=stage,message=message,status=self.state['status'],**fields));self._last_progress=stamp
 
@@ -196,8 +196,33 @@ class VoiceDeployment:
         _run_process([str(a) for a in args],self.token.check,output,timeout=timeout,env=environment_vars(self.root))
         return '\n'.join(lines)
 
+    @property
+    def state_file(self):return self.root/('base-deployment.json' if getattr(self,'base_only',False) else 'deployment.json')
+
     def finish_stage(self,stage):
-        self.state['stages'][stage]['status']='complete';write_json(self.root/'deployment.json',self.state)
+        self.state['stages'][stage]['status']='complete';write_json(self.state_file,self.state)
+
+    def prepare_base(self):
+        self.root=ensure_root(self.root)
+        self.base_only=True
+        model=catalog()['models']['base']
+        with VoiceLease(self.root):
+            self.state=dict(owner=OWNER,status='configuring',stages={},started_at=now())
+            try:
+                from services.voice_profiles import base_model
+                target=base_model(self.root)
+                needed=sum(f['size'] for f in model['files']
+                    if not (target/f['path']).is_file() and not (self.root/'downloads/models'/f['sha256']).is_file())
+                if shutil.disk_usage(self.root).free<needed+128*1024**2:raise ValueError('磁盘空间不足，无法准备参考音色模型')
+                self.emit('models','正在准备参考音色组件')
+                path=self.models(dict(models={'base':model},model_bytes=model['download_bytes'],source='huggingface'))['base']
+                self.state.update(status='downloaded',message='Base 组件已校验；请在我的音色中生成试听')
+                return path
+            except TaskCancelledError:
+                self.state.update(status='cancelled');raise
+            except BaseException:
+                self.state.update(status='failed');raise
+            finally:write_json(self.state_file,self.state)
 
     def bootstrap(self,request):
         info=request['uv'];archive=self.root/'downloads'/f"uv-{info['version']}.zip"

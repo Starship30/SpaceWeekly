@@ -108,14 +108,15 @@ class AIJsonTests(unittest.TestCase):
     def test_strips_markdown_and_repairs_common_errors(self):
         parsed = parse_json_object('```json\n{"summary": "ok",}\n```')
         self.assertEqual(parsed["summary"], "ok")
-        truncated = parse_json_object('{"summary": "truncated')
-        self.assertEqual(truncated["summary"], "truncated")
+        with self.assertRaises(AIResponseParseError):
+            parse_json_object('{"summary": "truncated')
+        self.assertEqual(parse_json_object('{"summary":"“引文,}”",}')["summary"],"“引文,}”")
 
     def test_retries_once_after_parse_failure(self):
         provider = type("Config", (), {"model": "test-model"})()
         responses = ["not-json", '{"importance":"High","reason":"important"}']
 
-        with patch("ai.providers.complete", side_effect=responses) as complete:
+        with patch("ai.providers.complete_with_metadata", side_effect=[dict(content=response) for response in responses]) as complete:
             result = request_json(
                 "prompt",
                 provider,
@@ -136,7 +137,7 @@ class AIJsonTests(unittest.TestCase):
             if set(data) != {"importance", "reason"}:
                 raise AIResponseParseError("extra fields")
 
-        with patch("ai.providers.complete", side_effect=responses) as complete:
+        with patch("ai.providers.complete_with_metadata", side_effect=[dict(content=response) for response in responses]) as complete:
             result = request_json(
                 "prompt",
                 provider,
@@ -170,7 +171,7 @@ class AIJsonTests(unittest.TestCase):
             ),
         ]
 
-        with patch("ai.providers.complete", side_effect=responses) as complete:
+        with patch("ai.providers.complete_with_metadata", side_effect=[dict(content=response) for response in responses]) as complete:
             result = request_json(
                 "prompt",
                 provider,
