@@ -31,11 +31,11 @@ with tempfile.TemporaryDirectory(prefix='spaceweekly-packaged-', dir=root / 'bui
     error = marker.with_suffix('.error')
     details = error.read_text(encoding='utf-8') if error.exists() else ''
     assert result.returncode == 0, f'Packaged startup failed: {result.returncode}; phases:\n{phases}\n{details}'
-    assert 'bundled-fonts-selected' in phases and 'opener-encoded-420frames' in phases, 'Strict font/encoding smoke phases missing'
+    assert all(phase in phases for phase in ('bundled-fonts-available','opener-font-fallback','opener-encoded-420frames')), 'Strict font/encoding smoke phases missing'
     assert 'launch-opacity-encoded' in phases and 'simplified-video-controls-and-headline-rule' in phases, 'Video UX checks missing'
     assert 'opener-playback-and-seek' in phases, 'Opener preview playback check missing'
     assert 'll2-status-json-and-reports' in phases and 'launch-status-badges-encoded' in phases, 'LL2 status checks missing'
-    assert 'launch-payload-description' in phases, 'LL2 payload description check missing'
+    assert 'launch-payload-name-and-count' in phases, 'LL2 payload name and count checks missing'
     assert 'payload-summary-and-subtitle-priority' in phases, 'Payload summary or subtitle priority missing'
     assert 'deepseek-search-and-verified-mission-names' in phases, 'DeepSeek search or mission cleanup missing'
     assert marker.exists(), 'Packaged Qt startup did not complete'
