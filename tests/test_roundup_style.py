@@ -135,20 +135,21 @@ class StyleTests(unittest.TestCase):
     def test_explicit_payload_counts_required_in_voice_not_hidden_in_name(self):
         from tests.test_roundup_materials import ll2_material
         item = ll2_material(self.draft['snapshot']['items'][0], 'A batch of 12 satellites for a constellation.')
+        item['payloads']=[dict(name='Fictional payload',amount=12)]
         item['english_name'] = 'Fictional deployment'
         item['ll2_source']['identity']['english_name'] = item['english_name']
         self.draft['snapshot']['items'][0] = item
         self.assertEqual(style.payload_count(item)[0], 12)
         raw = base.styled_generated()
         good = r.validate_generated(raw, self.draft, context=style.style_context(self.draft, self.settings))
-        self.assertIn('十二颗', good[1]['spoken'])
+        self.assertIn('一箭十二星', good[1]['spoken'])
         # A sourced event reference alone does not satisfy the required spoken quantity.
         good[1]['spoken'] = '美国 Rocket Lab 方面，Fictional deployment任务发射成功。'
         with self.assertRaisesRegex(AIResponseParseError, '载荷数量'):
             style.validate_style(good, style.style_context(self.draft, self.settings))
         for description, count in [('6 Chinese military remote sensing satellites of unknown purposes.', 6),
                                    ('The spacecraft is a technology demonstration satellite.', 1)]:
-            self.assertEqual(style.payload_count(ll2_material(base.context(), description))[0], count)
+            self.assertIsNone(style.payload_count(ll2_material(base.context(), description))[0])
 
     def test_partial_global_claim_rejected_before_accepting_json(self):
         self.draft['selection'][2]['included'] = False

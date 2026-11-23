@@ -107,6 +107,83 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.p.video_workflow.setCurrentIndex(self.p.video_workflow.findData('materials'))
         self.p.apply_preferences()
 
+    def test_edition_edit_keeps_source_audio_and_persists_spoken_invalidation(self):
+        from ui.launch_edit_dialog import LaunchEditDialog
+        from services.roundup_audio import generate_audio,current_audio
+        from tests.test_launch_roundup import write_pcm
+        draft=self.p.roundup.draft;item=draft['snapshot']['items'][0]
+        source=deepcopy(item);provider=Mock()
+        provider.synthesize.side_effect=lambda req,path,cancel_check:write_pcm(path)
+        generate_audio(draft,provider,CancellationToken())
+        segment=next(s for s in draft['segments'] if item['ll2_id'] in s['task_ids'])
+        audio=deepcopy(segment['audio'])
+        editor=LaunchEditDialog(self.p,item)
+        self.assertEqual(editor.fields['payload_count'].text(),'')
+        editor.fields['payload'].setText('本期人工整理的载荷')
+        editor.fields['payload_count'].setText('6');editor.save()
+        self.assertEqual(item['source_original'],source)
+        self.assertEqual(item['edition_fields']['payload_count'],6)
+        self.assertEqual(current_audio(draft,segment),audio)
+        editor=LaunchEditDialog(self.p,item)
+        self.assertEqual(editor.fields['payload_count'].text(),'6')
+        editor.segments[0][1].setPlainText('人工修改后的完整口播。');editor.save()
+        self.assertIsNone(current_audio(draft,segment));self.assertEqual(segment['audio'],audio)
+        path=self.root/'edition.json';r.save_draft(draft,path);restored=r.load_draft(path)
+        saved=next(i for i in restored['snapshot']['items'] if i['ll2_id']==item['ll2_id'])
+        self.assertEqual(saved['edition_fields'],item['edition_fields'])
+        self.assertEqual(saved['source_original'],source)
+
+    def test_materials_name_can_be_edited_in_table_and_inline_and_survives_restore(self):
+        self.p.content.setCurrentIndex(1);self.p.navigation.setCurrentRow(0);self.p.materials.setCurrentIndex(1)
+        self.p.roundup.tasks.setCurrentCell(0,2);item=self.p.roundup.draft['snapshot']['items'][0]
+        original=deepcopy(item);paragraphs=deepcopy(self.p.roundup.draft['segments'])
+        cell=self.p.roundup.tasks.item(0,2);self.assertTrue(cell.flags() & Qt.ItemFlag.ItemIsEditable)
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QLineEdit
+        self.w.show();self.app.processEvents();self.p.roundup.tasks.setFocus()
+        QTest.keyClick(self.p.roundup.tasks,Qt.Key.Key_F2);self.app.processEvents()
+        editor=self.p.roundup.tasks.findChild(QLineEdit);self.assertIsNotNone(editor)
+        editor.setText('表格中修改的任务名称');QTest.keyClick(editor,Qt.Key.Key_Return);QTest.qWait(50)
+        self.assertEqual(r.display_names(item)['name'],'表格中修改的任务名称')
+        self.assertEqual(item['english_name'],original['english_name']);self.assertEqual(item['source_original'],original)
+        self.assertEqual(self.p.roundup.draft['segments'],paragraphs)
+        self.p.launch_name_edit.setText('右侧保存的任务名称');self.p.save_launch_name_button.click();self.app.processEvents()
+        self.assertEqual(r.display_names(item)['name'],'右侧保存的任务名称')
+        self.p.save();self.p._restore(self.root/'config/production-session.json')
+        self.assertEqual(r.display_names(self.p.roundup.draft['snapshot']['items'][0])['name'],'右侧保存的任务名称')
+
+    def test_materials_name_empty_input_is_rejected_and_running_job_locks_edits(self):
+        self.p.roundup.tasks.setCurrentCell(0,2);item=self.p.roundup.draft['snapshot']['items'][0]
+        name=r.display_names(item)['name'];self.p.launch_name_edit.setText('')
+        self.p.save_launch_name_button.click();self.app.processEvents()
+        self.assertEqual(r.display_names(item)['name'],name)
+        before=deepcopy(self.p.roundup.draft['segments'])
+        def slow(data,token):
+            for _ in range(100):token.check();time.sleep(.005)
+        self.p.roundup._start_job('translations',slow,deepcopy(self.p.roundup.draft))
+        self.assertFalse(self.p.roundup.tasks.item(0,2).flags() & Qt.ItemFlag.ItemIsEditable)
+        self.assertFalse(self.p.save_launch_name_button.isEnabled())
+        self.p.cancel_all();self.wait_idle()
+        self.assertEqual(self.p.roundup.draft['segments'],before)
+
+    def test_materials_has_one_combined_completion_entry_and_keeps_refresh_secondary(self):
+        from PySide6.QtWidgets import QPushButton
+        from i18n import set_language
+        self.assertIs(self.p.complete_launch_materials_button,self.p.roundup.refresh_button)
+        self.assertEqual(self.p.complete_launch_materials_button.text(),'补全中文资料')
+        menus=[b.menu() for b in self.p.roundup.data_page.findChildren(QPushButton) if b.menu()]
+        labels=[a.text() for menu in menus for a in menu.actions()]
+        self.assertIn('刷新发射列表（联网）',labels);self.assertIn('重新补全本任务',labels)
+        self.assertNotIn('AI翻译缺失字段',labels);self.assertNotIn('重新翻译本任务',labels)
+        with patch.object(self.p.roundup,'_supplement_materials') as complete:
+            self.p.complete_launch_materials_button.click()
+        complete.assert_called_once()
+        set_language('en_US');self.p.retranslate()
+        self.assertEqual(self.p.complete_launch_materials_button.text(),'Complete Chinese materials')
+        self.assertEqual(self.p.save_launch_name_button.text(),'Save name')
+        self.assertIn('Refresh launch list (online)',[a.text() for menu in menus for a in menu.actions()])
+        set_language('zh_CN');self.p.retranslate()
+
     def test_launch_materials_mode_reuses_task_ids_and_stops_narrated_preview(self):
         self.p.content.setCurrentIndex(1)
         original=deepcopy(self.p.roundup.draft)
@@ -252,6 +329,47 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertEqual(saved['daily']['start_date'],'2026-10-20')
         self.assertEqual(self.p.roundup.draft['start'],'2026-10-20')
 
+    def test_idle_poll_reuses_news_digest_and_recovery_captures_new_edits(self):
+        self.p.news.adopt(self.bundle())
+        self.p._poll();self.p._finish_recovery_write(wait=True)
+        recovery=self.root/'cache/production-recovery.json'
+        with patch('ui.news_workspace.serialize_news',wraps=service.serialize_news) as serialize:
+            self.p._poll();self.p._poll()
+            serialize.assert_not_called()
+        self.p.news.summary.setPlainText('刷新后应恢复的摘要')
+        self.p._poll();self.p._finish_recovery_write(wait=True)
+        news=json.loads(recovery.read_text(encoding='utf-8'))['news']['bundle']
+        self.assertEqual(news['summaries']['https://example.invalid/news']['summary'],'刷新后应恢复的摘要')
+        updated=deepcopy(self.p.news.current_article());updated.news.images=['https://example.invalid/story.jpg']
+        self.p.news.set_article_images(updated)
+        self.p._poll();self.p._finish_recovery_write(wait=True)
+        news=json.loads(recovery.read_text(encoding='utf-8'))['news']['bundle']
+        self.assertEqual(news['source_articles'][0]['news']['images'],updated.news.images)
+
+    def test_roundup_paragraph_selection_defers_hidden_voice_refresh(self):
+        p=self.p;p.content.setCurrentIndex(1);p.navigation.setCurrentRow(1)
+        with patch.object(p,'_voice_refresh',wraps=p._voice_refresh) as refresh:
+            p.roundup.segment_list.setCurrentRow(1)
+            p._poll()
+            refresh.assert_not_called()
+            p.navigation.setCurrentRow(2)
+            refresh.assert_called_once()
+        self.assertEqual(p.voice_segments.currentData(),p.roundup.draft['segments'][1]['id'])
+
+    def test_unsaved_exit_uses_the_selected_language_for_qt_buttons(self):
+        from ui.localize import set_ui_language
+        self.addCleanup(set_ui_language,'zh_CN')
+        buttons=QMessageBox.StandardButton
+        for language,expected in (('zh_CN',('保存','丢弃','取消')),('en_US',('Save','Discard','Cancel'))):
+            set_ui_language(language);labels=[]
+            def cancel_leave():
+                dialog=self.app.activeModalWidget()
+                labels.extend(dialog.button(button).text() for button in (buttons.Save,buttons.Discard,buttons.Cancel))
+                dialog.button(buttons.Cancel).click()
+            QTimer.singleShot(0,cancel_leave)
+            self.assertFalse(self.p.request_leave('close'))
+            for label,word in zip(labels,expected,strict=True):self.assertIn(word,label)
+
     def test_background_generation_allows_navigation_sources_and_other_content_edits(self):
         self.p.news.adopt(self.bundle())
         before=deepcopy(self.p.roundup.draft['segments'])
@@ -266,6 +384,44 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertEqual(self.p.roundup.draft['segments'],before)
         self.assertIn('取消',self.p.roundup.status.text())
         self.assertEqual(self.p.news.bundle['summaries']['https://example.invalid/news'].summary,'另一内容类型的人工编辑仍可继续')
+
+    def test_news_export_can_cancel_retry_and_reject_results_from_previous_edition(self):
+        from threading import Event
+        p=self.p;p.news.adopt(self.bundle(),collected=True)
+        path=self.root/'fixture.md'
+        entered=Event()
+        def export(data,token):
+            entered.set()
+            while not token.is_cancelled:time.sleep(.005)
+            token.check()
+        p._news_job('export',export,{})
+        self.assertTrue(entered.wait(3))
+        self.assertTrue(p.cancel_tasks.isVisibleTo(p))
+        for page in (0,1,2,3):p.navigation.setCurrentRow(page);self.app.processEvents()
+        self.assertEqual(p.navigation.currentRow(),3)
+        p.news.oral.setPlainText('导出期间可以保存下一版文稿。')
+        with self.assertRaises(ValueError):p._news_job('export',export,{})
+        with self.assertRaises(ValueError):p.open_edition()
+        p.cancel_all();self.wait_idle()
+        self.assertFalse(p.results)
+        self.assertEqual(p.news.voice_draft()['segments'][0]['spoken'],'导出期间可以保存下一版文稿。')
+        def retry(data,token):
+            path.write_text('固定导出内容',encoding='utf-8')
+            return [str(path)]
+        p._news_job('export',retry,{});self.wait_idle()
+        self.assertIn(str(path),p.results)
+        p.save()
+        obsolete=self.root/'obsolete.md'
+        release=Event()
+        p._news_job('export',lambda data,token:(release.wait(3),[str(obsolete)])[1],{})
+        try:
+            p._restoring=True
+            p._restore(self.root/'config/production-session.json')
+        finally:
+            p._restoring=False;release.set()
+        self.wait_idle()
+        self.assertNotIn(str(obsolete),p.results)
+        self.assertIn(str(path),p.results)
 
     def test_script_only_export_without_tts_is_real_and_does_not_create_fake_audio(self):
         self.p.roundup._export(False);self.wait_idle();self.p._poll()
@@ -286,13 +442,16 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.wait_idle();self.p._poll()
         provider.unload.assert_called_once();self.assertEqual(closed,[True])
 
-    def test_imported_launch_manual_confirmation_has_no_automatic_evidence_upgrade(self):
+    def test_edition_editor_replaces_old_entry_points_without_confirming_background(self):
+        from ui.launch_edit_dialog import LaunchEditDialog
+        from services.launch_display import resolve_launch
+        from PySide6.QtWidgets import QPushButton
         self.p.roundup.tasks.setCurrentCell(0,2);self.p._launch_detail()
-        self.p.chinese_name.setText('人工核实的任务名');self.p.manual_summary.setPlainText('人工填写的背景')
-        self.p.confirm_launch()
+        dialog=LaunchEditDialog(self.p,self.p.roundup.draft['snapshot']['items'][0]);self.addCleanup(dialog.close)
+        dialog.fields['name'].setText('本期任务名');dialog.fields['summary'].setText('人工填写的背景');dialog.save()
         item=self.p.roundup.draft['snapshot']['items'][0];state=r.material_status(item)
-        self.assertEqual(state['human_confirmation'],'current');self.assertFalse(state['independent_support'])
-        self.assertEqual(r.confirmed_values(item['research'],item)['chinese_name'],'人工核实的任务名')
+        self.assertFalse(state['independent_support']);self.assertEqual(resolve_launch(item)['name'],'本期任务名')
+        self.assertFalse(any(b.text() in ('编辑资料','修正名称') for b in self.p.findChildren(QPushButton)))
 
     def test_cards_and_downloads_use_current_launch_ids_without_nested_windows(self):
         from PySide6.QtWidgets import QPushButton
@@ -303,6 +462,39 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.p.media.setCurrentIndex(3);self.assertIn('视频下载',self.p.media.tabText(3))
         self.assertEqual(len(self.p.downloads.snapshot_items),3)
         self.assertFalse(any(b.text() in ('制作片头','视频下载') for b in self.p.cards.findChildren(QPushButton)))
+
+    def test_unified_launch_fields_and_captions_survive_refresh_save_and_restore(self):
+        from ui.launch_edit_dialog import LaunchEditDialog
+        from services.launch_display import resolve_launch
+        row=self.p.roundup.draft['snapshot']['items'][0];identifier=row['ll2_id']
+        segment=next(s for s in self.p.roundup.draft['segments'] if identifier in s['task_ids'])
+        before=deepcopy(segment)
+        dialog=LaunchEditDialog(self.p,row);self.addCleanup(dialog.close)
+        for key,value in dict(provider='本期机构',title='本期画面标题',payload='人工载荷',orbit='',pad_name='').items():dialog.fields[key].setText(value)
+        dialog.captions[0].item(0,1).setText('独立字幕');dialog.save()
+        self.assertEqual(segment['spoken'],before['spoken']);self.assertEqual(segment['units'][0]['screen'],'独立字幕')
+        from services.launch_display import original_source
+        collection=deepcopy(self.p.roundup.draft['snapshot']);collection['items'][0]=deepcopy(original_source(collection['items'][0]));collection['items'][0]['provider']='Fresh source provider'
+        self.p.roundup._new_snapshot(collection)
+        self.p.save();self.p._restore(self.root/'config/production-session.json')
+        row=next(i for i in self.p.roundup.draft['snapshot']['items'] if i['ll2_id']==identifier)
+        view=resolve_launch(row)
+        self.assertEqual((view['provider'],view['title'],view['payload'],view['orbit'],view['pad_name']),('本期机构','本期画面标题','人工载荷','',''))
+        self.assertEqual(row['source_original']['provider'],'Fresh source provider')
+        segment=next(s for s in self.p.roundup.draft['segments'] if identifier in s['task_ids'])
+        self.assertEqual(segment['units'][0]['screen'],'独立字幕')
+        card=next(i for i in self.p.roundup_video_items() if i['id']=='ll2:'+identifier)
+        self.assertEqual((card['title'],card['launch']['payload']),('本期画面标题','人工载荷'))
+
+    def test_existing_translation_cache_change_refreshes_launch_list(self):
+        row=self.p.roundup.draft['snapshot']['items'][0]
+        self.p._poll()
+        path=self.root/'translator/translation_cache.json';path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({row['english_name']:dict(translation='缓存中的中文任务',source='llm',confidence=.6)},ensure_ascii=False),encoding='utf-8')
+        until=time.monotonic()+5
+        while self.p.roundup.tasks.item(0,2).text()!='缓存中的中文任务' and time.monotonic()<until:
+            self.p._poll();self.app.processEvents();time.sleep(.02)
+        self.assertEqual(self.p.roundup.tasks.item(0,2).text(),'缓存中的中文任务')
 
     def test_corrupt_recovery_is_retained_without_partial_controller_adoption(self):
         self.p.save();before=deepcopy(self.p.roundup.draft)
@@ -387,6 +579,150 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertFalse(p.news.failed_articles())
         self.assertEqual(p.news.voices[news_id(other.news.url)],second)
 
+    def test_editorial_selection_to_narration_to_failure_dialog_and_targeted_retry(self):
+        from models.news import news_id
+        from services import news_voice,weekly_report
+        from tests.test_news_editorial import sample
+        from PySide6.QtWidgets import QDialogButtonBox,QInputDialog,QListWidget,QPlainTextEdit
+        rows=sample();p=self.p
+        bundle=self.bundle();bundle.update(articles=list(rows.values()),summaries={})
+        p.news.adopt(bundle,collected=True)
+        p.settings=replace(self.settings,deepseek_api_key='fixture',deepseek_base_url='https://example.invalid',
+                           deepseek_model='fixture',news_filter_level='All',news_event_date_check_enabled=False)
+        requested=[];fetched=[]
+        def model(prompt,*args,validator,**kwargs):
+            payload=json.loads(prompt.rsplit('\n',1)[-1]);requested.append(payload['source_url'])
+            quote=payload['source_text'].partition('。')[0]+'。'
+            quotes=[quote]
+            if payload['source_url']==rows['result'].news.url:
+                quotes.append(next(row['quote'] for row in payload['verified_sources'] if '姿态稳定' in row['quote']))
+            value=dict(spoken=''.join(quotes),quotes=quotes);validator(value);return value
+        def fetch(news,token,**kwargs):
+            fetched.append(news.key)
+            if news.key==rows['missing'].news.key:
+                return Article(news,'调查认定供电线路短路导致设备停机。','fixture')
+            return None
+        with patch.object(weekly_report,'_resolve_runtime_model',side_effect=lambda settings,token:settings), \
+             patch.object(weekly_report,'assess_importance',return_value=service.NewsAssessment('High','固定样本')), \
+             patch.object(weekly_report,'_generate_selected_content',return_value=0), \
+             patch.object(weekly_report,'_localize_selected_titles',return_value=({},0)), \
+             patch('services.news_images.collect'),patch.object(news_voice,'request_json',side_effect=model), \
+             patch.object(weekly_report,'_parse_article',side_effect=fetch):
+            p.start_news_write();self.wait_idle(20)
+            selected=[a.news.key for a in p.news.selected_articles()]
+            self.assertEqual([a.news.key for a in p.news._rows('articles')],
+                             [rows[key].news.key for key in ('result','fourteen','ended','future','missing','enough')])
+            self.assertNotIn(rows['ended'].news.key,selected)
+            result=p.news.voices[news_id(rows['result'].news.key)]['segments'][0]
+            self.assertIn('飞船成功返回',result['spoken']);self.assertIn('姿态稳定',result['spoken'])
+            self.assertIn(rows['analysis'].news.url,[ref['url'] for ref in result['source_refs']])
+            self.assertNotIn(rows['preview'].news.url,requested);self.assertNotIn(rows['missing'].news.url,requested)
+            self.assertTrue(p.news.blocked(rows['missing']))
+            self.assertFalse(p.news.blocked(rows['enough']))
+            with patch.object(p,'worker',None),patch.object(p,'_news_job',side_effect=lambda *args:setattr(p,'worker',Mock())) as queue, \
+                 patch('services.voice_profiles.configured',return_value=True):
+                p.export_complete()
+            payload=queue.call_args.args[2]
+            self.assertNotIn(rows['missing'].news.key,[a.news.key for a in payload['articles']])
+            self.assertNotIn(rows['ended'].news.key,[a.news.key for a in payload['articles']])
+            dialog=p.news.failure_dialog
+            listing=dialog.findChild(QListWidget)
+            self.assertEqual(listing.count(),2)
+            self.assertIn('飞后结果待补',listing.item(0).text())
+            listing.setCurrentRow(1);details=dialog.findChild(QPlainTextEdit).toPlainText()
+            self.assertIn('主要结论',details)
+            buttons=dialog.findChild(QDialogButtonBox).buttons()
+            self.assertTrue({'重试获取','手动补充','本期跳过'}<={b.text() for b in buttons})
+            if output:=getattr(self,'editorial_demo',None):
+                (output/'editorial-demo.json').write_text(json.dumps(dict(
+                    筛选前=[a.news.title for a in rows.values()],稿件列表=[a.news.title for a in p.news._rows('articles')],
+                    相关来源=[a.news.title for a in rows.values() if a.news.key in p.news.editorial_event(rows['result'])['related']],
+                    实际口播稿=result['spoken'],汇总=[listing.item(i).text() for i in range(listing.count())],缺料详情=details),
+                    ensure_ascii=False,indent=2),encoding='utf-8')
+                self.app.processEvents();dialog.grab().save(str(output/'editorial-failures.png'))
+
+            p.news.restore_related(rows['preview'])
+            edited=p.news.voice_draft(rows['preview']);news_voice.set_spoken(edited,'人工已保存的预告稿。')
+            from tests.test_launch_roundup import write_pcm
+            from services.roundup_audio import audio_key,current_audio,file_hash
+            audio=self.root/'saved-voice.wav';write_pcm(audio)
+            segment=edited['segments'][0]
+            segment['audio']=dict(path=str(audio),key=audio_key(edited,segment),sha256=file_hash(audio))
+            self.assertIsNotNone(current_audio(edited,segment))
+            protected=deepcopy(edited)
+            requested.clear()
+            next(button for button in buttons if button.text()=='重试获取').click();self.wait_idle(20)
+            self.assertCountEqual(fetched,[rows[key].news.key for key in ('ended','missing')])
+            self.assertEqual(requested,[rows['missing'].news.key])
+            self.assertEqual(p.news.voices[edited['news_id']],protected)
+            self.assertEqual(p.news.voices[news_id(rows['result'].news.key)]['segments'][0]['spoken'],result['spoken'])
+            self.assertFalse(p.news.blocked(rows['missing']))
+            p.news.failure_dialog.close()
+            p.start_news_write();self.wait_idle(20)
+            self.assertIn(rows['preview'].news.key,p.news.script_included)
+            self.assertEqual(p.news.voices[edited['news_id']],protected)
+            p.news.failure_dialog.close()
+            p.save();p._restore(self.root/'config/production-session.json')
+            self.assertIn(rows['preview'].news.key,p.news.editorial_event(rows['result'])['related'])
+            self.assertTrue(p.news.script_preferences[rows['preview'].news.key])
+            self.assertIsNotNone(current_audio(p.news.voices[edited['news_id']],p.news.voices[edited['news_id']]['segments'][0]))
+            ended=p.news.failed_articles()[0]
+            self.assertEqual(ended.news.key,rows['ended'].news.key)
+            p.news.show_failures()
+            buttons=p.news.failure_dialog.findChild(QDialogButtonBox).buttons()
+            next(button for button in buttons if button.text()=='本期跳过').click()
+            self.assertFalse(p.news.failed_articles())
+            p.news.restore_related(ended)
+            p.news.show_failures()
+            buttons=p.news.failure_dialog.findChild(QDialogButtonBox).buttons()
+            with patch.object(QInputDialog,'getMultiLineText',return_value=('飞船成功着陆。',True)), \
+                 patch.object(QInputDialog,'getText',return_value=('https://example.invalid/official-result',True)):
+                next(button for button in buttons if button.text()=='手动补充').click()
+            self.assertEqual(p.news.editorial_event(ended)['phase'],'result')
+            self.assertTrue(ended.evidence[-1]['manual'])
+
+    def test_news_merge_preview_save_restore_and_undo_keeps_original_voice(self):
+        from services import news_editorial,news_voice
+        from services.roundup_audio import audio_key,current_audio,file_hash
+        from tests.test_launch_roundup import write_pcm
+        from tests.test_news_editorial import voyager_sample
+        from PySide6.QtWidgets import QDialogButtonBox,QListWidget
+        p=self.p;first,second,plan=voyager_sample()
+        bundle=self.bundle();bundle.update(articles=[first,second,plan],summaries={})
+        p.news.adopt(bundle,collected=True)
+        original=p.news.voice_draft(first);news_voice.set_spoken(original,'人工保存的原稿。')
+        audio=self.root/'original.wav';write_pcm(audio);segment=original['segments'][0]
+        segment['audio']=dict(path=str(audio),key=audio_key(original,segment),sha256=file_hash(audio))
+        def choose(dialog):
+            listing=dialog.findChild(QListWidget)
+            if listing:
+                for index in range(listing.count()):listing.item(index).setSelected(True)
+                next(button for button in dialog.findChild(QDialogButtonBox).buttons() if button.text()=='生成预览').click()
+            else:
+                editors=dialog.findChildren(QPlainTextEdit)
+                self.assertIn('旅行者2号预计于2027年',editors[-1].toPlainText())
+                if output:=getattr(self,'editorial_demo',None):
+                    dialog.show();self.app.processEvents();dialog.grab().save(str(output/'voyager-merge.png'))
+                next(button for button in dialog.findChild(QDialogButtonBox).buttons() if button.text()=='确认合稿').click()
+            return dialog.result()
+        with patch.object(QDialog,'exec',choose):p.news.merge_button.trigger()
+        merged,=p.news.selected_articles()
+        draft=p.news.voice_draft(merged)
+        self.assertEqual(draft['screen_item']['ordinal'],1)
+        self.assertEqual(draft['segments'][0]['spoken'].count('旅行者1号'),1)
+        self.assertTrue(current_audio(original,segment))
+        self.assertCountEqual([r['url'] for r in draft['segments'][0]['source_refs']],[r.news.url for r in (first,second,plan)])
+        p.news._check_scripts(True);self.assertEqual(p.news.selected_articles(),[merged])
+        p.save();p._restore(self.root/'config/production-session.json')
+        merged,=p.news.selected_articles()
+        p.news._show_item('articles',merged.news.key)
+        self.assertIn('信号单程时间',p.news.conflict_hint.text())
+        p.news.unmerge_button.click()
+        self.assertEqual([a.news.key for a in p.news.selected_articles()],[first.news.key,second.news.key,plan.news.key])
+        restored=p.news.voice_draft(p.news.selected_articles()[0])
+        self.assertEqual(restored['segments'][0]['spoken'],'人工保存的原稿。')
+        self.assertTrue(current_audio(restored,restored['segments'][0]))
+
     def test_news_offline_export_and_dates_scope_are_preserved(self):
         bundle=self.bundle();token=CancellationToken()
         with patch('requests.get',side_effect=AssertionError('export must be offline')),patch('services.weekly_report._prepare_launch_research',side_effect=AssertionError('export must not research')):
@@ -436,12 +772,15 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertEqual(p.news.proposal.text(),'重写本条口播')
         p.news.editor_tabs.setCurrentIndex(1)
         p.news.title.setText('第三条的屏幕标题');p.news.summary.setPlainText('第三条的屏幕摘要')
-        p.news.script_actions[1].click()
+        self.assertEqual(p.news.select_visible.checkState(),Qt.CheckState.PartiallyChecked)
+        p.news.select_visible.click()
+        self.assertEqual(len(p.news.script_included),3)
+        p.news.select_visible.click()
         self.assertFalse(p.news.script_included)
         self.assertEqual(p.news.editor_tabs.currentIndex(),1)
         self.assertEqual(p.news.current_article().news.url,url)
         self.assertEqual(p.news.summary.toPlainText(),'第三条的屏幕摘要')
-        p.news.script_actions[0].click()
+        p.news.select_visible.click()
         self.assertEqual(len(p.news.script_included),3)
         p.news.articles.item(1).setCheckState(Qt.CheckState.Unchecked)
         checked=set(p.news.script_included)
@@ -449,7 +788,7 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertEqual(p.news.script_included,checked)
         p.news.articles.setCurrentRow(0);p.news.articles.setCurrentRow(2)
         self.assertEqual(p.news.current_title.text(),'第三条的屏幕标题')
-        p.news.script_actions[2].click();p.news.script_actions[2].click()
+        p.news.script_actions[0].click();p.news.script_actions[0].click()
         self.assertEqual(p.news.script_included,checked)
         self.assertEqual(p.news.current_article().news.url,url)
         self.assertEqual([a.news.url for a in p.news.bundle['source_articles']],sources)
@@ -473,6 +812,51 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertEqual(p.cards.sort_order.currentData(),'input')
         legacy=p.news.snapshot();legacy.pop('script_included');p.news.restore(legacy)
         self.assertEqual(len(p.news.script_included),3)
+
+    def test_news_voice_picker_follows_script_checks_and_order(self):
+        from models.news import news_id
+        p=self.p;bundle=self.bundle()
+        for name,day in (('second',24),('third',25),('outside',30)):
+            url='https://example.invalid/'+name
+            bundle['articles'].append(Article(News('Fixture',name,f'2026-10-{day}','',url=url),'Body','fixture'))
+        p.episode['review_range']=['2026-10-20','2026-10-29']
+        p.news.adopt(bundle,collected=True)
+        first,second,third,_=bundle['articles']
+        p.navigation.setCurrentRow(1)
+        p.news.articles.item(0).setCheckState(Qt.CheckState.Unchecked)
+        self.assertFalse(p.news.go_voice.isEnabled())
+        self.assertIn(first.news.key,p.news.included)
+        p.news.articles.setCurrentRow(2);p.news.move_article(-1)
+        p.media_route(0)
+        picker=p.voice_segments
+        expected=[news_id(a.news.key) for a in (third,second)]
+        self.assertEqual([picker.itemData(i) for i in range(picker.count())],expected)
+        self.assertEqual(p.voice_scope.text(),'稿件已勾选 2 条')
+        picker.setCurrentIndex(1)
+        self.assertIs(p.news.current_article(),second)
+        p.news.articles.currentItem().setCheckState(Qt.CheckState.Unchecked)
+        self.assertEqual([picker.itemData(i) for i in range(picker.count())],expected[:1])
+        self.assertIs(p.news.current_article(),third)
+        p.news.articles.currentItem().setCheckState(Qt.CheckState.Unchecked)
+        self.assertEqual(picker.count(),0)
+        self.assertEqual(p.voice_scope.text(),'稿件已勾选 0 条')
+        self.assertFalse(p.preview_play.isEnabled())
+        self.assertIsNone(p.frame.image)
+
+    def test_media_scope_empty_clears_old_preview_and_keeps_script(self):
+        from PySide6.QtGui import QPixmap
+        p=self.p;p.news.adopt(self.bundle(),collected=True)
+        p.news.oral.setPlainText('人工口播保留。');p.news.select_visible.click()
+        p._voice_refresh()
+        self.assertEqual(p.voice_segments.count(),0);self.assertFalse(p.preview_play.isEnabled())
+        self.assertIsNone(p.frame.image);self.assertEqual(p.news.oral.toPlainText(),'人工口播保留。')
+        p.content.setCurrentIndex(1)
+        p.frame.set_image(QPixmap(20,20));p._frame_key='previous-preview'
+        for row in range(p.roundup.segment_list.count()):p.roundup.segment_list.item(row).setCheckState(Qt.CheckState.Unchecked)
+        p._voice_refresh()
+        self.assertEqual(p.voice_segments.count(),0);self.assertEqual(p.preview_tasks.count(),1)
+        self.assertIsNone(p.frame.image);self.assertFalse(p.preview_play.isEnabled())
+        self.assertEqual(len(p.roundup.draft['segments']),5)
 
     def test_news_image_opt_out_reaches_preview_without_changing_audio_key(self):
         from PIL import Image
@@ -541,6 +925,39 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(self.p.frame.image)
         self.assertEqual(self.p._frame_key,self.p._preview_key())
 
+    def test_launch_preview_pager_and_rows_can_be_clicked_without_seeking(self):
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QStyle
+        from tools import roundup_visuals as visuals
+        p=self.p;items=[context(i) for i in range(1,8)]
+        draft=r.create_draft(dict(items=items,complete=True),'2026-10-20','2026-10-29')
+        ids=[row['id'] for row in draft['selection']]
+        draft['segments']=[dict(id='browse',kind='highlight',task_ids=ids,screen='发射任务',spoken='',preview_seconds=25)]
+        p.roundup.draft=draft;p.roundup._show_draft()
+        p.content.setCurrentIndex(1);p.media_route(0);self.w.show();self.app.processEvents()
+        p.preview_roundup()
+        clock=p.preview_slider.value();frame=p.frame
+        self.assertEqual(clock,0)
+
+        def click(box):
+            size=frame.pixmap().deviceIndependentSize().toSize()
+            rect=QStyle.alignedRect(frame.layoutDirection(),frame.alignment(),size,frame.contentsRect())
+            left,top,right,bottom=box
+            QTest.mouseClick(frame,Qt.MouseButton.LeftButton,pos=QPoint(
+                rect.x()+round((left+right)*rect.width()/(2*visuals.cards.W)),
+                rect.y()+round((top+bottom)*rect.height()/(2*visuals.cards.H))))
+
+        first=p._roundup_list_scene
+        self.assertIs(p._preview_image,first['image'])
+        next_task=dict(first['targets'])[visuals.PAGE_BUTTONS[1]]
+        click(visuals.PAGE_BUTTONS[1]);second=p._roundup_list_scene
+        self.assertEqual((second['page'],second['focus_id']),(2,next_task))
+        bounds,identifier=second['targets'][1]
+        click(bounds);self.assertEqual(p._roundup_list_scene['focus_id'],identifier)
+        click(visuals.PAGE_BUTTONS[0]);self.assertEqual(p._roundup_list_scene['page'],1)
+        self.assertEqual(p.preview_slider.value(),clock)
+
     def test_shot_settings_undo_cancel_apply_and_restore_do_not_invalidate_voice(self):
         from ui.roundup_shots_dialog import RoundupShotsDialog
         from services.roundup_audio import audio_key
@@ -603,7 +1020,10 @@ class DesktopWorkflowTests(unittest.TestCase):
         restored=p.news.voices[identifier];self.assertIsNotNone(current_audio(restored,restored['segments'][0]))
         self.w.show();p.navigation.setCurrentRow(0);self.app.processEvents()
         p.navigation.setCurrentRow(2);self.app.processEvents()
-        self.assertAlmostEqual(p._preview_timeline['duration_seconds'],4)
+        until=time.monotonic()+8
+        while p._poster_request and time.monotonic()<until:
+            self.app.processEvents();time.sleep(.01)
+        self.assertAlmostEqual(p._preview_timeline['duration_seconds'],7.85)
         p._audio_playback=True;p.news.oral.insertPlainText('已修改。')
         self.assertFalse(p._audio_playback);self.assertIn('过期',p.play_state.text())
 
@@ -613,11 +1033,15 @@ class DesktopWorkflowTests(unittest.TestCase):
         from services import news_images,cache_maintenance
         p=self.p;p.maintenance.timer.stop();p.news.adopt(self.bundle())
         article=p.news.current_article();source=self.root/'本地 配图.png';Image.new('RGB',(96,64),'blue').save(source)
-        p.start_news_image(article,dict(local=str(source)));self.wait_idle()
+        second=self.root/'另外一张.png';Image.new('RGB',(96,64),'red').save(second)
+        with patch('ui.news_workspace.QFileDialog.getOpenFileNames',return_value=([str(source),str(second)],'')):
+            next(action for action in p.voice_image_menu.menu().actions() if action.text().startswith('添加本地图片')).trigger()
+        self.wait_idle()
         self.assertIsNotNone(news_images.selected(news_id(article.news.url)))
         p.maintenance.enabled.setChecked(False);p.maintenance.interval.setValue(5);p.maintenance.retention.setValue(7)
         p.save();p._restore(self.root/'config/production-session.json')
         self.assertIsNotNone(news_images.selected(news_id(article.news.url)))
+        self.assertEqual(len(p.news.voice_draft()['screen_item']['slideshow']),2)
         settings=cache_maintenance.load();self.assertFalse(settings['enabled']);self.assertEqual((settings['interval_days'],settings['retention_days']),(5,7))
         (self.root/'news-images/manifest.json').write_text('{broken',encoding='utf-8')
         self.assertIsNotNone(p.news.voice_draft())
@@ -625,6 +1049,277 @@ class DesktopWorkflowTests(unittest.TestCase):
         (self.root/'config/cache-maintenance.json').write_text('{broken',encoding='utf-8')
         panel=CacheMaintenancePanel(p);panel.timer.stop();self.addCleanup(panel.deleteLater)
         self.assertIn('原文件保留',panel.status.text())
+
+    def test_default_export_ignores_old_strip_flag_and_legacy_mode_exports_strips(self):
+        from services import news_voice
+        p=self.p;p.news.adopt(self.bundle())
+        news_voice.set_spoken(p.news.voice_draft(),'正在测试整期新闻口播。')
+        self.assertEqual(p.settings.video_workflow,'complete')
+        self.assertTrue(p.video_workflow.itemText(1).startswith('模式 2'))
+        from services.launch_data import write_json
+        write_json(self.root/'config/production-session.json',dict(p.snapshot(),include_news_strip=True))
+        p._restore(self.root/'config/production-session.json')
+        self.assertNotIn('include_news_strip',p.content_state())
+        path=self.root/'output'/'complete.mp4';path.write_bytes(b'fixture')
+        result=dict(paths=[str(path)],failed=[],cancelled=False)
+        with (patch('services.voice_profiles.configured',return_value=True),
+              patch('services.episode.produce',return_value=result) as render):
+            p.export_complete();self.wait_idle()
+        drafts=render.call_args.args[0]
+        self.assertEqual([draft['id'] for draft in drafts],['episode-opening',p.roundup.draft['id'],
+            p.news.voice_draft()['id'],'episode-closing'])
+        self.assertFalse(render.call_args.kwargs['parts'])
+        p.navigation.setCurrentRow(3);p.content.setCurrentIndex(1)
+        self.assertEqual(p.output_files.count(),1)
+        self.enable_materials();p.content.setCurrentIndex(0)
+        with (patch('services.voice_profiles.configured',return_value=True),
+              patch('services.episode.produce',return_value=result) as render):
+            p.export_complete();self.wait_idle()
+        self.assertTrue(render.call_args.kwargs['parts'])
+        self.assertEqual([d['id'] for d in render.call_args.args[0]],[p.news.voice_draft()['id']])
+
+    def test_news_video_and_subject_can_be_set_from_the_workspace(self):
+        import shutil,subprocess
+        if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):self.skipTest('FFmpeg required')
+        p=self.p;p.news.adopt(self.bundle())
+        source=self.root/'本地 视频.mp4'
+        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=s=160x90:r=30:d=0.3',
+                        '-c:v','libx264',str(source)],check=True)
+        actions={action.text():action for action in p.voice_image_menu.menu().actions()}
+        with patch('ui.news_workspace.QFileDialog.getOpenFileName',return_value=(str(source),'')):
+            actions['添加本地视频'].trigger()
+        self.wait_idle()
+        asset=p.news.voice_draft()['screen_item']['video']
+        self.assertEqual(asset['name'],source.name)
+        self.assertNotEqual(Path(asset['path']),source)
+        from PySide6.QtCore import QTimer
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QDialogButtonBox
+        from ui.news_trim_dialog import NewsTrimDialog
+        original_exec=NewsTrimDialog.exec
+        def set_points(dialog):
+            def interact():
+                dialog.slider.setFocus();dialog.slider.setValue(3);QTest.keyClick(dialog.slider,Qt.Key.Key_I)
+                dialog.slider.setValue(11);QTest.keyClick(dialog.slider,Qt.Key.Key_O)
+                dialog.buttons.button(QDialogButtonBox.StandardButton.Save).click()
+            QTimer.singleShot(50,interact)
+            return original_exec(dialog)
+        with patch.object(NewsTrimDialog,'exec',set_points):actions['剪裁视频（I / O）'].trigger()
+        self.wait_idle();asset.update(in_frame=3,out_frame=12)
+        p.news.screen_fields['subject'].textEdited.emit('人工确认的机构')
+        p.save();p._restore(self.root/'config/production-session.json')
+        item=p.news.voice_draft()['screen_item']
+        self.assertEqual(item['subject'],'人工确认的机构')
+        self.assertEqual(item['video'],asset)
+        actions['移除本条视频'].trigger();self.wait_idle()
+        self.assertIsNone(p.news.voice_draft()['screen_item']['video'])
+        self.assertTrue(source.is_file())
+
+    def test_background_music_selection_is_stored_in_current_edition(self):
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QDialog,QDialogButtonBox,QPushButton,QListWidget
+        p=self.p;paths=[str(self.root/'曲一.wav'),str(self.root/'曲二.flac')]
+        original_exec=QDialog.exec
+        def edit(dialog):
+            def interact():
+                next(b for b in dialog.findChildren(QPushButton) if b.text().startswith('添加音频')).click()
+                listing=dialog.findChild(QListWidget)
+                listing.addItem(listing.takeItem(0))
+                dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+            QTimer.singleShot(30,interact)
+            return original_exec(dialog)
+        with patch.object(QDialog,'exec',edit),patch('ui.production_workspace.QFileDialog.getOpenFileNames',return_value=(paths,'')):
+            p.edit_episode()
+        p.save();p._restore(self.root/'config/production-session.json')
+        self.assertEqual(p.episode['music'],paths[::-1])
+
+    def test_music_panel_persists_levels_and_updates_both_playback_outputs(self):
+        p=self.p;p.content.setCurrentIndex(1);p.media_route(0)
+        before=deepcopy(p.roundup.draft['segments'])
+        p._poll()
+        p.preview_audio_output=Mock();p.preview_bed_output=Mock()
+        with patch.object(p,'_voice_refresh') as refresh:
+            p.music_panel.sliders['voice_volume'][0].setValue(67)
+            p.music_panel.sliders['music_volume'][0].setValue(24)
+            p._poll();refresh.assert_not_called()
+        p.preview_audio_output.setVolume.assert_called_with(.67)
+        p.preview_bed_output.setVolume.assert_called_with(.24)
+        p.music_panel.enabled.setChecked(False)
+        p.save();p._restore(self.root/'config/production-session.json')
+        self.assertFalse(p.music_panel.enabled.isChecked())
+        self.assertEqual(p.music_panel.sliders['music_volume'][0].value(),24)
+        self.assertEqual(p.roundup.draft['segments'],before)
+
+    def test_workflow_buttons_preserve_mode_and_return_from_voice_settings(self):
+        p=self.p;self.w.show();self.app.processEvents()
+        self.assertTrue(p.previous_button.isHidden())
+        p.materials.setCurrentIndex(1)
+        p.next_button.click()
+        self.assertEqual(p.pages.currentIndex(),1)
+        self.assertEqual(p.scripts.currentIndex(),1)
+        p.media.setCurrentIndex(3)
+        p.next_button.click()
+        self.assertEqual(p.pages.currentIndex(),2)
+        self.assertEqual(p.media.currentIndex(),0)
+        p.next_button.click()
+        self.assertEqual(p.pages.currentIndex(),3)
+        self.assertTrue(p.next_button.isHidden())
+        self.assertIn(f'发射任务 {p._launch_count()} 项',p.export_contents.text())
+        configure=next(button for button in p.export_voice_row.findChildren(QWidget)
+                       if button.property('productionKey')=='production.configure_voice')
+        configure.click()
+        self.assertEqual((p.pages.currentIndex(),p.settings_tabs.currentIndex()),(4,2))
+        p.previous_button.click()
+        self.assertEqual(p.pages.currentIndex(),3)
+        p.content.setCurrentIndex(0)
+        review=next(button for button in p.findChildren(QWidget)
+                    if button.property('productionKey')=='production.review_script')
+        review.click()
+        self.assertEqual((p.pages.currentIndex(),p.scripts.currentIndex()),(1,1))
+        p.previous_button.click()
+        self.assertEqual((p.pages.currentIndex(),p.materials.currentIndex()),(0,1))
+
+    def test_roundup_script_shows_grouped_coverage_and_missing_tasks(self):
+        p=self.p;dialog=p.roundup
+        r.apply_segments(dialog.draft,r.local_script(dialog.draft,'fixture'))
+        dialog._show_segments()
+        self.assertIn('稿件关联 3/3 项发射',dialog.script_origin.text())
+        group=dialog.segment_list.item(1)
+        self.assertTrue(group.text().startswith('3 项 · '))
+        self.assertIn('Fixture mission 3',group.toolTip())
+        extra=context(4)
+        dialog._new_snapshot({**dialog.collection,'items':[*dialog.draft['snapshot']['items'],extra]})
+        self.assertIn('稿件关联 3/4 项发射',dialog.script_origin.text())
+        self.assertIn('1 项尚未编入',dialog.script_origin.text())
+        self.assertIn('Fixture mission 4',dialog.script_origin.toolTip())
+
+    def test_paused_news_preview_shows_selected_article_before_playback(self):
+        from tools import news_visuals
+        p=self.p;p.news.adopt(self.bundle(),collected=False)
+        new=p.news.add_news('另一条新闻','这条新闻的正文用于确认预览会显示当前条目。')
+        p.news.select_article(new.news.manual_id);self.w.show();p.media_route(0);self.app.processEvents()
+        with patch.object(news_visuals,'slide_from',wraps=news_visuals.slide_from) as slide:
+            p._preview_news()
+            self.assertIn('previous_picture',p._news_frames)
+            self.assertEqual(p.preview_slider.value(),0)
+            slide.assert_not_called()
+            p.preview_slider.setValue(100)
+            slide.assert_called_once()
+
+    def test_episode_number_and_shared_beijing_dates_reach_both_sources(self):
+        from PySide6.QtWidgets import QDateEdit,QDialogButtonBox,QLineEdit,QSpinBox
+        p=self.p
+        bundle=self.bundle()
+        outside=Article(News('Fixture','下一天的新闻','2026-10-26T16:00:00Z','','https://example.invalid/late'),'正文','fixture')
+        bundle['articles'].append(outside)
+        p.news.adopt(bundle,collected=False)
+        item=context(1);item['net']='2026-10-22T16:00:00Z'
+        p.roundup.collection=dict(items=[item],complete=True,start='2026-10-20',end='2026-10-29')
+        original_exec=QDialog.exec
+        names=[]
+        def edit(dialog):
+            def interact():
+                name=dialog.findChild(QLineEdit,'EpisodeName')
+                names.append(name.text())
+                name.setText('深空周报')
+                names.append(dialog.findChild(QPlainTextEdit).placeholderText())
+                dialog.findChild(QSpinBox,'EditionNumber').setValue(43)
+                dialog.findChild(QDateEdit,'EditionRangeStart').setDate(QDate(2026,10,23))
+                dialog.findChild(QDateEdit,'EditionRangeEnd').setDate(QDate(2026,10,26))
+                dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+            QTimer.singleShot(30,interact)
+            return original_exec(dialog)
+        with patch.object(QDialog,'exec',edit):p.period.click()
+        self.assertEqual(names[0],'航天周报')
+        self.assertIn('深空周报',names[1])
+        p._finish_recovery_write(wait=True);p._poll();p._finish_recovery_write(wait=True)
+        recovered=json.loads((self.root/'cache/production-recovery.json').read_text(encoding='utf-8'))
+        self.assertEqual(recovered['episode']['name'],'深空周报')
+        p.save();p._restore(self.root/'config/production-session.json')
+        dates=['2026-10-23','2026-10-26'];settings=p.current_settings()
+        self.assertEqual(p.episode['number'],43)
+        self.assertEqual(p.episode['name'],'深空周报')
+        self.assertIn('第 43 期',p.period.text())
+        self.assertEqual(p.episode['review_range'],dates)
+        self.assertEqual([settings.start_date,settings.end_date],dates)
+        self.assertEqual([settings.launch_start_date,settings.launch_end_date],dates)
+        self.assertEqual([p.roundup.draft['start'],p.roundup.draft['end']],dates)
+        self.assertEqual([p.intro.options()['date_text'],p.intro.options()['end_date']],dates)
+        self.assertEqual([a.news.title for a in p.news.selected_articles()],['Fixture news'])
+        self.assertFalse(p.roundup.recent_dates.isEnabled())
+        p.intro.result_path=self.root/'older-intro.mp4'
+        def start(*_):p.worker=Mock()
+        try:
+            with patch('services.voice_profiles.configured',return_value=True),patch.object(p,'_news_job',side_effect=start) as export:
+                p.export_complete()
+        finally:p.worker=None
+        payload=export.call_args.args[2]
+        self.assertEqual(payload['episode']['name'],'深空周报')
+        self.assertIsNone(payload['intro'])
+        self.assertEqual([payload['intro_options']['date_text'],payload['intro_options']['end_date']],dates)
+
+    def test_news_pagination_keeps_review_position_and_recovers_last_page(self):
+        p=self.p;news=p.news
+        bundle=self.bundle();bundle['articles']=[Article(
+            News('Fixture',f'新闻 {n}', '2026-10-23','','https://example.invalid/news/'+str(n)),
+            '正文内容','fixture') for n in range(43)]
+        news.adopt(bundle,collected=True)
+        p.content.setCurrentIndex(0);p.navigation.setCurrentRow(1)
+        combo= news._lists['articles'][0]
+        combo.setCurrentIndex(combo.findData('selected'))
+        news._page('articles',1)
+        removed=news.current_article()
+        news.articles.currentItem().setCheckState(Qt.CheckState.Unchecked)
+        self.assertEqual(news._pages['articles'],1)
+        self.assertEqual(news.current_article().news.title,'新闻 21')
+        self.assertEqual(p.navigation.currentRow(),1)
+        self.assertTrue(removed.news.key in news.included)
+        news._page('articles',1)
+        while news._pages['articles']==2:
+            news.articles.currentItem().setCheckState(Qt.CheckState.Unchecked)
+        self.assertEqual(news._pages['articles'],1)
+        self.assertEqual(news.articles.currentRow(),19)
+        p.save();p._restore(self.root/'config/production-session.json')
+        self.assertEqual(news._pages['articles'],1)
+        self.assertEqual(news.articles.currentRow(),19)
+        combo.setCurrentIndex(combo.findData('unselected'))
+        while news.articles.count():
+            news.articles.currentItem().setCheckState(Qt.CheckState.Checked)
+        self.assertEqual(len(news.script_included),43)
+        combo.setCurrentIndex(combo.findData('all'));news._page('articles',1)
+        selected=news.current_article().news.key
+        news.articles.currentItem().setCheckState(Qt.CheckState.Unchecked)
+        self.assertEqual(news.current_article().news.key,selected)
+        self.assertEqual(news._pages['articles'],1)
+        self.assertEqual(news.select_visible.checkState(),Qt.CheckState.PartiallyChecked)
+        news.select_visible.click()
+        self.assertEqual(len(news.script_included),43)
+        self.assertEqual(news._pages['articles'],1)
+        news.articles.currentItem().setCheckState(Qt.CheckState.Unchecked)
+        outside=set(news.script_included)
+        combo.setCurrentIndex(combo.findData('unselected'))
+        self.assertEqual(news.select_visible.checkState(),Qt.CheckState.Unchecked)
+        news.select_visible.click()
+        self.assertTrue(outside<news.script_included)
+        self.assertEqual(combo.currentData(),'unselected')
+        self.assertEqual(news.articles.count(),0)
+
+    def test_manual_news_without_url_survives_collection_and_restore(self):
+        p=self.p;news=p.news
+        first=news.add_news('第一条人工新闻','这是供编辑和验收的第一条完整内容。')
+        second=news.add_news('第二条人工新闻','这是供编辑和验收的第二条完整内容。')
+        self.assertNotEqual(first.news.manual_id,second.news.manual_id)
+        self.assertEqual(first.news.url,'')
+        self.assertIs(news.source_article(),second)
+        news.title.setText('用户改写的新闻画面')
+        news.summary.setPlainText('独立的屏幕摘要')
+        news.adopt(self.bundle(),collected=True)
+        p.save();p._restore(self.root/'config/production-session.json')
+        self.assertTrue(news.select_article(second.news.manual_id))
+        self.assertEqual(news.title.text(),'用户改写的新闻画面')
+        self.assertEqual(news.summary.toPlainText(),'独立的屏幕摘要')
+        self.assertEqual(news.voice_draft()['news_id'],second.news.manual_id)
+        with self.assertRaisesRegex(ValueError,'标题和正文'):news.add_news('空正文','   ')
 
     def test_visual_playback_advances_existing_segments_and_editing_pauses(self):
         self.p.content.setCurrentIndex(1);self.p.media_route(0);self.w.show();self.app.processEvents()
@@ -647,7 +1342,9 @@ class DesktopWorkflowTests(unittest.TestCase):
         player=Mock();player.position.return_value=round(target*1000)
         p.preview_player=player;p._audio_playback=True;p._audio_ready=True;p._audio_offset=0
         p._audio_end=table['duration_seconds'];p._preview_started=-999999
-        p._advance_preview()
+        with patch.object(p,'media_draft',wraps=p.media_draft) as prepare:
+            p._advance_preview()
+            prepare.assert_not_called()
         self.assertAlmostEqual(p.preview_slider.value()/1000,target,places=2)
         self.assertEqual(p.roundup.segment_list.currentRow(),1)
         self.assertIn('播放器时间',p.preview_clock.text())
@@ -805,6 +1502,7 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertEqual(self.w.width(),1000)
         self.p.preferences.language_combo.setCurrentIndex(self.p.preferences.language_combo.findData('en_US'))
         self.p.preferences.theme_mode_combo.setCurrentIndex(self.p.preferences.theme_mode_combo.findData('dark'))
+        self.wait_idle()
         self.p.apply_preferences();self.app.processEvents()
         self.assertEqual(self.p.navigation.item(1).text(),'Script')
         self.assertIs(self.p.roundup,controller)

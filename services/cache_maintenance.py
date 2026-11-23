@@ -55,6 +55,7 @@ def category(relative):
     if directory in ('news_thumbnails',) and re.fullmatch(r'[a-f0-9]{64}\.png',name):return 'thumbnail'
     if directory=='news_http' and re.fullmatch(r'[a-f0-9]{64}\.html',name):return 'network'
     if directory=='news_image_downloads' and re.fullmatch(r'[a-f0-9]{32}\.part',name):return 'temporary'
+    if directory=='episode-previews' and re.fullmatch(OUTPUT_NAME+r'\.mp4',name):return 'preview'
     return None
 
 
@@ -73,12 +74,14 @@ def managed(path,receipts=None):
     if relative is None:return None
     parts=relative.parts
     if (len(parts)==4 and parts[:1]==('cache',) and parts[1] in ('roundup_pcm','news_pcm','roundup_playback','news_playback')
-            and re.fullmatch(r'[a-f0-9]{64}',parts[2]) and (parts[3] in ('audio.wav','audio.json','narration.wav','narration.json')
+            and re.fullmatch(r'[a-f0-9]{64}',parts[2]) and (parts[3] in ('audio.wav','audio.json','narration.wav','narration.json','music-bed.wav','timeline.json','news-design.svg')
                  or re.fullmatch(r'timeline-[a-f0-9]{64}\.json',parts[3]))):
         return 'preview'
     if len(parts)==4 and parts[:2]==('cache','voice_samples') and re.fullmatch(r'[a-f0-9]{32}',parts[2]):
         if parts[3] in ('reference.wav','sample.wav') or re.fullmatch(r'original\.[a-z0-9]+|'+OUTPUT_NAME+r'\.wav',parts[3]):
             return 'preview'
+    if len(parts)==4 and parts[:2]==('cache','episode-visuals') and re.fullmatch(r'[a-f0-9]{64}',parts[2]):
+        if re.fullmatch(r'clip\.json|intro-audio\.wav|'+OUTPUT_NAME+r'(?:\.intro)?\.mp4',parts[3]):return 'preview'
     if len(parts)==4 and parts[0]=='cache' and re.fullmatch(r'(news|roundup)_(audio|alignment)',parts[1]) and re.fullmatch(r'[a-f0-9]{64}',parts[2]):
         if re.fullmatch(r'audio\.json|alignment\.json|'+OUTPUT_NAME+r'\.wav',parts[3]):return 'generated'
     if len(parts)==2 and parts[0]=='output' and re.fullmatch(OUTPUT_NAME+r'\.(?:premiere\.json|docx|md|mp4|mov|srt|wav)',parts[1]):
@@ -117,6 +120,12 @@ def receipts():
             if len(relative.parts)==2 and relative.parts[0]=='news-images' and re.fullmatch(r'[a-f0-9]{64}\.(?:png|jpe?g|webp|gif)',relative.name):
                 add(base/relative,'images')
                 if key in linked:image_refs.add((base/relative).resolve())
+        videos={row['video']['sha256'] for row in images['news'].values() if row.get('video')}
+        for key in images.get('videos',{}):
+            if re.fullmatch(r'[a-f0-9]{64}',key):
+                video=base/'news-images'/(key+'.mp4')
+                add(video,'generated')
+                if key in videos:image_refs.add(video.resolve())
     except FileNotFoundError:pass
     except (OSError,ValueError,TypeError,AttributeError,KeyError):uncertain=True
     for path in (base/'video-downloads').glob('*/metadata.json'):
@@ -201,6 +210,8 @@ def references(extra=(),owned=None):
     files=[base/'config/production-session.json',base/'cache/production-recovery.json']
     for directory in ('production-versions','roundup-drafts','news-drafts'):
         files.extend((base/'output'/directory).glob('*.json'))
+        files.extend((base/'cache'/directory).glob('*.json'))
+    files.extend((base/'cache/production_exports/drafts').glob('*.json'))
     files.extend(base/relative for relative in (owned or {}) if relative.parts[0]=='output' and relative.suffix=='.json')
     for path in files:
         if path.name=='cache-maintenance.json':continue
@@ -240,9 +251,9 @@ def scan(token,*,now=None,extra=(),active=False,in_use=(),record_check=True):
     paths_to_check.update((base/'output').glob('*'))
     for name in ('video-intro','video-cards'):paths_to_check.update((base/'output'/name).glob('*.intro.mp4'))
     for directory in ('news_thumbnails','news_http','news_image_downloads','roundup_pcm','news_pcm','roundup_playback','news_playback',
-                      'news_audio','roundup_audio','news_alignment','roundup_alignment','voice_samples'):
+                      'news_audio','roundup_audio','news_alignment','roundup_alignment','voice_samples','episode-visuals','episode-previews'):
         folder=base/'cache'/directory
-        paths_to_check.update(folder.glob('*/*' if directory.endswith(('_pcm','_playback','_audio','_alignment','_samples')) else '*'))
+        paths_to_check.update(folder.glob('*/*' if directory.endswith(('_pcm','_playback','_audio','_alignment','_samples','-visuals')) else '*'))
     for path in sorted(paths_to_check):
         token.check();kind=managed(path,owned)
         if not kind or not path.is_file():continue

@@ -54,6 +54,8 @@ with zipfile.ZipFile(TZDATA_ARCHIVE, "w", zipfile.ZIP_DEFLATED) as archive:
 with zipfile.ZipFile(TZDATA_ARCHIVE) as archive:
     assert archive.testzip() is None
 
+from PySide6.QtCore import QLibraryInfo
+
 datas = [
     *[(str(FFMPEG_DIR / name), "ffmpeg") for name in FFMPEG_FILES],
     (str(TZDATA_ARCHIVE), "."),
@@ -66,6 +68,7 @@ datas = [
     (str(ROOT / "tools" / "voice_deployment"), "tools/voice_deployment"),
     (str(DEFAULTS / "assets"), "assets"),
     (str(ROOT / "language"), "language"),
+    (str(Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)) / "qtbase_zh_CN.qm"), "qt-translations"),
     (str(DEFAULTS / "prompts"), "prompts"),
     (str(DEFAULTS / "translator"), "translator"),
     (str(ROOT / "ui" / "style.qss"), "ui"),
@@ -113,7 +116,7 @@ a.binaries = [entry for entry in a.binaries
               if Path(entry[0]).name not in UNUSED_QT_BINARIES]
 a.pure = [entry for entry in a.pure
           if entry[0] != "tzdata" and not entry[0].startswith("tzdata.")]
-# The app installs its own JSON translations, without a Qt QTranslator.
+# Ship the explicitly selected Qt catalog rather than every Qt module and locale.
 a.datas = [entry for entry in a.datas
            if not entry[0].replace("\\", "/").startswith(
                ("tzdata/", "PySide6/translations/"))]

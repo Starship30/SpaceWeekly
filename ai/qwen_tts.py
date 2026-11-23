@@ -127,7 +127,17 @@ class QwenTTSProvider:
         with (Path(self._runtime.name) / 'worker.log').open('rb') as handle:
             handle.seek(0, 2)
             handle.seek(max(0, handle.tell() - 2500))
-            return handle.read().decode('utf-8', errors='replace')
+            raw=handle.read()
+        try:return raw.decode('utf-8')
+        except UnicodeDecodeError:
+            if os.name=='nt':
+                from ctypes import windll
+                encoding=f'cp{windll.kernel32.GetOEMCP()}'
+                def decode(line):
+                    try:return line.decode('utf-8')
+                    except UnicodeDecodeError:return line.decode(encoding,'replace')
+                return '\n'.join(map(decode,raw.splitlines()))
+            return raw.decode('utf-8','replace')
 
     def synthesize(self, request, output_path, cancel_check=no_cancel):
         if not self._lock.acquire(blocking=False):
@@ -189,11 +199,19 @@ class QwenTTSProvider:
                             return
                         if state == 'error':
                             inflight = False
+                            error=str(event.get('error', '未知错误'))
                             if not self._loaded:
                                 self.unload()
-                            raise RuntimeError('Qwen3-TTS 请求失败：' + str(event.get('error', '未知错误')))
+                            if 'os error 1455' in error or 'WinError 1455' in error or '页面文件太小' in error:
+                                raise RuntimeError('Windows 虚拟内存不足（1455），无法加载配音模型。请释放内存后重试，或配置轻量模型。')
+                            raise RuntimeError('Qwen3-TTS 请求失败：' + error)
                     if not self.is_running:
-                        raise RuntimeError('语音工作进程退出：' + self._failure_detail())
+                        if status.exists() and len(status.read_bytes().split(b'\n')[:-1])>len(records):
+                            continue
+                        code=self.process.returncode
+                        if code is not None and code & 0xffffffff in (0xc0000017,0xc000012d,1455):
+                            raise RuntimeError('Windows 可用内存不足，语音工作进程退出。请释放内存后重试，或配置轻量模型。')
+                        raise RuntimeError(f'语音工作进程退出（{code}）：' + self._failure_detail())
                     if time.monotonic() > deadline:
                         self.unload(force=True)
                         raise RuntimeError('TTS 超时，工作进程已终止；下次需重新加载')

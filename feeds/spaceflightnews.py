@@ -9,7 +9,7 @@ from downloader import client
 from models.article import Article
 from models.news import News
 from services.cancellation import CancelCheck, no_cancel
-from utils.time import parse_datetime
+from utils.time import _timezone, parse_datetime
 
 logger = logging.getLogger(__name__)
 ARTICLES_URL = "https://api.spaceflightnewsapi.net/v4/articles/"
@@ -31,18 +31,19 @@ class SpaceflightNewsProvider:
             return False
 
     def fetch(self, limit: int = 20, cancel_check: CancelCheck = no_cancel,
-              date_range: tuple[str, str] | None = None) -> list[Article]:
+              date_range: tuple[str, str] | None = None, display_timezone: str = 'UTC') -> list[Article]:
         if limit < 0:
             raise ValueError("News limit must be zero (unlimited) or positive")
         if limit == 0 and date_range is None:
             raise ValueError("不限读取需要选择新闻日期范围")
         params = {"limit": min(limit, 100) if limit else 100, "ordering": "-published_at"}
+        zone = _timezone(display_timezone)
         if date_range:
             start, end = (date.fromisoformat(value) for value in date_range)
             if start > end:
                 raise ValueError("Start date must not be after end date")
-            params["published_at_gte"] = datetime.combine(start, datetime.min.time(), timezone.utc).isoformat()
-            params["published_at_lt"] = datetime.combine(end+timedelta(days=1), datetime.min.time(), timezone.utc).isoformat()
+            params["published_at_gte"] = datetime.combine(start, datetime.min.time(), zone).astimezone(timezone.utc).isoformat()
+            params["published_at_lt"] = datetime.combine(end+timedelta(days=1), datetime.min.time(), zone).astimezone(timezone.utc).isoformat()
         url = ARTICLES_URL+"?"+urlencode(params)
         articles, seen_urls, visited = [], set(), set()
         while url:
@@ -77,7 +78,7 @@ class SpaceflightNewsProvider:
                     if (parsed.scheme not in {"http", "https"} or not parsed.hostname or published is None
                             or any(char.isspace() for char in item["url"])):
                         raise ValueError("Invalid article URL or publication date")
-                    if date_range and not start <= published.astimezone(timezone.utc).date() <= end:
+                    if date_range and not start <= published.astimezone(zone).date() <= end:
                         continue
                     news = News(source=item["news_site"].strip(), title=item["title"].strip(),
                         published=item["published_at"], summary=item.get("summary", ""), url=item["url"])

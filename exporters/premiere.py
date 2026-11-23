@@ -8,7 +8,7 @@ from uuid import uuid4
 from config import OUTPUT_DIR
 from models.ai_summary import AISummary
 from models.article import Article
-from models.news import news_id
+from models.news import is_manual_id, is_news_url, news_id
 from models.export_context import ExportContext
 from services.cancellation import CancelCheck, no_cancel
 from utils.output_files import reserved_output
@@ -37,20 +37,19 @@ def build_snapshot(
             value = getattr(news, field)
             if not isinstance(value, str):
                 raise ValueError(f"Premiere: {field} must be a string")
-        if not news.url.strip() or not news.source.strip():
+        if not news.source.strip():
             raise ValueError("Premiere: URL and source are required")
-        if not re.fullmatch(r"https?://[^\s/]+(?:/[^\s]*)?", news.url, re.IGNORECASE):
+        if not is_news_url(news.url) and not (is_manual_id(news.manual_id) and news.url==''):
             raise ValueError("Premiere: URL must be an HTTP(S) URL without whitespace")
-        # News/Article carry no stable ID; SQLite's row ID is not in this run.
-        item_id = news_id(news.url)
+        item_id = news_id(news.key)
         if item_id in seen:
             raise ValueError(f"Premiere: duplicate news URL: {news.url}")
         seen.add(item_id)
-        localized = context.localized_titles.get(news.url)
+        localized = context.localized_titles.get(news.key)
         title = localized if isinstance(localized, str) and localized.strip() else news.title
         if not title.strip():
             raise ValueError(f"Premiere: title is required: {news.url}")
-        ai = ai_summaries.get(news.url)
+        ai = ai_summaries.get(news.key)
         if ai is not None and not isinstance(ai.summary, str):
             raise ValueError("Premiere: AI summary must be a string")
         use_ai = ai is not None and bool(ai.summary.strip())
@@ -118,6 +117,8 @@ def build_snapshot(
             if isinstance(launch.get('launch_context'), dict):
                 from copy import deepcopy
                 record['launch_context'] = deepcopy(launch['launch_context'])
+                from services.launch_display import resolve_launch
+                record['display_record']=resolve_launch(launch['launch_context'])
             payload['launches'].append(record)
     return payload
 

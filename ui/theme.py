@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+from pathlib import Path
 from string import Template
 
 from PySide6.QtCore import QObject
@@ -18,6 +20,8 @@ THEME_SYSTEM = "system"
 THEME_LIGHT = "light"
 THEME_DARK = "dark"
 THEME_MODES = {THEME_SYSTEM, THEME_LIGHT, THEME_DARK}
+WORKSPACE_GAP=12
+TYPE_SIZES=dict(page_type=26,section_type=16,body_type=14,muted_type=12)
 
 
 @dataclass(frozen=True)
@@ -60,31 +64,31 @@ LIGHT_THEME = Theme(
 DARK_THEME = Theme(
     name=THEME_DARK,
     colors={
-        "window_bg": "#121827",
-        "sidebar_bg": "#0e1422",
-        "panel_bg": "#1a2235",
-        "panel_alt_bg": "#161e30",
-        "control_bg": "#202a40",
-        "control_hover_bg": "#343c46",
-        "control_pressed_bg": "#3c4652",
-        "border": "#2d3647",
-        "border_strong": "#3b475c",
-        "text": "#e6edf3",
-        "text_muted": "#b6c2cf",
-        "text_subtle": "#8d99a6",
-        "accent": "#5b9dff",
+        "window_bg": "#121a29",
+        "sidebar_bg": "#151e2e",
+        "panel_bg": "#1b2536",
+        "panel_alt_bg": "#202b3e",
+        "control_bg": "#202b3e",
+        "control_hover_bg": "#293850",
+        "control_pressed_bg": "#314160",
+        "border": "#2a374c",
+        "border_strong": "#33425b",
+        "text": "#e5eaf2",
+        "text_muted": "#91a0b5",
+        "text_subtle": "#8493a9",
+        "accent": "#528ff5",
         "accent_hover": "#75adff",
-        "primary": "#7094ff",
-        "primary_hover": "#8aabff",
-        "primary_border": "#7094ff",
+        "primary": "#528ff5",
+        "primary_hover": "#6ca7ff",
+        "primary_border": "#528ff5",
         "on_primary": "#10172a",
         "selection_text": "#b7ccff",
-        "selection_bg": "#263858",
+        "selection_bg": "#263652",
         "input_shadow": "#1c2229",
         "log_info": "#79b8ff",
-        "log_success": "#72d987",
+        "log_success": "#28b879",
         "log_warning": "#f4bf75",
-        "log_error": "#ff8b8b",
+        "log_error": "#e45b64",
     },
 )
 
@@ -102,12 +106,18 @@ class ThemeManager(QObject):
         families = ["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"]
         fallback = self.app.property('spaceweeklyFallbackFonts')
         if fallback is None:
+            if 'Microsoft YaHei UI' not in QFontDatabase.families() and os.environ.get('WINDIR'):
+                system_fonts = Path(os.environ['WINDIR']) / 'Fonts'
+                for filename in ('msyh.ttc', 'msyhbd.ttc'):
+                    path = system_fonts / filename
+                    if path.is_file():
+                        QFontDatabase.addApplicationFont(str(path))
             path = bundled_resource_path('assets', 'fonts', 'NotoSansCJKsc-Bold.otf')
             identifier = QFontDatabase.addApplicationFont(str(path)) if path.exists() else -1
             fallback = QFontDatabase.applicationFontFamilies(identifier) if identifier >= 0 else []
             self.app.setProperty('spaceweeklyFallbackFonts', fallback)
         font.setFamilies(families + list(fallback))
-        font.setPixelSize(14)
+        font.setPixelSize(TYPE_SIZES['body_type'])
         self.app.setFont(font)
         self.mode = THEME_SYSTEM
         self.theme = LIGHT_THEME
@@ -171,7 +181,9 @@ class ThemeManager(QObject):
 
         return Template(style_path.read_text(encoding="utf-8")).safe_substitute(
             **theme.colors,
+            **TYPE_SIZES,
             check_icon=resource_path("assets", "ui-check.svg").as_posix(),
+            minus_icon=resource_path("assets", "ui-minus.svg").as_posix(),
             arrow_down=resource_path("assets", "ui-arrow-down.svg").as_posix(),
             arrow_up=resource_path("assets", "ui-arrow-up.svg").as_posix(),
         )

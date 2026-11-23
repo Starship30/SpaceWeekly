@@ -12,7 +12,7 @@ from downloader import client
 from models.article import Article
 from models.news import News
 from services.cancellation import CancelCheck, no_cancel
-from utils.time import parse_datetime
+from utils.time import _timezone, parse_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +60,14 @@ class SpaceComWebProvider:
     def fetch(
         self, limit: int = 0, cancel_check: CancelCheck = no_cancel,
         date_range: tuple[str, str] | None = None,
+        display_timezone: str = 'UTC',
     ) -> list[Article]:
         """Follow pages within a date range or to a limit; bare 0 reads one page."""
         articles: list[Article] = []
         seen_urls: set[str] = set()
         visited_pages: set[str] = set()
         url = self.listing_url
+        zone = _timezone(display_timezone)
         while url and url not in visited_pages:
             cancel_check()
             visited_pages.add(url)
@@ -89,7 +91,7 @@ class SpaceComWebProvider:
                 seen_urls.add(article.news.url)
                 if date_range:
                     published = parse_datetime(article.news.published)
-                    if published is None or not date_range[0] <= published.date().isoformat() <= date_range[1]:
+                    if published is None or not date_range[0] <= published.astimezone(zone).date().isoformat() <= date_range[1]:
                         continue
                 articles.append(article)
                 if limit > 0 and len(articles) >= limit:
@@ -105,7 +107,8 @@ class SpaceComWebProvider:
                 break
             # ponytail: listings are newest-first; scan all pages if the site changes ordering.
             if date_range and page_articles and all(
-                parse_datetime(article.news.published).date().isoformat() < date_range[0]
+                (published := parse_datetime(article.news.published)) is not None
+                and published.astimezone(zone).date().isoformat() < date_range[0]
                 for article in page_articles
             ):
                 break

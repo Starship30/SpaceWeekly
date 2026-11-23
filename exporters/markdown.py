@@ -99,8 +99,8 @@ def _build_markdown(
             lines.extend(
                 _article_lines(
                     article,
-                    summaries.get(article.news.url),
-                    assessments.get(article.news.url),
+                    summaries.get(article.news.key),
+                    assessments.get(article.news.key),
                     context,
                 )
             )
@@ -117,7 +117,7 @@ def _article_lines(
     news = article.news
     separator = tr("label_separator")
     title = (
-        context.localized_titles.get(news.url, news.title)
+        context.localized_titles.get(news.key, news.title)
         if context is not None
         else news.title
     )
@@ -177,7 +177,7 @@ def _article_lines(
         )
 
     if context is None or context.include_link:
-        lines.extend([f"{tr('report_link')}{separator}{news.url}", ""])
+        if news.url:lines.extend([f"{tr('report_link')}{separator}{news.url}", ""])
 
     if (
         (context is None or context.include_body)
@@ -219,7 +219,7 @@ def _group_by_importance(
     grouped: dict[str, list[Article]] = {}
 
     for article in articles:
-        assessment = assessments.get(article.news.url)
+        assessment = assessments.get(article.news.key)
         level = assessment.importance if assessment is not None else "Medium"
         grouped.setdefault(_importance_section(level), []).append(article)
 

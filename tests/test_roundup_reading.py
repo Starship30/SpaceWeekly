@@ -20,11 +20,12 @@ class ReadingTests(unittest.TestCase):
                  rocket='Test rocket B', provider='CASC', site_name='Test site B', pad_name='Launch Area 94 (SLS-2 / 603)')
         a = ll2_material(a, 'The spacecraft is a remote sensing satellite.')
         b = ll2_material(b, '6 remote sensing satellites of unknown purposes.')
-        for item in (a,b):item['payload'] = item['description']
+        for item,amount in ((a,1),(b,6)):
+            item['payload']=item['description'];item['payloads']=[dict(name=item['english_name'],amount=amount)]
         entries = {'Test 50-03':dict(translation='测试五十号03星'),
                    'Test 53-07 to 09/56-19 to 21':dict(translation='测试五十三号07—09星、测试五十六号19—21星'),
                    'Test site A':dict(translation='测试甲发射中心'), 'Test site B':dict(translation='测试乙发射中心')}
-        mock = patch('services.launch_research.load_dictionary', return_value=entries)
+        mock = patch('services.launch_display.load_dictionary', return_value=entries)
         mock.start();self.addCleanup(mock.stop)
         self.draft = r.create_draft(dict(self.collection, items=[a,b]), '2026-10-23', '2026-10-29')
         self.draft['pronunciations'] = {'LC-9A':'九 A '}
@@ -61,7 +62,8 @@ class ReadingTests(unittest.TestCase):
         for unwanted in ('星卫星','一颗卫星','SLS-2','603','Launch Area'):
             self.assertNotIn(unwanted,text)
         self.assertIn('07—09星',segment['screen'])
-        self.assertIn('SLS-2',segment['screen'])
+        self.assertIn('94 工位',segment['screen'])
+        self.assertIn('SLS-2',self.draft['snapshot']['items'][1]['pad_name'])
         units = reading_units(self.draft,segment)
         self.assertEqual(''.join(u['reading_text'] for u in units),reading_text(self.draft,segment))
         self.assertEqual(units[0]['task_ids'],['launch-1','launch-2'])
@@ -78,7 +80,7 @@ class ReadingTests(unittest.TestCase):
         event = style.event_context(b,self.draft)
         self.assertIn('07—09星',event['spoken_payload'])
         self.assertEqual(b,original)
-        b['payload'] = 'Unlinked satellite assertion'
+        b['payloads']=[];b['payload'] = 'Unlinked satellite assertion'
         self.assertEqual(style.event_context(b,self.draft)['spoken_payload'],'')
 
     def test_name_refresh_keeps_existing_unit_ids_and_task_associations(self):

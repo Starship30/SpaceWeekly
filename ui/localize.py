@@ -1,10 +1,34 @@
 """Retranslate static widget chrome without rebuilding editors or their state."""
 import json
 from functools import lru_cache
-from PySide6.QtWidgets import QAbstractButton,QLabel,QTabWidget,QComboBox,QLineEdit,QPlainTextEdit
+from pathlib import Path
+from PySide6.QtCore import QLibraryInfo,QTranslator
+from PySide6.QtWidgets import QApplication,QAbstractButton,QLabel,QTabWidget,QComboBox,QLineEdit,QPlainTextEdit
 from PySide6.QtGui import QAction
-from i18n import tr
-from resources import resource_path
+from i18n import current_language,set_language,tr
+from resources import bundled_resource_path,resource_path
+
+
+def set_ui_language(language):
+    set_language(language)
+    app=QApplication.instance()
+    if app is None:return
+    translator=getattr(app,'_spaceweekly_qt_translator',None)
+    if current_language()!='zh_CN':
+        if translator is not None:
+            app.removeTranslator(translator)
+            translator.deleteLater()
+            app._spaceweekly_qt_translator=None
+        return
+    if translator is not None:return
+    name='qtbase_zh_CN.qm'
+    paths=(bundled_resource_path('qt-translations',name),
+           Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath))/name)
+    translator=QTranslator(app)
+    if any(translator.load(str(path)) for path in paths):
+        app.installTranslator(translator)
+        app._spaceweekly_qt_translator=translator
+    else:translator.deleteLater()
 
 
 @lru_cache(maxsize=1)

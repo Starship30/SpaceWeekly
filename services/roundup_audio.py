@@ -110,18 +110,17 @@ def generate_audio(draft, provider, token, *, segment_id=None, force=False, on_p
         if segment_id and segment['id'] != segment_id:
             continue
         try:
-            key = audio_key(draft, segment)
             existing = current_audio(draft, segment)
+            if force or not existing:
+                key = audio_key(draft, segment)
+                directory = resource_path('cache', content_namespace(draft)+'_audio', key)
+                index = directory / 'audio.json'
+                if not force and index.exists():
+                    cached = json.loads(index.read_text(encoding='utf-8'))
+                    existing = current_audio(draft, dict(segment, audio=cached))
             if existing:
                 segment['audio'] = existing
-            directory = resource_path('cache', content_namespace(draft)+'_audio', key)
-            index = directory / 'audio.json'
-            if not force and not current_audio(draft, segment) and index.exists():
-                cached = json.loads(index.read_text(encoding='utf-8'))
-                candidate = dict(segment, audio=cached)
-                if current_audio(draft, candidate):
-                    segment['audio'] = cached
-            if force or not current_audio(draft, segment):
+            if force or not existing:
                 text = reading_text(draft, segment)
                 from services.roundup_sync import reading_units
                 try:
@@ -146,7 +145,7 @@ def generate_audio(draft, provider, token, *, segment_id=None, force=False, on_p
             errors.append((segment['id'], str(error)))
         finally:
             # A cancelled batch can resume from every already successful paragraph.
-            write_json(resource_path('output', content_namespace(draft)+'-drafts', draft['id'] + '.json'), draft)
+            write_json(resource_path('cache', content_namespace(draft)+'-drafts', draft['id'] + '.json'), draft)
         if on_progress:
             on_progress(segment['id'])
     return errors

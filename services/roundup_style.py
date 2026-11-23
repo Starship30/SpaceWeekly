@@ -44,7 +44,8 @@ def activity_context(draft, task_id):
     first,last=date.fromisoformat(draft['start']),date.fromisoformat(draft['end'])
     included={s['id'] for s in draft['selection'] if s['included']}
     events=[];current=None
-    for item in draft['snapshot']['items']:
+    from services.launch_display import effective_item
+    for item in map(effective_item,draft['snapshot']['items']):
         when=parse_datetime(item.get('net',''))
         if when is None:continue
         when=when.astimezone(zone)
@@ -79,6 +80,8 @@ def transition(draft, stats):
 
 
 def affiliation(item):
+    from services.launch_display import resolve_launch,overrides
+    view=resolve_launch(item);edits=overrides(item)
     provider = item.get('provider', '').strip()
     known = {
         'china aerospace science and technology corporation': ('中国方面', 0),
@@ -87,19 +90,25 @@ def affiliation(item):
         'spacex': ('美国 SpaceX 方面', 1), 'rocket lab': ('美国 Rocket Lab 方面', 2),
         'galactic energy': ('中国星河动力方面', 0), '星河动力': ('中国星河动力方面', 0),
     }
+    if any(k in edits for k in ('provider','group_label','operator_country')):
+        country='' if view['provider'].startswith(view['operator_country']) else view['operator_country']
+        return dict(label=edits.get('group_label',(' '.join(filter(None,[country,view['provider']]))+'方面')),
+                    rank=known.get(provider.casefold(),('',3))[1],basis='本期人工编辑')
     if provider.casefold() in known:
         label, rank = known[provider.casefold()]
         return dict(label=label, rank=rank, basis='用户确认的口播机构口径')
-    country = item.get('operator_country', '').strip()
+    country = view['operator_country'].strip()
     country = {'China': '中国', 'United States of America': '美国', 'United States': '美国',
                'New Zealand': '新西兰', 'Japan': '日本', 'India': '印度', 'Russia': '俄罗斯'}.get(country, country)
-    from translator.dictionary import exact_dictionary_translation
-    provider = exact_dictionary_translation(provider) or provider
+    provider = view['provider']
+    if provider.startswith(country):country=''
     return dict(label=(country + ' ' + provider + '方面').strip() if provider else '其他任务',
                 rank=3, basis='LL2机构国家字段' if country else '机构归属不足，未推断国家')
 
 
 def pad_code(name):
+    short=re.fullmatch(r'(SLC|LC)-(\d+[A-Z]?)',name,re.I)
+    if short:return short[0].upper()
     match = re.search(r'(Space Launch Complex|Launch Complex|Launch Area)\s+(\d+[A-Z]?)\b', name, re.I)
     if not match:
         return ''
@@ -108,23 +117,9 @@ def pad_code(name):
 
 
 def payload_count(item):
-    from services.launch_research import background_facts
-    facts = background_facts(item)
-    if not facts:
-        return None, ''
-    name = item.get('english_name', '')
-    match = re.search(r'(?:^|\()(\d+)\s*[x×]\s+\S', name, re.I)
-    if match:
-        return int(match[1]), name
-    # shortcut: only explicit LL2 English count forms; other wording stays with sourced model review.
-    for fact in (f for f in facts if f['evidence_level'] == 'll2_record'):
-        quote = fact['quote'].strip()
-        match = re.match(r'(?:A batch of\s+)?(\d+)\s+[^.\r\n]{0,65}?\bsatellites?\b', quote, re.I)
-        if match:
-            return int(match[1]), quote
-        if re.match(r'The [^.\r\n]{1,80} is (?:a|an) [^.\r\n]{0,80}\bsatellite\b', quote, re.I):
-            return 1, quote
-    return None, ''
+    from services.launch_display import resolve_launch
+    view=resolve_launch(item)
+    return view['payload_count'],view['quantity_source']
 
 
 def spoken_quantities(text):
@@ -134,32 +129,8 @@ def spoken_quantities(text):
 
 
 def payload_display(item):
-    """Use payload evidence only; a translated mission title is not a payload record."""
-    from translator.dictionary import dictionary_replace
-    text = item.get('payload', '').strip()
-    if not text:
-        return '载荷资料待补充'
-    # These are source phrases, not mission-name rules or inferred mission purposes.
-    if re.search(r'\bremote sensing[”\" ]+satellites?\b', text, re.I) and not re.search(r'\bnot\b', text, re.I):
-        count = re.match(r'(\d+)\s+', text)
-        label = (count[1] + '颗' if count else '') + '遥感卫星'
-        return label + ('\n具体用途未明' if re.search(r'unknown purposes?', text, re.I) else '')
-    match = re.search(r'(\d+) satellites for the ([\w -]+) mega-constellation', text, re.I)
-    if match:
-        name = dictionary_replace(match[2].strip())[0]
-        return f'{match[1]}颗{name}星座卫星'
-    match = re.match(r'(?:A batch of\s+)?(\d+)\s+Low Earth Orbit communication satellites\b', text, re.I)
-    if match:
-        return f'{match[1]}颗近地轨道通信卫星'
-    if re.fullmatch(r'Synthetic aperture radar Earth observation satellite for Japanese Earth imaging company iQPS\.?', text, re.I):
-        return '日本 iQPS 合成孔径雷达地球观测卫星'
-    if re.match(r'This is a replacement satellite for the Indian Regional Navigation Satellite System\.', text, re.I):
-        return '印度区域导航卫星系统的替换卫星'
-    match = re.match(r'(.{2,60}?) is (?:a\s+)+space-based[^.]+radio frequency', text, re.I)
-    if match and re.search(r'SIGINT|specific radio signals|radio frequency mapping', text, re.I):
-        return dictionary_replace(match[1])[0] + '射频信号监测卫星'
-    translated,matched = dictionary_replace(text)
-    return translated if matched and not re.search(r'\b[A-Za-z]{2,}\s+[A-Za-z]{2,}\b',translated) else text
+    from services.launch_display import resolve_launch
+    return resolve_launch(item)['payload']
 
 
 def rocket_recovery(item):
@@ -167,29 +138,32 @@ def rocket_recovery(item):
     from utils.launch_status import recovery_states
     if item.get('rocket_reusable') is False:
         return ''
-    text = item.get('rocket_recovery', item.get('recovery', ''))
+    from services.launch_display import resolve_launch
+    text = resolve_launch(item)['recovery'] or ''
     # Legacy combined recovery text may also contain capsule landings.
     text = '; '.join(part.strip() for part in re.split(r'[;；\n]+', text)
                      if not re.match(r'\s*(?:飞船|航天器|Spacecraft)', part, re.I))
     states = recovery_states(text)
-    if not states or all(state in ('none', 'unknown') for state in states):
-        if item.get('rocket_reusable') is not True:
-            return ''
-        return '不尝试回收' if 'none' in states else '回收待确认'
-    return text
+    if not states or any(word in text.casefold() for word in ('暂无','待确认','未知','unknown','pending','tbd')):
+        return ''
+    if set(states)=={'none'} and item.get('rocket_reusable') is not True:return ''
+    if set(states)=={'none'}:return '不尝试回收'
+    return text if set(states) - {'unknown','pending'} else ''
 
 
 def event_context(item, draft):
     from services.launch_research import display_names
+    from services.launch_display import effective_item
+    item=effective_item(item)
     names = display_names(item)
     orbit = names['orbit'].strip()
     if orbit.casefold() in ('unknown', 'unknown orbit', 'n/a', 'tbd', '-', '未知', '待确认'):
         orbit = ''
-    local = parse_datetime(item.get('net', ''))
+    local = parse_datetime(names.get('net', ''))
     local = local.astimezone(_timezone(draft.get('timezone', 'Asia/Shanghai'))) if local else None
     period = ('凌晨' if local.hour < 6 else '早上' if local.hour < 9 else '上午' if local.hour < 12 else
               '中午' if local.hour < 13 else '下午' if local.hour < 18 else '傍晚' if local.hour < 20 else '晚上') if local else ''
-    pad = item.get('pad_name', '')
+    pad = names['pad_name']
     code = pad_code(pad)
     result = event_result(item,draft)
     count, basis = payload_count(item)
@@ -199,15 +173,17 @@ def event_context(item, draft):
         date_reading=f'{local.month}月{local.day}日{period}' if local else '',
         timezone=timezone_label(draft), rocket=names['rocket'], name=names['name'],
         site_name=names['site_name'], pad_name=names['pad_name'] if pad else '', pad_code=code,
-        legacy_site=names['site'] if not item.get('site_name') else '',
+        legacy_site='',
         site_country=item.get('site_country', ''), launch_result=result,
         timing_basis='reported_launch' if item.get('status_id') in (3, 4, 6, 7, 9) else 'scheduled_time',
-        recovery=item.get('recovery', ''), pad_spoken=spoken_pad(names['pad_name'], code),
+        recovery=rocket_recovery(item), pad_spoken=spoken_pad(names['pad_name'], code),
         spoken_payload=spoken_payload(item, draft, names['name']), orbit=orbit,
         orbit_basis='mission_target' if orbit else '')
 
 
 def event_result(item,draft):
+    from services.launch_display import effective_item
+    item=effective_item(item)
     result={3:'发射成功',4:'发射失败',7:'发射部分失败'}.get(item.get('status_id'))
     if result:return result
     from services.launch_roundup import category
@@ -228,7 +204,7 @@ def spoken_payload(item, draft, name):
     from services.launch_research import background_facts
     if not any(f['quote'] == item.get('payload', '') and re.search(r'\bsatellites?\b', f['quote'], re.I)
                for f in background_facts(item)):
-        return ''
+        return payload_display(item)
     parts = name.split('、')
     matches = [re.fullmatch(r'([^\d、]+号)(\d{1,3})[—–至-](\d{1,3})星', part) for part in parts]
     if len(parts) > 1 and all(matches):
@@ -239,7 +215,7 @@ def spoken_payload(item, draft, name):
         if not ambiguous:
             from services.roundup_reading import chinese_number
             return '和'.join(bases) + '的' + ('两' if len(parts) == 2 else chinese_number(len(parts))) + '组卫星'
-    return name if re.fullmatch(r'[^。\n]+号\d+(?:[—–至-]\d+)?星(?:、[^。\n]+号\d+(?:[—–至-]\d+)?星)*', name) else ''
+    return name if re.fullmatch(r'[^。\n]+号\d+(?:[—–至-]\d+)?星(?:、[^。\n]+号\d+(?:[—–至-]\d+)?星)*', name) else payload_display(item)
 
 
 def narration_parts(draft, task_ids):
@@ -276,11 +252,12 @@ def narration_parts(draft, task_ids):
                 else:
                     text += '起飞，发射' + payload + destination + '。'
             else:
+                mission=event['name'] if event['name'].endswith('任务') else event['name']+'任务'
                 if actual:
-                    text += '起飞，执行' + event['name'] + '任务' + destination + '。'
+                    text += '起飞，执行' + mission + destination + '。'
                 else:
                     plan = '计划' if event['launch_result'] == '计划发射' else '原定'
-                    text = when + '，' + event['rocket'] + plan + ('从' + place if place else '') + '发射，执行' + event['name'] + '任务' + destination + '。'
+                    text = when + '，' + event['rocket'] + plan + ('从' + place if place else '') + '发射，执行' + mission + destination + '。'
                 if count:
                     text += ('搭载' if actual else '计划搭载') + chinese_number(count) + '颗卫星。'
             if not uniform_success and event['launch_result'] != '计划发射':
@@ -297,9 +274,13 @@ def narration_parts(draft, task_ids):
 
 
 def groups(draft):
+    from services.launch_display import resolve_launch
     included = {s['id'] for s in draft['selection'] if s['included']}
+    def order(item):
+        group=affiliation(item);when=parse_datetime(resolve_launch(item).get('net') or '')
+        return group['rank'],group['label'],when.timestamp() if when else float('inf')
     ordered = sorted((i for i in draft['snapshot']['items'] if i['ll2_id'] in included),
-                     key=lambda i: (affiliation(i)['rank'], affiliation(i)['label'], parse_datetime(i['net'])))
+                     key=order)
     grouped = {}
     for item in ordered:
         label = affiliation(item)['label']

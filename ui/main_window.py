@@ -5,11 +5,12 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication,QMainWindow,QMessageBox
 from config import app_version
-from i18n import set_language,tr
+from i18n import tr
 from resources import resource_path,workspace_path
 from services.feed_manager import load_feeds
 from services.settings import load_settings
 from ui.log_handler import QtLogHandler
+from ui.localize import set_ui_language
 from ui.theme import ThemeManager
 from ui.production_workspace import ProductionWorkspace
 
@@ -18,7 +19,7 @@ logger=logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.settings=load_settings();set_language(self.settings.language)
+        self.settings=load_settings();set_ui_language(self.settings.language)
         self.theme_manager=ThemeManager(QApplication.instance());self.theme_manager.apply(self.settings.theme_mode)
         self._closing=False
         self.log_handler=QtLogHandler();logging.getLogger().addHandler(self.log_handler);logging.getLogger().setLevel(logging.INFO)

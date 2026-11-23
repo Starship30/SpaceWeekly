@@ -155,6 +155,7 @@ class TranslatorPipelineTests(unittest.TestCase):
         self.settings.web_search_max_results = 5
         self.settings.retry_count = 0
         self.patches = [
+            patch('translator.translator.load_dictionary',return_value={}),
             patch("translator.translator.exact_dictionary_translation", return_value=""),
             patch("translator.translator.dictionary_replace", return_value=("", False)),
             patch("translator.translator.pending_translation", return_value=""),

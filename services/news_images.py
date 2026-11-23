@@ -79,7 +79,10 @@ def api_candidates(item,base):
 
 def load():
     path=resource_path('news-images','manifest.json')
-    data=json.loads(path.read_text(encoding='utf-8')) if path.exists() else dict(version=1,news={},images={})
+    # On Windows an open reader can block the worker's atomic replacement.
+    with LOCK:
+        raw=path.read_text(encoding='utf-8') if path.exists() else None
+    data=json.loads(raw) if raw is not None else dict(version=1,news={},images={})
     if (not isinstance(data,dict) or data.get('version')!=1 or not isinstance(data.get('news'),dict) or not isinstance(data.get('images'),dict)
             or any(not isinstance(v,dict) for v in data['news'].values()) or any(not isinstance(v,dict) for v in data['images'].values())):
         raise ValueError('新闻图片清单无效，未覆盖已有文件')
@@ -95,7 +98,7 @@ def _digest(path,size,mtime):return hashlib.sha256(Path(path).read_bytes()).hexd
 
 def record(article):
     with LOCK:
-        data=load();identifier=news_id(article.news.url)
+        data=load();identifier=news_id(article.news.key)
         row=data['news'].setdefault(identifier,dict(id=identifier,candidates=[],assets=[],selected=None,status='pending'))
         row.update(title=article.news.title,url=article.news.url)
         row['candidates']=candidates(row['candidates']+article.news.images,article.news.url);save(data)
@@ -111,13 +114,49 @@ def set_enabled(article, enabled):
 def selected(identifier, *, include_disabled=False):
     data=load();row=data['news'].get(identifier,{})
     if not include_disabled and not row.get('use_image',True):return None
-    value=data['images'].get(row.get('selected'))
+    return _resolve(data['images'].get(row.get('selected')))
+
+
+def _resolve(value):
     if not value:return None
     value=deepcopy(value);path=resource_path(value['path']) if '/' not in value['path'] else resource_path(*value['path'].split('/'))
     if path.resolve().parent!=resource_path('news-images').resolve() or path.is_symlink() or not path.is_file():return None
     stamp=path.stat()
     if _digest(str(path),stamp.st_size,stamp.st_mtime_ns)!=value['sha256']:return None
     value['absolute_path']=str(path.resolve());return value
+
+
+def slideshow(identifier):
+    data=load();row=data['news'].get(identifier,{})
+    if not row.get('use_image', True):return []
+    result=[]
+    for sha in row.get('slideshow', []):
+        asset=_resolve(data['images'].get(sha))
+        if asset is None:raise ValueError('轮播图片已缺失或被修改，请重新选择本条图片')
+        result.append(dict(path=asset['absolute_path'],sha256=sha))
+    return result
+
+
+def set_slideshow(article, keys):
+    with LOCK:
+        row=record(article);data=load()
+        for sha in keys:
+            if sha not in row['assets'] or _resolve(data['images'].get(sha)) is None:
+                raise ValueError('轮播图片不可用，请重新导入')
+        data['news'][row['id']].update(slideshow=list(dict.fromkeys(keys)), use_image=bool(keys))
+        if keys:data['news'][row['id']]['selected']=keys[0]
+        save(data)
+
+
+def acquire_slideshow(article, files, token):
+    keys=[]
+    for path in files:
+        token.check()
+        value=acquire(article,token,local=path,select=False)
+        if value is None:raise ValueError('无法导入图片：'+Path(path).name)
+        keys.append(value['sha256'])
+    token.check()
+    set_slideshow(article,keys)
 
 
 def inspect(path):
@@ -135,28 +174,33 @@ def inspect(path):
     return dict(format=fmt,width=width,height=height,size=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest())
 
 
-def commit(article,temporary,origin,token):
+def commit(article,temporary,origin,token,*,select=True):
     info=inspect(temporary);token.check();relative='news-images/'+info['sha256']+FORMATS[info['format']]
     target=resource_path(*relative.split('/'))
     with LOCK:
-        record(article);data=load();row=data['news'][news_id(article.news.url)]
+        record(article);data=load();row=data['news'][news_id(article.news.key)]
         if target.exists() and hashlib.sha256(target.read_bytes()).hexdigest()!=info['sha256']:
             raise ValueError('同名正式图片已被修改，已保留；请检查图片文件夹或导入新图片')
         if not target.exists():temporary.replace(target)
         value=data['images'].setdefault(info['sha256'],dict(info,path=relative,origins=[]))
         if origin not in value['origins']:value['origins'].append(origin)
         if info['sha256'] not in row['assets']:row['assets'].append(info['sha256'])
-        row.update(selected=info['sha256'],status='ready',error=None);save(data)
-    return selected(news_id(article.news.url),include_disabled=True)
+        if select:
+            row['selected']=info['sha256']
+            row.pop('slideshow',None)
+        row.update(status='ready',error=None);save(data)
+    return _resolve(value)
 
 
-def acquire(article,token,*,candidate_url=None,local=None,progress=None):
+def acquire(article,token,*,candidate_url=None,local=None,progress=None,select=True):
     row=record(article);identifier=row['id']
     if not candidate_url and not local and row['status']=='ready' and selected(identifier,include_disabled=True):
         return selected(identifier,include_disabled=True)
     if not candidate_url and row.get('last_attempt') and row['status'] in ('failed','cancelled','downloading'):
         candidate_url=row['last_attempt']
     if not row['candidates'] and not local:
+        if not article.news.url:
+            return failed(identifier,'missing','本条暂无原文链接，可添加本地图片')
         # At most one bounded original-page fetch, never JavaScript or login bypass.
         directory=resource_path('cache','news_http');directory.mkdir(parents=True,exist_ok=True)
         html=directory/(hashlib.sha256(article.news.url.encode()).hexdigest()+'.html')
@@ -175,7 +219,7 @@ def acquire(article,token,*,candidate_url=None,local=None,progress=None):
     choices=[c for c in row['candidates'] if not candidate_url or c['url']==candidate_url]
     if not local and not choices:return failed(identifier,'missing','未找到条目配图，可导入本地图片')
     # One preferred image per attempt; retry/switch is explicit in the UI.
-    choice=dict(url=None,via='local_import',credit=None,license=None) if local else choices[0]
+    choice=dict(url=None,via='local_import',name=Path(local).name,credit=None,license=None) if local else choices[0]
     with LOCK:
         data=load();data['news'][identifier].update(status='downloading',error=None,last_attempt=choice['url']);save(data)
     temporary=resource_path('cache','news_image_downloads',uuid4().hex+'.part');temporary.parent.mkdir(parents=True,exist_ok=True)
@@ -185,7 +229,7 @@ def acquire(article,token,*,candidate_url=None,local=None,progress=None):
             with source.open('rb') as src,temporary.open('wb') as dest:
                 while block:=src.read(65536):token.check();dest.write(block)
         else:download_to(choice['url'],temporary,token,progress=progress)
-        return commit(article,temporary,choice,token)
+        return commit(article,temporary,choice,token,select=select)
     except TaskCancelledError:
         failed(identifier,'cancelled','已取消，已有正式图片保留');raise
     except (OSError,ValueError,RuntimeError) as error:return failed(identifier,'failed',str(error))

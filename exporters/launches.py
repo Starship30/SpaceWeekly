@@ -83,11 +83,18 @@ def launch_fields(launch: Article) -> dict[str, str]:
         fields.update(context.get('display', {}))
         values = confirmed_values(context.get('research', {}), context)
         names = display_names(context)
-        fields.update(rocket=names['rocket'], provider=names['provider'], pad=names['pad_name'] or names['site'], orbit=names['orbit'])
+        from services.launch_display import overrides
+        from services.roundup_style import rocket_recovery
+        fields.update(time=names['net'],rocket=names['rocket'],provider=names['provider'],pad=names['location'],orbit=names['orbit'],
+                      status=launch_status_text(dict(id=names['status_id'],name=names['status_name'])),recovery=rocket_recovery(context))
         fields['mission_name'] = names['name']
         fields['name'] = fields['rocket'] + ' | ' + names['name']
-        if values.get('summary'):
+        if 'summary' in overrides(context):
+            fields['mission_description']=names['summary']
+        elif values.get('summary'):
             fields['mission_description'] = values['summary']
+        elif names.get('description_translation'):
+            fields['mission_description'] = 'LL2 说明参考译文（AI，未独立核对）：'+names['description_translation']
     fields["status"] = launch_status_text(fields["status"])
     if not any(state != "unknown" for state in recovery_states(fields["recovery"])):
         fields["recovery"] = ""

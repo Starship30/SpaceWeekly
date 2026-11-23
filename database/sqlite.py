@@ -5,7 +5,7 @@ from datetime import datetime
 
 from config import DATABASE_PATH
 from models.article import Article
-from models.news import News
+from models.news import News,is_manual_id
 
 
 def initialize_database() -> None:
@@ -27,8 +27,11 @@ def initialize_database() -> None:
                 )
                 """
             )
-            if 'images_json' not in {row[1] for row in connection.execute('PRAGMA table_info(articles)')}:
+            columns={row[1] for row in connection.execute('PRAGMA table_info(articles)')}
+            if 'images_json' not in columns:
                 connection.execute("ALTER TABLE articles ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]'")
+            if 'manual_source_url' not in columns:
+                connection.execute("ALTER TABLE articles ADD COLUMN manual_source_url TEXT NOT NULL DEFAULT ''")
 
 
 def save_article(article: Article) -> bool:
@@ -46,29 +49,31 @@ def save_article(article: Article) -> bool:
                     body,
                     parser,
                     created_at,
-                    images_json
+                    images_json,
+                    manual_source_url
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article.news.source,
                     article.news.title,
                     article.news.published,
                     article.news.summary,
-                    article.news.url,
+                    article.news.key,
                     article.body,
                     article.parser,
                     _created_at(),
                     json.dumps(article.news.images,ensure_ascii=False),
+                    article.news.url if article.news.manual_id else '',
                 ),
             )
 
             inserted=cursor.rowcount==1
             if not inserted and article.news.images:
                 from services.news_images import candidates
-                old=connection.execute('SELECT images_json FROM articles WHERE url=?',(article.news.url,)).fetchone()
+                old=connection.execute('SELECT images_json FROM articles WHERE url=?',(article.news.key,)).fetchone()
                 merged=candidates(json.loads(old[0])+article.news.images,article.news.url)
-                connection.execute('UPDATE articles SET images_json=? WHERE url=?',(json.dumps(merged,ensure_ascii=False),article.news.url))
+                connection.execute('UPDATE articles SET images_json=? WHERE url=?',(json.dumps(merged,ensure_ascii=False),article.news.key))
             return inserted
 
 
@@ -85,7 +90,8 @@ def get_articles() -> list[Article]:
                 url,
                 body,
                 parser,
-                images_json
+                images_json,
+                manual_source_url
             FROM articles
             ORDER BY published DESC, id DESC
             """
@@ -107,7 +113,8 @@ def get_articles_by_date(start_date: str, end_date: str) -> list[Article]:
                 url,
                 body,
                 parser,
-                images_json
+                images_json,
+                manual_source_url
             FROM articles
             WHERE date(created_at) BETWEEN date(?) AND date(?)
             ORDER BY published DESC, id DESC
@@ -129,13 +136,15 @@ def _created_at() -> str:
 
 
 def _row_to_article(row: tuple[str, str, str, str, str, str, str]) -> Article:
+    manual=is_manual_id(row[4])
     news = News(
         source=row[0],
         title=row[1],
         published=row[2],
         summary=row[3],
-        url=row[4],
+        url=row[8] if manual else row[4],
         images=json.loads(row[7]) if len(row)>7 else [],
+        manual_id=row[4] if manual else '',
     )
 
     return Article(

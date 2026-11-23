@@ -15,6 +15,9 @@ def validate_session(value):
     from tools.video_cards import validate_snapshot
     if not isinstance(value,dict) or value.get('version')!=1:
         raise ValueError('Invalid production session version')
+    if 'episode' in value:
+        from services.episode import validate_episode
+        validate_episode(value['episode'])
     draft=value.get('roundup',{})
     if not isinstance(draft,dict) or any(k not in draft for k in ('start','end','snapshot','selection','segments','tts','pronunciations')):
         raise ValueError('Incomplete launch draft')
@@ -33,6 +36,8 @@ def validate_session(value):
     if not isinstance(draft['snapshot'].get('items'),list) or not isinstance(draft['selection'],list) or not isinstance(draft['segments'],list):
         raise ValueError('Invalid launch snapshot/selection')
     identifiers={i['ll2_id'] for i in draft['snapshot']['items']}
+    from services.launch_display import overrides
+    for item in draft['snapshot']['items']:overrides(item)
     if any(not isinstance(i.get(k),str) for i in draft['snapshot']['items'] for k in ('ll2_id','english_name','net')):
         raise ValueError('Invalid launch identity')
     if any(s['id'] not in identifiers or not isinstance(s['included'],bool) for s in draft['selection']):
@@ -47,9 +52,12 @@ def validate_session(value):
     restored=restore_news(value.get('news',{}).get('bundle'))
     selected=value.get('news',{}).get('script_included')
     if selected is not None:
-        urls={a.news.url for a in restored['articles']} if restored else set()
+        urls={a.news.key for a in restored['articles']} if restored else set()
         if not isinstance(selected,list) or any(not isinstance(url,str) for url in selected) or not set(selected)<=urls:
             raise ValueError('新闻稿件选择无效')
+    preferences=value.get('news',{}).get('script_preferences',{})
+    if not isinstance(preferences,dict) or any(not isinstance(key,str) or type(checked) is not bool for key,checked in preferences.items()):
+        raise ValueError('新闻人工选择无效')
     from services.news_voice import validate as validate_voice
     voices=value.get('news',{}).get('voices',{})
     if not isinstance(voices,dict):raise ValueError('新闻配音草稿列表无效')
@@ -62,6 +70,13 @@ def validate_session(value):
         raise ValueError('新闻口播失败记录无效')
     if restored and any(not isinstance(getattr(a.news,key),str) for a in restored['articles'] for key in ('title','summary','source','published','url')):
         raise ValueError('Invalid news fields')
+    if restored:
+        from models.news import is_manual_id,is_news_url
+        for article in restored['source_articles']+restored['articles']:
+            news=article.news
+            if news.manual_id and (not is_manual_id(news.manual_id) or not news.title.strip() or not article.body.strip()
+                                   or news.url and not is_news_url(news.url)):
+                raise ValueError('人工新闻身份或必填内容无效')
     cards=value.get('cards',{}).get('data')
     if cards:validate_snapshot(deepcopy(cards))
     base=value.get('cards',{}).get('base')
@@ -77,7 +92,8 @@ def validate_session(value):
     if any(k not in defaults or type(v) is not type(defaults[k]) for k,v in value.get('daily',{}).items()):
         raise ValueError('Invalid edition settings')
     for key,item in value.get('view',{}).items():
-        if not isinstance(item,str if key in ('mode','news_article_id','launch_detail_id') else int):raise ValueError('Invalid saved view')
+        text_key=key in ('mode','news_article_id','launch_detail_id') or key.startswith('news_') and key.endswith(('_filter','_focus'))
+        if not isinstance(item,str if text_key else int):raise ValueError('Invalid saved view')
     staged=value.get('roundup_controls',{})
     if not isinstance(staged,dict) or any(not isinstance(v,(int,float) if k in ('timeout','pause') else str) for k,v in staged.items()):
         raise ValueError('Invalid pending voice controls')
@@ -98,13 +114,15 @@ def validate_session(value):
 def serialize_news(bundle):
     if not bundle:
         return None
-    return dict(articles=[asdict(a) for a in bundle['articles']],
-                source_articles=[asdict(a) for a in bundle.get('source_articles',bundle['articles'])],source_scope=bundle.get('source_scope'),
+    value=dict(articles=[asdict(a) for a in bundle['articles']],
+                source_articles=[asdict(a) for a in bundle.get('source_articles',bundle['articles'])],source_scope=deepcopy(bundle.get('source_scope')),
                 launch_articles=[asdict(a) for a in bundle.get('launch_articles', [])],
-                launch_video_items=bundle.get('launch_video_items', []),
+                launch_video_items=deepcopy(bundle.get('launch_video_items', [])),
                 summaries={k: asdict(v) for k, v in bundle.get('summaries', {}).items()},
                 assessments={k: asdict(v) for k, v in bundle.get('assessments', {}).items()},
                 context=asdict(bundle['context']) if bundle.get('context') else None)
+    if bundle.get('news_events'):value['news_events']=deepcopy(bundle['news_events'])
+    return value
 
 
 def restore_news(value):
@@ -113,25 +131,40 @@ def restore_news(value):
     def articles(rows):
         return [Article(News(**r['news']), r['body'], r['parser'], r.get('launch_data'),r.get('evidence',[])) for r in rows]
     sources=articles(value.get('source_articles',value['articles']))
-    by_url={a.news.url:a for a in sources}
-    return dict(articles=[by_url.get(a.news.url,a) for a in articles(value['articles'])], launch_articles=articles(value.get('launch_articles', [])),
+    by_url={a.news.key:a for a in sources}
+    events=value.get('news_events',{})
+    if not isinstance(events,dict) or any(not isinstance(key,str) or not isinstance(row,dict)
+            or row.get('phase') not in ('preview','live','result','analysis','other','pending')
+            or not isinstance(row.get('related'),list) or any(not isinstance(link,str) for link in row['related'])
+            or not isinstance(row.get('evidence'),list) or any(not isinstance(source,dict) for source in row['evidence'])
+            or not isinstance(row.get('conflicts',{}),dict)
+            or any(not isinstance(label,str) or not isinstance(details,str) for label,details in row.get('conflicts',{}).items())
+            or not isinstance(row.get('merged_checks',{}),dict)
+            or any(source not in row['related'] or type(checked) is not bool for source,checked in row.get('merged_checks',{}).items())
+            or not isinstance(row.get('missing_sources',[]),list)
+            or any(source not in row['related'] for source in row.get('missing_sources',[]))
+            for key,row in events.items()):raise ValueError('新闻相关来源记录无效')
+    result=dict(articles=[by_url.get(a.news.key,a) for a in articles(value['articles'])], launch_articles=articles(value.get('launch_articles', [])),
                 source_articles=sources,source_scope=value.get('source_scope'),
                 launch_video_items=value.get('launch_video_items', []),
                 summaries={k: AISummary(**v) for k, v in value.get('summaries', {}).items()},
                 assessments={k: NewsAssessment(**v) for k, v in value.get('assessments', {}).items()},
                 context=ExportContext(**value['context']) if value.get('context') else None)
+    if events:result['news_events']=events
+    return result
 
 
-def prepare_news(feeds, token, *, prepared=None, collect_only=False, narration_skip=None):
+def prepare_news(feeds, token, *, prepared=None, collect_only=False, narration_skip=None, progress=None):
     from services.weekly_report import generate_weekly
     result = []
     generate_weekly(feeds=feeds, export_sqlite=False, export_markdown_enabled=False,
                    export_word_enabled=False, cancel_token=token, prepared=prepared,
                    collect_only=collect_only, defer_exports=True, result_callback=result.append,
-                   narration_skip=narration_skip)
+                   narration_skip=narration_skip,progress=progress)
     if narration_skip is None:
         token.check()
     if not collect_only and not token.is_cancelled:
+        if progress:progress('正在整理新闻画面素材')
         from services.news_images import collect
         from services.cancellation import TaskCancelledError
         try:collect(result[0]['articles'],token)

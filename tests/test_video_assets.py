@@ -96,28 +96,34 @@ class LaunchExportTests(unittest.TestCase):
         translations = {'Falcon 9': '猎鹰9号', 'Fictional satellite mission': '虚构卫星任务',
                         'Low Earth Orbit': '近地轨道', 'Fictional launch site': '虚构发射场',
                         'A fictional weather satellite.': '一颗虚构的气象卫星。'}
-        settings = replace(default_settings(), export_premiere=True)
+        settings = replace(default_settings(), export_premiere=True,deepseek_api_key='fixture-only',web_search_enabled=False)
         ai = Mock(side_effect=lambda text, kind, *_: '气象卫星' if kind == 'payload' else translations[text])
         translator = Translator(settings=settings, mode='hybrid', ai_callable=ai, web_search=False)
         def word(*args, **kwargs):
             self.assertIsNone(kwargs['launch_term_translator'])
+        def fields(prompt,*_args,**_kw):
+            requested=json.loads(prompt.split('\n')[-1])['fields']
+            return dict(translations={k:translations[v['original']] for k,v in requested.items()})
         with patch('translator.translator.exact_dictionary_translation', return_value=''), \
              patch('translator.translator.dictionary_replace', return_value=('', False)), \
              patch('translator.translator.get_cached_translation', return_value=None), \
              patch('translator.translator.pending_translation', return_value=''), \
              patch('translator.translator.add_pending_term'), patch('translator.translator.cache_translation'), \
              patch('services.weekly_report._launch_term_translator', return_value=translator) as factory, \
+             patch('services.launch_research.request_json',side_effect=fields) as client, \
              patch('services.weekly_report.export_word', side_effect=word), \
              patch('services.weekly_report.export_premiere') as export:
             _export_reports([], {}, {}, _export_context(settings, {}), [], settings,
                             False, True, CancellationToken(), launch_video_items=rows)
         factory.assert_called_once()
-        ai.assert_not_called()  # Context-aware launch names require event evidence, never isolated guessing.
+        client.assert_called_once()
+        ai.assert_not_called()  # Name references use full launch context, not the legacy isolated term call.
         translated = export.call_args.kwargs['launches'][0]
-        self.assertEqual((translated['title'], translated['summary']), ('猎鹰9号', 'Fictional satellite mission'))
-        self.assertEqual(translated['launch']['payload'], raw['mission']['description'])
+        self.assertEqual((translated['title'], translated['summary']), ('猎鹰9号', '虚构卫星任务'))
+        self.assertIn('参考译文',translated['display_record']['name_source'])
+        self.assertEqual(translated['launch']['payload'], '')
         self.assertEqual(translated['launch']['orbit'], '近地轨道')
-        self.assertEqual(translated['launch']['site'], 'Fictional launch site')
+        self.assertEqual(translated['launch']['site'], '虚构发射场')
         self.assertEqual((translated['id'], translated['published'], translated['url']),
                          (rows[0]['id'], rows[0]['published'], rows[0]['url']))
         self.assertEqual(rows, original)

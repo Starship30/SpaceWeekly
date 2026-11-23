@@ -353,8 +353,8 @@ class MaterialsTests(unittest.TestCase):
             self.assertEqual(dialog.tasks.columnCount(), 14)
             self.assertIn('背景不足', dialog.tasks.item(0,8).text())
             labels = [b.text() for b in dialog.findChildren(QPushButton)]
-            self.assertIn('补充缺失资料（联网）', labels)
-            self.assertIn('重新核对选中任务（联网）', labels)
+            self.assertIn('补全中文资料', labels)
+            self.assertIn('重新补全本任务', labels)
             prepare.assert_not_called()
 
 

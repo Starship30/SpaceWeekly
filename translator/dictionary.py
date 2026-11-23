@@ -36,6 +36,8 @@ DEFAULT_DICTIONARY = {
     },
     "Launch Successful": {"translation": "发射成功", "type": "status"},
     "Long March 4B": {"translation": "长征四号乙", "type": "rocket", "source_url": _CASC_NAMES},
+    "Long March 2C": {"translation":"长征二号丙","type":"rocket","source_url":"https://www.cnsa.gov.cn/n6758824/n6759008/n6759011/c6794035/content.html"},
+    "Long March 2D": {"translation":"长征二号丁","type":"rocket","source_url":"https://microsate.cas.cn/xwzx/yw/202611/t20261112_8308339.html"},
     "Long March 6A": {"translation": "长征六号改", "type": "rocket", "source_url": _CASC_NAMES},
     "Long March 8A": {"translation": "长征八号甲", "type": "rocket", "source_url": _CASC_NAMES},
     "Yaogan 50-03": {"translation": "遥感五十号03星", "type": "mission", "source_url": _CASC_NAMES},
@@ -46,6 +48,12 @@ DEFAULT_DICTIONARY = {
         "translation": "酒泉卫星发射中心", "type": "location", "source_url": _CASC_NAMES},
     "Taiyuan Satellite Launch Center, People's Republic of China": {
         "translation": "太原卫星发射中心", "type": "location", "source_url": _CASC_NAMES},
+    "Xichang Satellite Launch Center, People's Republic of China": {
+        "translation":"西昌卫星发射中心","type":"location","source_url":"https://calt.spacechina.com/n482/n739/index.html"},
+    "Plesetsk Cosmodrome, Russian Federation": {
+        "translation":"普列谢茨克航天发射场","type":"location","source_url":"https://www.cmse.gov.cn/art/2008/9/17/art_311_3595.html"},
+    "Russian Space Forces": {
+        "translation":"俄罗斯航天兵","type":"organization","source_url":"https://www.cnsa.gov.cn/n6758823/n6759010/c6777054/content.html"},
     "Wenchang Space Launch Site, People's Republic of China": {
         "translation": "文昌航天发射场", "type": "location", "source_url": _CASC_NAMES},
     "Vandenberg SFB, CA, USA": {"translation": "范登堡太空军基地", "type": "location",

@@ -44,7 +44,7 @@ class NewsVoiceTests(unittest.TestCase):
         news.synthesize(self.draft,self.provider,None,self.token);first=deepcopy(segment['audio'])
         news.synthesize(self.draft,self.provider,None,self.token);self.assertEqual(self.provider.synthesize.call_count,1)
         self.draft['screen_item']['title']='只改画面标题';self.assertEqual(current_audio(self.draft,segment)['key'],first['key'])
-        self.assertIn('news_audio',first['path']);self.assertTrue((self.root/'output/news-drafts'/f"{self.draft['id']}.json").is_file())
+        self.assertIn('news_audio',first['path']);self.assertTrue((self.root/'cache/news-drafts'/f"{self.draft['id']}.json").is_file())
         from PIL import Image
         from services.roundup_audio import file_hash
         picture=self.root/'本地 配图.png';Image.new('RGB',(96,64),'red').save(picture)
@@ -171,6 +171,21 @@ class NewsVoiceTests(unittest.TestCase):
                 request_json('诊断输入 fixture-secret',config,module_name='news_narration',max_attempts=1)
         log=error.exception.diagnostic_path.read_text(encoding='utf-8')
         self.assertIn('length',log);self.assertNotIn('fixture-secret',log)
+
+    def test_swift_real_failed_responses_accept_dated_english_month(self):
+        row=json.loads((Path(__file__).parent/'fixtures/news_narration_swift_20261107.json').read_text(encoding='utf-8'))
+        source=row['source']
+        article=Article(News('SpacePolicyOnline',source['title'],source['reported_at'],source['source_text'],source['source_url']),'','rss_summary')
+        for response in row['responses']:
+            with self.subTest(response=response),patch('ai.providers.complete_with_metadata',return_value=dict(content=json.dumps(response),finish_reason='stop')) as complete:
+                self.assertEqual(news.propose(article,default_settings(),self.token)['spoken'],response['spoken'])
+                complete.assert_called_once()
+        unsupported=dict(row['responses'][0],spoken=row['responses'][0]['spoken'].replace('9月','10月'))
+        with patch('ai.providers.complete_with_metadata',return_value=dict(content=json.dumps(unsupported),finish_reason='stop')):
+            with self.assertRaisesRegex(AIResponseValidationError,'没有支持的数字或编号：10'):
+                news.propose(article,default_settings(),self.token)
+        self.assertEqual(news._dated_months('It may launch soon.'),'')
+        self.assertEqual(news._dated_months('September 2025, 4 Nov 2026, Oct. 23, 2026'),'9 10 11')
 
     def test_cancelled_batch_preserves_finished_proposals(self):
         settings=replace(default_settings(),deepseek_api_key='fixture',deepseek_base_url='https://example.invalid',deepseek_model='fixture')

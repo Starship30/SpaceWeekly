@@ -14,7 +14,7 @@ def app_version() -> str:
     if getattr(sys,'frozen',False):
         manifest=bundled_resource_path('release.json')
         if manifest.exists():return json.loads(manifest.read_text(encoding='utf-8'))['version']
-    return "3.1.3"
+    return "3.1.4"
 
 
 APP_EDITION = "AI Workflow Edition"

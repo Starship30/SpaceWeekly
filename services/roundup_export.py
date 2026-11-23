@@ -50,12 +50,13 @@ def copy_prepared_intro(source,directory,cancel_check):
     return final.name
 
 
-def export_complete_video(drafts, output_dir, token):
+def export_complete_video(drafts, output_dir, token, *, on_frame=None,
+                          episode=None,intro=None,intro_key=None,mix_edition=None):
     from bisect import bisect_right
     from tempfile import TemporaryDirectory
     from services import news_voice
     from services.roundup_audio import content_namespace
-    from tools import roundup_visuals, video_cards
+    from tools import episode_visuals, news_visuals, roundup_visuals, video_cards
 
     ffmpeg, ffprobe = shutil.which('ffmpeg'), shutil.which('ffprobe')
     if not ffmpeg or not ffprobe:
@@ -66,24 +67,49 @@ def export_complete_video(drafts, output_dir, token):
     for draft in drafts:
         token.check()
         is_news = content_namespace(draft)=='news'
-        (news_voice.validate if is_news else validate_draft)(draft)
+        if draft.get('content_type')!='chapter':
+            (news_voice.validate if is_news else validate_draft)(draft)
         schedule = build_timeline(draft)
         if not schedule['all_audio_current']:
-            title = draft['screen_item']['title'] if is_news else '发射综述'
+            title = draft.get('screen_item',{}).get('title','发射综述')
             raise ValueError(f'{title}缺少当前配音，请先生成或更新配音')
         schedules.append(schedule)
-    clock = join_timelines(schedules)
-    audio = timeline_audio(drafts[0],clock,token)
+    lead=None;lead_samples=0
+    if intro:
+        from services.episode_video import FPS as episode_fps, prepared_intro
+        lead=prepared_intro(intro,intro_key or file_hash(intro),ffmpeg,ffprobe,token)
+        lead_samples=lead[1]*schedules[0]['sample_rate']//episode_fps
+    clock = join_timelines(schedules,leading_samples=lead_samples)
+    audio = timeline_audio(drafts[0],clock,token,leading_audio=lead[2] if lead else None)
     sections, starts = [], []
-    clock['sections']=[]
-    offset = 0
+    titles = [draft['screen_item']['title'] for draft in drafts if content_namespace(draft)=='news']
+    launch=next((d for d in drafts if 'selection' in d and d.get('content_type')!='chapter'),None)
+    stats=statistics(launch) if launch else None
+    launch_count=stats['total'] if stats else 0
+    news_index = 0
+    clock['sections']=[dict(id='intro',start_sample=0,duration_samples=lead_samples)] if lead else []
+    offset = lead_samples
     for draft, schedule in zip(drafts,schedules):
         clock['sections'].append(dict(id=draft['id'],start_sample=offset,duration_samples=schedule['total_samples']))
-        if content_namespace(draft)=='news':
-            starts.append(offset);sections.append((news_voice, (draft,), schedule))
+        if draft.get('content_type')=='chapter':
+            starts.append(offset)
+            sections.append((episode_visuals,(draft,),dict(launch_count=launch_count,news_count=len(titles),
+                launch_stats=(stats['actual'],stats['results']['success']) if stats else None)))
+        elif content_namespace(draft)=='news':
+            starts.append(offset)
+            sections.append((news_visuals, (draft, titles, news_index),
+                             dict(timeline=schedule,launch_count=launch_count,entering=not news_index)))
+            news_index += 1
         else:
+            shot_table=roundup_visuals.shot_plan(draft,schedule)
             for segment, row in zip(draft['segments'],schedule['segments']):
-                starts.append(offset+row['start_sample']);sections.append((roundup_visuals, (draft,segment), schedule))
+                starts.append(offset+row['start_sample'])
+                if segment['id']==draft.get('transition_id'):
+                    sections.append((episode_visuals,(draft,),dict(news_count=len(titles),launch_count=launch_count)))
+                    clock['sections'].append(dict(id='news-transition',start_sample=starts[-1],
+                                                  duration_samples=row['end_sample']-row['start_sample']))
+                else:sections.append((roundup_visuals, (draft, segment), dict(timeline=schedule,shot_table=shot_table,
+                    entering=bool(episode) and not row['start_sample'])))
         offset += schedule['total_samples']
     active, prepared = -1, None
     rate, fps = clock['sample_rate'], video_cards.FPS
@@ -91,9 +117,10 @@ def export_complete_video(drafts, output_dir, token):
         nonlocal active, prepared
         sample = round(seconds*rate)
         index = bisect_right(starts,sample)-1
-        module,args,schedule = sections[index]
+        module,args,kwargs = sections[index]
         if index!=active:
-            prepared = module.prepare_frames(*args,timeline=schedule)
+            if active>=0 and sections[active][0] is news_visuals:news_visuals.close_frames(prepared)
+            prepared = module.prepare_frames(*args,**kwargs)
             active = index
         return module.frame_at(prepared,(sample-starts[index])/rate)
     frames = (clock['total_samples']*fps+rate-1)//rate
@@ -103,9 +130,9 @@ def export_complete_video(drafts, output_dir, token):
     segments=(segment for draft in drafts for segment in draft['segments'])
     for row,segment in zip(clock['segments'],segments):
         timed=row['units'] or [dict(global_start_seconds=row['start_seconds'],
-            global_end_seconds=row['speech_end_seconds'],screen=narration_text(segment))]
+            global_end_seconds=row['speech_end_seconds'],screen=segment.get('caption',narration_text(segment)))]
         for unit in timed:
-            text=' '.join((unit['screen'].strip() or unit.get('text','')).split())
+            text=' '.join((unit.get('screen',unit.get('text','')).strip()).split())
             start,end=_srt_time(unit['global_start_seconds']),_srt_time(unit['global_end_seconds'])
             if text and start!=end:cues.append(f'{len(cues)+1}\n{start} --> {end}\n{text}')
     with TemporaryDirectory(dir=audio.parent) as folder:
@@ -113,8 +140,18 @@ def export_complete_video(drafts, output_dir, token):
         if cues:
             subtitles=Path(folder)/'captions.srt'
             subtitles.write_text('\n\n'.join(cues)+'\n',encoding='utf-8')
-        return video_cards.encode_card({},Path(output_dir),frames,ffmpeg,ffprobe,token.check,
-                                       frame_provider=frame_at,audio=audio,subtitles=subtitles)
+        if episode:
+            from services.episode_video import mux_program
+            return mux_program(sections,starts,clock,audio,subtitles,Path(folder),output_dir,episode,lead,
+                               ffmpeg,ffprobe,token,on_frame)
+        try:
+            if mix_edition:
+                from services.episode_music import mix_timeline
+                audio=mix_timeline(audio,mix_edition,clock,Path(folder),ffmpeg,token)
+            return video_cards.encode_card({},Path(output_dir),frames,ffmpeg,ffprobe,token.check,
+                                           on_frame=on_frame,frame_provider=frame_at,audio=audio,subtitles=subtitles)
+        finally:
+            if active>=0 and sections[active][0] is news_visuals:news_visuals.close_frames(prepared)
 
 
 def export_package(draft, output_dir, token, *, visuals=True, renderer=None,intro=None):
@@ -218,7 +255,7 @@ def export_package(draft, output_dir, token, *, visuals=True, renderer=None,intr
             write_json(directory / 'manifest.json', manifest)
             if manifest['all_audio_current']:
                 cues=clock['units'] or [dict(global_start_seconds=cursor,global_end_seconds=cursor+duration,
-                    screen=narration_text(segment))]
+                    screen=segment.get('caption',narration_text(segment)))]
                 for cue in cues:
                     number=len(srt)//4+1
                     srt += [str(number), _srt_time(cue['global_start_seconds'])+' --> '+_srt_time(cue['global_end_seconds']),cue['screen'], '']

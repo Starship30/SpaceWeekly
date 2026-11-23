@@ -123,6 +123,21 @@ class LaunchResearchTests(unittest.TestCase):
         self.assertEqual(record['evidence_status'], 'pending')
         self.assertEqual(research.confirmed_values(record, self.context), {})
 
+    def test_domestic_announcement_without_clock_label_matches_site_not_pad_and_legal_suffix(self):
+        context=dict(self.context,site_name='Haiyang',site='Launch Area 9',site_country='China',provider='Test Launch Corp')
+        entries=dictionary.load_dictionary();entries['Test Launch Corp']=dict(translation='中国测试航天集团公司',type='organization')
+        text=EVENT.replace('北京时间','').replace('Orienspace','测试航天集团有限公司').replace('Xiguang-4 01（'+NAME+'）',NAME)
+        page=dict(source(),source_id=0,text=text+SUMMARY)
+        candidate=match(page)
+        with patch.object(research,'load_dictionary',return_value=entries):
+            accepted=research._validated_matches(dict(matches=[candidate]),[page],context)
+            self.assertEqual(accepted[0]['chinese_name'],NAME)
+            self.assertIn('LL2',accepted[0]['time_basis'])
+            for changed in (dict(context,net='2025-10-10T20:49:00Z'),dict(context,net='2026-10-10T20:40:00Z'),dict(context,site_name='Other site')):
+                self.assertEqual(research._validated_matches(dict(matches=[candidate]),[page],changed),[])
+            local=dict(page,text=page['text'].replace('2026年','当地时间2026年'))
+            self.assertEqual(research._validated_matches(dict(matches=[match(local)]),[local],context),[])
+
     def test_another_formal_name_is_not_a_hardcoded_xiguang_exception(self):
         self.context['english_name'] = 'Lumin-12 03'
         page = dict(source(), source_id=0, text=EVENT.replace('Xiguang-4 01', 'Lumin-12 03').replace(NAME, '灵光十二号03星'))

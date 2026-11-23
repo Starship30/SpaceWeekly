@@ -13,10 +13,10 @@ from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWizard
 from PySide6.QtWidgets import QWizardPage
 
-from i18n import set_language
 from i18n import tr
 from services.workspace import default_workspace
 from services.workspace import initialize_workspace
+from ui.localize import set_ui_language
 
 
 class FirstRunWizard(QWizard):
@@ -29,7 +29,7 @@ class FirstRunWizard(QWizard):
         self.setMinimumSize(680,460)
         self.workspace: Path | None = None
         self.language = _detect_system_language()
-        set_language(self.language)
+        set_ui_language(self.language)
         self.language_page = _LanguagePage(self)
         self.welcome_page = _WelcomePage()
         self.workspace_page = _WorkspacePage(self)
@@ -44,7 +44,7 @@ class FirstRunWizard(QWizard):
 
     def set_wizard_language(self, language: str) -> None:
         self.language = language
-        set_language(language)
+        set_ui_language(language)
         self.retranslate()
 
     def reject(self):

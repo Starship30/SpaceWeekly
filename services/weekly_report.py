@@ -43,7 +43,7 @@ from services.settings import AppSettings
 from services.settings import apply_settings
 from services.settings import load_settings
 from translator.translator import Translator
-from utils.time import parse_datetime
+from utils.time import _timezone, parse_datetime
 from utils.text import clean_ai_text, mission_display_name
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ def generate_weekly(
     export_word_enabled: bool | None = None,
     cancel_token: CancellationToken | None = None,
     *, prepared: dict | None = None, collect_only: bool = False,
-    defer_exports: bool = False, result_callback=None, narration_skip=None,
+    defer_exports: bool = False, result_callback=None, narration_skip=None, progress=None,
 ) -> list[Article]:
     """Generate a report with separate AI screening and content stages."""
 
@@ -92,6 +92,7 @@ def generate_weekly(
     api_feeds = [feed for feed in selected_feeds if SpaceflightNewsProvider.handles(feed.rss)]
     launch_video_items = [] if settings.export_premiere or collect_only or defer_exports else None
     if prepared is None:
+        if progress:progress('正在获取新闻来源')
         rss_news, launch_articles = get_news(
             [feed for feed in selected_feeds if feed not in web_feeds and feed not in api_feeds],
             settings.rss_limit,
@@ -103,7 +104,7 @@ def generate_weekly(
             news_date_range=date_range,
             **({"launch_video_items": launch_video_items} if launch_video_items is not None else {}),
         )
-        news_list = _filter_news(rss_news, date_range)
+        news_list = _filter_news(rss_news, date_range, settings.display_timezone)
         logger.info("基础解析文章数量：%s", len(news_list))
         parsed_articles = _parse_articles(news_list, token)
         if web_feeds:
@@ -111,6 +112,7 @@ def generate_weekly(
             try:
                 web_articles = SpaceComWebProvider().fetch(
                     limit=settings.rss_limit, cancel_check=token.check, date_range=date_range,
+                    display_timezone=settings.display_timezone,
                 )
             except SpaceComError as exc:
                 logger.warning("[Space.com] Provider failed, continuing other sources: %s", exc)
@@ -118,13 +120,14 @@ def generate_weekly(
             token.check()
             parsed_articles.extend(
                 article for article in web_articles
-                if _filter_news([article.news], date_range)
+                if _filter_news([article.news], date_range, settings.display_timezone)
             )
         if api_feeds:
             token.check()
             try:
                 api_articles = SpaceflightNewsProvider().fetch(
                     limit=settings.rss_limit, cancel_check=token.check, date_range=date_range,
+                    display_timezone=settings.display_timezone,
                 )
             except SpaceflightNewsError as exc:
                 logger.warning("[SNAPI] Provider failed, continuing other sources: %s", exc)
@@ -150,6 +153,7 @@ def generate_weekly(
     ai_summaries: dict[str, AISummary] = {}
     api_calls = 0
 
+    if progress:progress(f'正在筛选 {len(parsed_articles)} 条新闻')
     selected_articles, api_calls = _screen_articles(
         parsed_articles,
         settings,
@@ -165,8 +169,22 @@ def generate_weekly(
         settings.news_filter_level,
     )
 
-    selected_articles, date_calls = verify_news_dates(selected_articles, settings, date_range, token)
+    if progress:progress('正在核对日期与相关报道')
+    assessed_before_dates={a.news.key for a in selected_articles}
+    verified, date_calls = verify_news_dates([a for a in selected_articles if not a.news.manual_id],
+                                             settings, date_range, token)
+    by_key={a.news.key:a for a in verified}
+    selected_articles=[a if a.news.manual_id else by_key[a.news.key] for a in selected_articles
+                       if a.news.manual_id or a.news.key in by_key]
     api_calls += date_calls
+
+    from services.news_editorial import cutoff_for, recommend, writing_article
+    cutoff=cutoff_for(date_range,settings.display_timezone)
+    launch_evidence=[*launch_articles, *((prepared or {}).get('editorial_launches',[]))]
+    rejected={a.news.key for a in parsed_articles if a.news.key in assessed_before_dates and a.news.key not in by_key and not a.news.manual_id}
+    selected_articles,events=recommend(selected_articles,[by_key.get(a.news.key,a) for a in parsed_articles if a.news.key not in rejected],
+                                       launch_evidence,cutoff,protected=(prepared or {}).get('editorial_protected',[]))
+    events.update((prepared or {}).get('editorial_merges',{}))
 
     if export_sqlite:
         for article in selected_articles:
@@ -174,8 +192,10 @@ def generate_weekly(
             save_status = "SAVE" if save_article(article) else "SKIP"
             logger.info("保存 SQLite %s", save_status)
 
+    materials={a.news.key:writing_article(a,events.get(a.news.key,{})) for a in selected_articles}
+    if progress:progress(f'正在制作 {len(selected_articles)} 条稿件的标题和摘要')
     api_calls = _generate_selected_content(
-        selected_articles,
+        [materials[a.news.key] for a in selected_articles if events.get(a.news.key,{}).get('phase')!='pending'],
         settings,
         prompt_value(settings.summary_prompt, preset, "summary"),
         ai_summaries,
@@ -183,7 +203,7 @@ def generate_weekly(
         token,
     )
     localized_titles, api_calls = _localize_selected_titles(
-        selected_articles,
+        list(materials.values()),
         settings,
         api_calls,
         token,
@@ -197,6 +217,9 @@ def generate_weekly(
     )
 
     context = _export_context(settings, localized_titles)
+    for article in selected_articles:
+        if materials[article.news.key].news.title!=article.news.title:
+            context.localized_titles.setdefault(article.news.key,materials[article.news.key].news.title)
     if defer_exports:
         translator = _launch_term_translator(settings, token)
         if settings.language == 'zh_CN' and settings.aerospace_translation_enabled:
@@ -207,14 +230,16 @@ def generate_weekly(
         if result_callback:
             proposals, failures, narration_states = {}, {}, {}
             if narration_skip is not None:
+                if progress:progress('正在生成口播稿并检查资料缺口')
                 from services.news_voice import propose_missing
                 from models.news import news_id
-                proposals, failures, narration_states = propose_missing(selected_articles, settings, token, narration_skip)
+                proposals, failures, narration_states = propose_missing(selected_articles, settings, token, narration_skip,
+                                                                        events=events,cutoff=cutoff)
                 for article in prepared['articles'] if prepared is not None else parsed_articles:
-                    narration_states.setdefault(news_id(article.news.url),'skipped')
+                    narration_states.setdefault(news_id(article.news.key),'skipped')
             result_callback(dict(articles=selected_articles, launch_articles=launch_articles,
                                  launch_video_items=launch_video_items or [], summaries=ai_summaries,
-                                 assessments=assessments, context=context,source_scope=source_scope,
+                                 assessments=assessments, context=context,source_scope=source_scope,news_events=events,
                                  narration_proposals=proposals,narration_failures=failures,narration_states=narration_states))
     else:
         _export_reports(
@@ -288,7 +313,7 @@ def get_news(
     logger.info("抓取 RSS")
     token = cancel_token or CancellationToken()
     token.check()
-    rss_news = _fetch_news(feeds, rss_limit, token, news_date_range)
+    rss_news = _fetch_news(feeds, rss_limit, token, news_date_range, display_timezone)
     token.check()
     launch_articles = _fetch_launch_articles(launch_range, token, launch_start_date, launch_end_date, display_timezone,
         **({"video_items": launch_video_items} if launch_video_items is not None else {}))
@@ -301,6 +326,7 @@ def _fetch_news(
     rss_limit: int,
     cancel_token: CancellationToken,
     date_range: tuple[str, str] | None = None,
+    display_timezone: str = 'UTC',
 ) -> list[News]:
     import feedparser
 
@@ -319,7 +345,7 @@ def _fetch_news(
                 continue
 
             news = _news_from_feed_item(feed, item, url)
-            if not _filter_news([news], date_range):
+            if not _filter_news([news], date_range, display_timezone):
                 continue
             news_list.append(news)
             retained += 1
@@ -376,22 +402,26 @@ def _news_from_feed_item(feed: FeedSource, item, url: str) -> News:
 def _filter_news(
     news_list: list[News],
     date_range: tuple[str, str] | None,
+    display_timezone: str = 'UTC',
 ) -> list[News]:
     if date_range is None:
         return news_list
 
-    start_date, end_date = date_range
+    start_date,end_date=map(date.fromisoformat,date_range)
+    zone=_timezone(display_timezone)
     return [
         news
         for news in news_list
         if (
-            (published_date := _published_date(news.published)) is not None
-            and start_date <= published_date.isoformat() <= end_date
+            (published_date := _published_date(news.published,zone)) is not None
+            and start_date <= published_date <= end_date
         )
     ]
 
 
 def _deduplicate_articles(articles: list[Article], cancel_token: CancellationToken) -> list[Article]:
+    from services.news_editorial import event_key
+
     retained, by_url, by_title = [], {}, {}
     for article in articles:
         cancel_token.check()
@@ -403,7 +433,8 @@ def _deduplicate_articles(articles: list[Article], cancel_token: CancellationTok
         title_key = (title, published.astimezone(timezone.utc).date()) if title and published else None
         previous = by_url.get(url) if url else None
         title_match = by_title.get(title_key)
-        if previous is None and title_match is not None and title_match.news.source != news.source:
+        if previous is None and title_match is not None and title_match.news.source != news.source and not (
+                event_key(article) or event_key(title_match)):
             previous = title_match
         if previous is not None:
             from services.news_images import candidates
@@ -457,6 +488,7 @@ def _parse_articles(
 def _parse_article(
     news: News,
     cancel_token: CancellationToken,
+    *, cutoff=None,
 ) -> Article | None:
     from parsers.registry import get_parser
 
@@ -466,6 +498,15 @@ def _parse_article(
     try:
         html = download(news.url)
         cancel_token.check()
+        if cutoff is not None:
+            from bs4 import BeautifulSoup
+            soup=BeautifulSoup(html,'html.parser')
+            for node in soup.select('meta[property="article:modified_time"], meta[property="article:published_time"], meta[itemprop="dateModified"], time[itemprop="dateModified"]'):
+                stamp=parse_datetime(node.get('content') or node.get('datetime') or node.get_text(strip=True))
+                if stamp and stamp>cutoff:return None
+            for node in soup.select('script[type="application/ld+json"]'):
+                for value in re.findall(r'"(?:dateModified|datePublished)"\s*:\s*"([^"]+)"',node.string or node.get_text()):
+                    if (stamp:=parse_datetime(value)) and stamp>cutoff:return None
     except TaskCancelledError:
         raise
     except Exception as exc:
@@ -510,6 +551,9 @@ def _screen_articles(
     for index, article in enumerate(articles, start=1):
         cancel_token.check()
         logger.info("AI 重要程度筛选：%s / %s", index, len(articles))
+        if article.news.manual_id:
+            selected.append(article)
+            continue
 
         if not _ai_configured(settings):
             assessment = _fallback_assessment(settings.language)
@@ -534,7 +578,7 @@ def _screen_articles(
                 )
                 assessment = _fallback_assessment(settings.language)
 
-        assessments[article.news.url] = assessment
+        assessments[article.news.key] = assessment
         logger.info(
             "筛选结果：%s；%s",
             assessment.importance,
@@ -577,7 +621,7 @@ def _generate_selected_content(
             if glossary:
                 summary = replace(summary, summary=dictionary_replace(summary.summary,glossary)[0],
                                   keywords=[dictionary_replace(word,glossary)[0] for word in summary.keywords])
-            summaries[article.news.url] = summary
+            summaries[article.news.key] = summary
         except TaskCancelledError:
             raise
         except Exception as exc:
@@ -601,7 +645,7 @@ def _localize_selected_titles(
     from translator.dictionary import load_dictionary, dictionary_replace
     glossary = load_dictionary() if settings.language == 'zh_CN' else {}
     localized = {
-        article.news.url: dictionary_replace(clean_ai_text(article.news.title),glossary)[0]
+        article.news.key: dictionary_replace(clean_ai_text(article.news.title),glossary)[0]
         for article in articles
     }
 
@@ -615,13 +659,13 @@ def _localize_selected_titles(
         cancel_token.check()
         batch = targets[start:start + 10]
         ids = {f"item_{index:03d}": article.news.title for index, article in enumerate(batch)}
-        urls = {f"item_{index:03d}": article.news.url for index, article in enumerate(batch)}
+        urls = {f"item_{index:03d}": article.news.key for index, article in enumerate(batch)}
         api_calls += 1
 
         try:
             contexts = {}
             for index, article in enumerate(batch):
-                summary = (summaries or {}).get(article.news.url)
+                summary = (summaries or {}).get(article.news.key)
                 contexts[f"item_{index:03d}"] = dict(
                     body=article.body[:4000],
                     summary=summary.summary if summary else article.news.summary,
@@ -779,10 +823,9 @@ def _localize_launch_video_items(items, translator, cancel_token):
             values = confirmed_values(context.get('research', {}), context)
             names = display_names(context)
             record['summary'] = names['name']
-            record['title'] = names['rocket']
-            record['launch'].update(site=names['site'], orbit=names['orbit'])
-            if context.get('payload'):
-                record['launch']['payload'] = payload_display(context)
+            record['title'] = names['title']
+            record['display_record']=names
+            record['launch'].update(site=names['location'],orbit=names['orbit'],payload=names['payload'])
             if values.get('summary'):
                 record['launch']['description_zh'] = values['summary']
         if translator is None:
@@ -809,10 +852,6 @@ def _localize_launch_video_items(items, translator, cancel_token):
             target[key] = result.translation if result.success and result.translation else original
             if not result.success:
                 logger.warning('发射视频翻译回退：%s %s；%s', item['id'], key, result.error_message)
-        original = record['launch']['payload']
-        if original and not (context and getattr(getattr(translator, 'settings', None), 'language', 'zh_CN') == 'zh_CN'):
-            record['launch']['payload'] = translator.summarize_payload(item['summary'], original) or original
-            cancel_token.check()
         record['summary'] = mission_display_name(record['summary'])
         localized.append(record)
     return localized
@@ -826,7 +865,9 @@ def _prepare_launch_research(articles, items, settings, token, translator):
         token.check()
         if not context or not context.get('ll2_id') or context['ll2_id'] in contexts:
             continue
-        context = dict(context)
+        context = deepcopy(context)
+        from services.launch_research import prepare_launch_translation
+        prepare_launch_translation(context,settings,token)
         try:
             context['research'] = service.review(context)
         except TaskCancelledError:
@@ -919,6 +960,6 @@ def _date_range(settings: AppSettings) -> tuple[str, str] | None:
     return None
 
 
-def _published_date(published: str) -> date | None:
+def _published_date(published: str, zone=timezone.utc) -> date | None:
     parsed = parse_datetime(published)
-    return parsed.astimezone(timezone.utc).date() if parsed is not None else None
+    return parsed.astimezone(zone).date() if parsed is not None else None

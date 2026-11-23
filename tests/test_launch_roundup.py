@@ -107,10 +107,13 @@ class RoundupTests(unittest.TestCase):
         self.assertFalse(r.statistics(self.draft)['complete'])
 
     def test_changed_statistics_cannot_silently_keep_old_overview_audio(self):
+        self.draft['segments'][0].update(spoken='本期共有3次发射。',screen='本期共有3次发射。')
         self.draft['selection'][2]['included'] = False
         self.draft['segments'] = [s for s in self.draft['segments'] if s['id'] != 'rest']
-        with self.assertRaisesRegex(ValueError, '统计已变化'):
-            r.validate_draft(self.draft)
+        r.validate_draft(self.draft)  # Keep excluded material restorable, block only production.
+        from services.production_export import selected_roundup
+        with self.assertRaisesRegex(ValueError, '勾选范围已变化'):
+            selected_roundup(self.draft)
 
     def test_ai_wrong_id_or_numeric_claim_is_rejected(self):
         for field, value in [('task_ids', ['nonexistent']), ('spoken', '全球发射99次。'),
@@ -138,6 +141,19 @@ class RoundupTests(unittest.TestCase):
         self.assertEqual(self.draft['segments'][1], original)
         with self.assertRaises(ValueError):
             r.apply_segments(self.draft, [changed], single_id='focus1')
+
+    def test_task_name_suffix_is_stable_in_templates_and_saved_drafts(self):
+        self.draft['snapshot']['items'][2]['english_name'] = 'USSF-317'
+        r.apply_segments(self.draft, r.local_script(self.draft, 'fixture'))
+        segment = next(s for s in self.draft['segments'] if 'launch-3' in s['task_ids'])
+        self.assertIn('执行USSF-317任务。', segment['spoken'])
+        self.assertIn('USSF-317任务 ·', segment['screen'])
+        original = deepcopy(segment)
+        for _ in range(2):r.sync_names(self.draft)
+        self.assertEqual(segment, original)
+        segment['screen'] = segment['screen'].replace('USSF-317任务', 'USSF-317任务任务任务')
+        r.sync_names(self.draft)
+        self.assertEqual(segment, original)
 
     def test_background_facts_keep_their_exact_source_reference(self):
         from services.launch_research import fingerprint
@@ -201,9 +217,11 @@ class RoundupTests(unittest.TestCase):
             calls.append(1)
             if len(calls) >= 3:
                 raise TaskCancelledError('mock cancellation')
+        provider=QwenTTSProvider(dict(python=sys.executable, model=str(model)))
+        self.addCleanup(lambda:provider.unload(force=True))
         with patch('ai.qwen_tts.bundled_resource_path', return_value=fake), self.assertRaises(TaskCancelledError):
-            QwenTTSProvider(dict(python=sys.executable, model=str(model))).synthesize(
-                SpeechRequest('cancel mock', model=str(model), voice='Vivian'), self.root/'never.wav', cancel)
+            provider.synthesize(SpeechRequest('cancel mock', model=str(model), voice='Vivian'), self.root/'never.wav', cancel)
+        self.assertIsNone(provider.process);self.assertIsNone(provider._log)
         self.assertFalse((self.root/'never.wav').exists())
 
     def test_snapshot_saved_and_data_difference_reported_without_refresh(self):

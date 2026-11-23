@@ -12,11 +12,11 @@ from services.cancellation import TaskCancelledError
 from utils.time import parse_datetime, _timezone
 
 
-def write_json(path, data):
+def write_json(path, data, *, compact=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name('.' + path.name + '.' + uuid4().hex + '.tmp')
     try:
-        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=None if compact else 2), encoding='utf-8')
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)

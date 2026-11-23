@@ -1,5 +1,6 @@
 """Persistent production pages sharing the existing service/controller state."""
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from html import escape
 import json
@@ -8,15 +9,19 @@ import time
 from math import ceil
 from pathlib import Path
 
-from PySide6.QtCore import Qt,QTimer,Signal,QUrl,QSize
-from PySide6.QtGui import QDesktopServices,QPixmap,QImage
-from PySide6.QtWidgets import (QApplication,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QListWidget,
+from PySide6.QtCore import QDate,Qt,QTimer,Signal,QUrl,QSize,QPointF
+from PySide6.QtGui import QColor,QDesktopServices,QPixmap,QImage,QPainter,QPen,QPolygonF
+from PySide6.QtWidgets import (QApplication,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QListWidget,QListWidgetItem,
  QStackedWidget,QTabWidget,QSplitter,QPlainTextEdit,QTextBrowser,QLineEdit,
- QScrollArea,QFormLayout,QFileDialog,QMessageBox,QDialogButtonBox,QMenu,QProgressBar,QCheckBox,
- QTableWidget,QTableWidgetItem,QHeaderView,QDialog,QSlider,QSpinBox)
-from i18n import tr,set_language
+ QScrollArea,QFormLayout,QFileDialog,QMessageBox,QDialogButtonBox,QMenu,QProgressBar,QCheckBox,QSizePolicy,QFrame,
+ QTableWidget,QTableWidgetItem,QHeaderView,QDialog,QSlider,QSpinBox,QDoubleSpinBox)
+from i18n import tr
+from models.news import news_id
 from resources import resource_path,workspace_path
+from services.cancellation import TaskCancelledError
 from services import launch_roundup as roundup
+from services.episode import DEFAULT_EPISODE_NAME, EPISODE_NAME_LIMIT, episode_name, includes_news, new_episode, opening_text, validate_episode
+from services.episode_music import DEFAULTS as MUSIC_DEFAULTS,settings as music_settings,tracks as music_tracks
 from services.launch_data import write_json,load_existing
 from services.production import prepare_news,export_news,validate_session
 from services.settings import load_settings,save_settings,apply_settings
@@ -29,13 +34,19 @@ from ui.prompt_studio_dialog import PromptStudioDialog
 from ui.widgets.dashboard_panel import DashboardPanel
 from ui.widgets.feed_panel import FeedPanel
 from ui.widgets.log_panel import LogPanel
-from ui.news_workspace import NewsWorkspace
-from ui.component import AspectPreview,SegmentedTabs,ContentBrowser,configure_table,StatusDelegate
+from ui.news_workspace import NewsWorkspace, populate_voice_assets
+from ui.localize import set_ui_language
+from ui.music_panel import MusicPanel,MusicPlaylist
+from ui.theme import WORKSPACE_GAP
+from ui.component import AspectPreview,SegmentedTabs,ContentBrowser,configure_table,StatusDelegate,WorkflowNavDelegate,detail_icon,launch_badge
 from ui.widgets.combo_box import RoundedComboBox as QComboBox
 from config import app_version
+from utils.time import parse_datetime
 from ui.widgets.date_range import NEWS_DATE_RANGES,LAUNCH_DATE_RANGES
 
 SOURCE_DATE_KEYS=('date_mode','start_date','end_date','launch_range','launch_start_date','launch_end_date')
+WORKFLOW_PAGES=('materials','script','media','export')
+_BACKGROUND=ThreadPoolExecutor(max_workers=3,thread_name_prefix='SpaceWeekly')
 
 
 class TaskSummary(QLabel):
@@ -46,6 +57,36 @@ class TaskSummary(QLabel):
         elif re.search(r'Traceback|HTTPS?ConnectionPool|HTTPError|NameResolutionError|WinError|No such file',compact):
             compact='采集不完整，请重试联网刷新；详情见任务与日志。' if '采集' in compact or '刷新' in compact else '操作未完成，详情见任务与日志。'
         super().setText(compact if len(compact)<=150 else compact[:147]+'…')
+
+
+class EditionPeriodButton(QPushButton):
+    def __init__(self):
+        super().__init__()
+        self.full_text=self.short_text=''
+        self.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(140)
+
+    def set_caption(self,full,short):
+        self.full_text,self.short_text=full,short
+        self.setMaximumWidth(max(150,self.fontMetrics().horizontalAdvance(full)+55))
+        self._fit_caption()
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        self._fit_caption()
+
+    def _fit_caption(self):
+        metrics=self.fontMetrics();width=max(0,self.width()-49)
+        text=self.full_text if metrics.horizontalAdvance(self.full_text)<=width else self.short_text
+        self.setText(metrics.elidedText(text,Qt.TextElideMode.ElideRight,width))
+
+    def paintEvent(self,event):
+        super().paintEvent(event)
+        painter=QPainter(self);painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen=QPen(self.palette().buttonText().color(),1.4);pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin);painter.setPen(pen)
+        x,y=self.width()-25,self.height()/2
+        painter.drawPolyline(QPolygonF([QPointF(x-4,y-2),QPointF(x,y+2),QPointF(x+4,y-2)]))
 
 
 class ProductionWorkspace(QWidget):
@@ -62,6 +103,12 @@ class ProductionWorkspace(QWidget):
         self.image_worker=None
         self.aux_worker=None;self.aux_kind='';self._aux_config=None
         self._restoring=True;self._saved_hash='';self._observed_hash=''
+        self._writing_input_digest=(None,None)
+        self._recovery_write=self._terms_refresh=None
+        self._poster_future=self._poster_request=None
+        self.episode=new_episode()
+        if settings.date_mode=='last_7_days' and settings.launch_range=='next_week' and settings.display_timezone=='Asia/Shanghai':
+            self.episode['review_range']=list(roundup.default_range())
         self._pending_leave=None;self._discard=False;self._recovery_blocked=False
         self.results=[];self.result_scopes={};self._cards_base=None
         self._last_page=0
@@ -69,6 +116,7 @@ class ProductionWorkspace(QWidget):
         self.feed_panel=FeedPanel(feeds);self.dashboard=DashboardPanel(settings)
         self.news=NewsWorkspace(self);self.roundup=LaunchRoundupDialog(settings,self)
         self.news.voice_settings=self.roundup.voice_settings
+        self.news.in_edition=lambda article:includes_news(self.episode,article)
         self.roundup.workflow_embedded=True
         self.cards=VideoCardsDialog(settings.output_dir)
         self.intro=VideoIntroDialog(Path(settings.output_dir)/'video-cards')
@@ -76,14 +124,18 @@ class ProductionWorkspace(QWidget):
         self.preferences=SettingsDialog(settings);self.preferences._model_timer.stop()
         self.rules=PromptStudioDialog(settings)
         for component in (self.cards,self.intro,self.downloads,self.preferences,self.rules):component.workflow_embedded=True
-        self._build();self._connect();self._restore();self._restore_source_dates()
+        self._build();self._connect();self._restore();self._restore_source_dates();self._sync_edition_dates()
         self._restoring=False
-        self._observed_hash=roundup.digest(self.content_state())
+        initial=self.content_state(for_poll=True)
+        self._observed_hash=roundup.digest(initial)
+        self._observed_voice_hash=self._voice_state_hash(initial)
         self._saved_preferences=self.preference_signature();self._saved_rules=self.rules_signature();self._pending_preferences=False;self._pending_rules=False
         self._last_statuses={key:c.status.text() for key,c in (('roundup',self.roundup),('cards',self.cards),('intro',self.intro),('downloads',self.downloads))}
-        if not self._saved_hash:self._saved_hash=self._observed_hash
+        initial_hash=roundup.digest(self.content_state())
+        if not self._saved_hash:self._saved_hash=initial_hash
+        self._update_save_tooltip(initial_hash)
         self.timer=QTimer(self);self.timer.setInterval(500);self.timer.timeout.connect(self._poll)
-        self.timer.start();self._mode();self._poll();self.retranslate()
+        self.timer.start();self._mode();self._poll(initialize=True);self.retranslate()
 
     def button(self,key,action,layout,primary=False):
         button=QPushButton(tr(key));button.setProperty('productionKey',key);button.setAutoDefault(False)
@@ -104,39 +156,41 @@ class ProductionWorkspace(QWidget):
         area.setWidget(widget);return area
 
     def _build(self):
-        outer=QVBoxLayout(self);outer.setContentsMargins(0,0,0,8);outer.setSpacing(16)
-        top=QWidget();top.setObjectName('ProductionHeader');header=QHBoxLayout(top);header.setContentsMargins(24,12,24,12);header.setSpacing(12)
+        outer=QVBoxLayout(self);outer.setContentsMargins(0,0,0,0);outer.setSpacing(0)
+        top=QWidget();top.setObjectName('ProductionHeader');header=QHBoxLayout(top);header.setContentsMargins(28,12,25,12);header.setSpacing(17)
         self.workspace_label=QLabel()
         self.workspace_label.setToolTip(str(workspace_path() or Path(self.settings.output_dir).parent))
         self._detach_widget(self.dashboard,self.dashboard.report_title_line)
         self.edition_button=QPushButton();self.edition_button.setFlat(True)
         self.edition_button.setObjectName('EditionTitle');self.edition_button.setMaximumWidth(220)
-        self.edition_button.clicked.connect(self._edit_title);header.addWidget(self.edition_button)
+        self.edition_button.clicked.connect(self._edit_title);header.addWidget(self.edition_button);header.addSpacing(18)
+        self.dashboard.report_title_line.setMaximumWidth(220)
         header.addWidget(self.dashboard.report_title_line);self.dashboard.report_title_line.hide()
         self.dashboard.report_title_line.editingFinished.connect(self._finish_title)
         self.content=QComboBox();self.content.addItem(tr('production.news'),'news');self.content.addItem(tr('production.roundup'),'roundup')
-        header.addWidget(self.content)
-        self.period=QLabel();header.addWidget(self.period,1)
-        self.saved=QLabel();header.addWidget(self.saved)
+        self.period=EditionPeriodButton();self.period.setObjectName('EditionPeriod');self.period.setAutoDefault(False)
+        self.period.clicked.connect(lambda:self.guard(self.edit_episode));header.addWidget(self.period,1);header.addStretch()
         self.save_button=self.button('production.save',self.save,header)
-        self.button('settings',self.show_settings,header)
+        settings_button=self.button('settings',self.show_settings,header)
         more=QPushButton(tr('production.more'));menu=QMenu(more)
-        menu.addAction('术语词典',lambda:self.guard(self.open_terms))
         menu.addAction(tr('production.workspace'),self.choose_workspace)
         menu.addAction('工作区详情',lambda:QMessageBox.information(self,'当前工作区',self.workspace_label.toolTip()))
-        menu.addAction(tr('open.output'),self.open_output)
         menu.addAction(tr('production.open_edition'),lambda:self.guard(self.open_edition))
         menu.addAction(tr('production.diagnostics'),lambda:self.inspect(dict(version=app_version(),tasks=[r[:3] for r in self.task_rows()])))
         menu.addAction(tr('launch_test_title'),lambda:self.guard(lambda:self.start_diagnostic('launch')))
-        menu.addAction(tr('about'),self.show_about)
-        more.setMenu(menu);header.addWidget(more);outer.addWidget(top)
-        body=QHBoxLayout();body.setContentsMargins(12,0,24,0);body.setSpacing(16)
-        self.navigation=QListWidget();self.navigation.setObjectName('ProductionNav');self.navigation.setFixedWidth(132);self.navigation.setSpacing(4)
+        more.setMenu(menu);header.addWidget(more)
+        for action in (self.save_button,settings_button,more):action.setProperty('headerAction',True)
+        outer.addWidget(top)
+        body=QHBoxLayout();body.setContentsMargins(0,0,0,0);body.setSpacing(0)
+        self.navigation=QListWidget();self.navigation.setObjectName('ProductionNav');self.navigation.setFixedWidth(208)
+        self.navigation.setItemDelegate(WorkflowNavDelegate(self.navigation));self.navigation.setMouseTracking(True)
         self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        for key in ('materials','script','media','export'):
-            self.navigation.addItem(tr('production.'+key));self.navigation.item(self.navigation.count()-1).setSizeHint(QSize(110,42))
-        body.addWidget(self.navigation);content=QVBoxLayout();content.setSpacing(16)
-        self.page_title=QLabel(tr('production.materials'));self.page_title.setObjectName('PageTitle');content.addWidget(self.page_title)
+        for key in WORKFLOW_PAGES:
+            item=QListWidgetItem(tr('production.'+key));item.setSizeHint(QSize(208,72));self.navigation.addItem(item)
+        body.addWidget(self.navigation);content=QVBoxLayout();content.setContentsMargins(25,19,25,17);content.setSpacing(WORKSPACE_GAP)
+        page_header=QHBoxLayout()
+        self.page_title=QLabel(tr('production.materials'));self.page_title.setObjectName('PageTitle');page_header.addWidget(self.page_title,1)
+        page_header.addWidget(self.content);content.addLayout(page_header)
         self.pages=QStackedWidget();content.addWidget(self.pages,1);body.addLayout(content,1);outer.addLayout(body,1)
         self.materials=SegmentedTabs();self.materials.addTab(self.news.data_page,tr('production.news_short'))
         self._launch_materials();self.materials.addTab(self.roundup.data_page,tr('production.launches_short'))
@@ -153,6 +207,8 @@ class ProductionWorkspace(QWidget):
         self.intro.setMinimumSize(0,0);self.intro.preview.setMinimumSize(320,180)
         self.media.addTab(self.scroll(self.intro),tr('video.intro'));self.media.addTab(self.scroll(self.downloads),tr('video_download.title'));self.pages.addWidget(self.media)
         self._export_page();self._settings_page()
+        for page in (self.news.data_page,self.news.script_page,self.roundup.script_page,self.intro,self.downloads,self.cards):
+            page.layout().setContentsMargins(0,0,0,0);page.layout().setSpacing(WORKSPACE_GAP)
         self.roundup.hide();self.roundup.tabs.hide()
         self.roundup.inspect_data=self.inspect;self.roundup.open_rules=self.open_rules
         self.roundup.export_directory=lambda:self.preferences.output_edit.text().strip()
@@ -168,7 +224,9 @@ class ProductionWorkspace(QWidget):
             for button in component.findChildren(QPushButton):
                 if button.text() in (tr('video.close'),tr('video_download.close')):button.hide()
         self._build_inspector(outer)
-        strip=QHBoxLayout();strip.setContentsMargins(24,0,24,0)
+        footer=QWidget();footer.setObjectName('ProductionFooter')
+        strip=QHBoxLayout(footer);strip.setContentsMargins(26,10,26,10);strip.setSpacing(12)
+        status_dot=QLabel();status_dot.setObjectName('WorkflowStatusDot');status_dot.setFixedSize(17,17);strip.addWidget(status_dot)
         self.task_text=TaskSummary(tr('ready'));self.task_text.setObjectName('MutedText');self.task_text.setWordWrap(True);strip.addWidget(self.task_text,1)
         self.task_text.setMaximumHeight(65)
         self.task_progress=QProgressBar();self.task_progress.setMaximumWidth(150);self.task_progress.hide();strip.addWidget(self.task_progress)
@@ -176,9 +234,12 @@ class ProductionWorkspace(QWidget):
         self.cancel_tasks.setObjectName('TextButton')
         self.last_diagnostic_button=self.button('查看诊断',lambda:self.inspect(self._last_diagnostic),strip)
         self.last_diagnostic_button.setObjectName('TextButton');self.last_diagnostic_button.hide()
-        self.log_toggle=QPushButton(tr('production.show_log'));self.log_toggle.setCheckable(True);strip.addWidget(self.log_toggle);outer.addLayout(strip)
+        self.log_toggle=QPushButton(tr('production.show_log'));self.log_toggle.setCheckable(True);strip.addWidget(self.log_toggle)
         self.log_toggle.setObjectName('TextButton')
+        self.previous_button=self.button('production.previous_step',self.previous_step,strip)
+        self.next_button=self.button('production.next_step',self.next_step,strip,True)
         self.log=LogPanel();self.log.setMaximumHeight(180);self.log.hide();self.log.apply_theme(self.theme);outer.addWidget(self.log)
+        outer.addWidget(footer)
         self.log_toggle.toggled.connect(self.log.setVisible);self.navigation.setCurrentRow(0);self.pages.setCurrentIndex(0)
 
     def _detach_widget(self,root,control):
@@ -217,26 +278,57 @@ class ProductionWorkspace(QWidget):
 
     def _launch_materials(self):
         r=self.roundup;self.launch_details=ContentBrowser();self.launch_details.setOpenExternalLinks(True)
-        detail=QWidget();detail.setObjectName('DetailPanel');layout=QVBoxLayout(detail);layout.setContentsMargins(24,20,24,20);layout.setSpacing(16)
-        caption=QLabel('任务详情');caption.setObjectName('MutedText');layout.addWidget(caption);layout.addWidget(self.launch_details)
+        page_layout=r.data_page.layout();page_layout.setContentsMargins(0,0,0,0);page_layout.setSpacing(10)
+        dates=page_layout.itemAt(0).layout();dates.setContentsMargins(5,0,0,0);dates.setSpacing(11)
+        detail=QWidget();detail.setObjectName('DetailPanel');detail.setAccessibleName('任务详情')
+        layout=QVBoxLayout(detail);layout.setContentsMargins(20,14,20,22);layout.setSpacing(10)
+        header=QHBoxLayout()
+        self.launch_title=QLabel();self.launch_title.setObjectName('LaunchDetailTitle');self.launch_title.setWordWrap(True)
+        self.launch_title.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse|Qt.TextInteractionFlag.LinksAccessibleByKeyboard)
+        self.launch_title.linkActivated.connect(self._edit_current_launch_name);header.addWidget(self.launch_title,1)
+        self.launch_status=QLabel();self.launch_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(self.launch_status,0,Qt.AlignmentFlag.AlignTop);layout.addLayout(header)
+        self.launch_name_controls=QWidget();name_row=QHBoxLayout(self.launch_name_controls);name_row.setContentsMargins(0,0,0,0)
+        self.launch_name_edit=QLineEdit();self.launch_name_edit.setPlaceholderText('本期任务名称（可直接修改）')
+        self.launch_name_edit.setObjectName('LaunchNameEdit');name_row.addWidget(self.launch_name_edit,1)
+        self.save_launch_name_button=self.button('production.save_name',self.save_launch_name,name_row)
+        self.save_launch_name_button.setObjectName('SaveLaunchName')
+        self.launch_name_edit.returnPressed.connect(lambda:self.guard(self.save_launch_name))
+        self.launch_name_controls.hide();layout.addWidget(self.launch_name_controls)
+        self.launch_name_edit.textEdited.connect(self._stage_launch_name)
+        body=QWidget();self.launch_detail_body=body;card=QVBoxLayout(body);card.setContentsMargins(0,0,0,0);card.setSpacing(10)
+        self.launch_time=QLabel();self.launch_rocket=QLabel();self.launch_meta_icons=[]
+        for field in (self.launch_time,self.launch_rocket):
+            row=QHBoxLayout();row.setSpacing(10)
+            icon=QLabel();icon.setFixedSize(24,24);self.launch_meta_icons.append(icon)
+            row.addWidget(icon,0,Qt.AlignmentFlag.AlignTop)
+            field.setObjectName('LaunchDetailHint');field.setTextFormat(Qt.TextFormat.PlainText);field.setWordWrap(True)
+            row.addWidget(field,1);card.addLayout(row)
+        card.addSpacing(4)
+        self.launch_summary_title=QLabel('任务简介');self.launch_summary_title.setObjectName('SectionTitle');card.addWidget(self.launch_summary_title)
+        self.launch_summary=QLabel();self.launch_summary.setObjectName('LaunchDetailHint');self.launch_summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.launch_summary.setWordWrap(True);card.addWidget(self.launch_summary)
+        r.before_task_edit=self.checkpoint;r.task_edited.connect(self._launch_name_saved)
         actions=QHBoxLayout()
-        edit=QPushButton('编辑资料');edit.setCheckable(True);edit.setObjectName('TextButton');actions.addWidget(edit)
-        fix=QPushButton('修正名称');fix.setObjectName('TextButton');actions.addWidget(fix)
+        full=QPushButton('编辑本期内容');full.setObjectName('DetailAction');full.clicked.connect(lambda:self.guard(self.edit_launch_content));actions.addWidget(full)
         evidence=self.button('production.show_evidence',self._show_task_evidence,actions);evidence.setObjectName('TextButton')
-        self.launch_detail_actions=(edit,fix,evidence)
-        actions.addStretch(1);layout.addLayout(actions)
-        self.material_editor=QWidget();editor=QVBoxLayout(self.material_editor)
-        self.chinese_name=QLineEdit();self.chinese_name.setPlaceholderText(tr('production.confirmed_name'))
-        self.manual_summary=QPlainTextEdit();self.manual_summary.setPlaceholderText(tr('production.manual_summary'));self.manual_summary.setMaximumHeight(75)
-        editor.addWidget(self.chinese_name);editor.addWidget(self.manual_summary)
-        self.add_to_dictionary=QCheckBox('同时加入术语词典');editor.addWidget(self.add_to_dictionary)
-        row=QHBoxLayout();self.confirm_name=self.button('production.confirm_name',self.confirm_launch,row)
-        editor.addLayout(row);layout.addWidget(self.material_editor);self.material_editor.hide();layout.addStretch(1)
-        edit.toggled.connect(self.material_editor.setVisible)
-        fix.clicked.connect(lambda:(edit.setChecked(True),self.chinese_name.setFocus()))
-        split=QSplitter();r.data_page.layout().removeWidget(r.tasks);split.addWidget(r.tasks);split.addWidget(self.scroll(detail));split.setStretchFactor(0,3);split.setStretchFactor(1,2)
-        split.setSizes([680,420]);split.setChildrenCollapsible(False)
-        r.data_page.layout().insertWidget(2,split,1)
+        self.launch_detail_actions=(full,evidence)
+        actions.addStretch(1)
+        for child in (actions,self.launch_details):
+            divider=QFrame();divider.setObjectName('LaunchDetailDivider');divider.setFixedHeight(1);card.addWidget(divider)
+            if child is actions:card.addLayout(actions)
+            else:card.addWidget(child)
+        layout.addWidget(body);layout.addStretch(1)
+        summary=page_layout.takeAt(1).widget();page_layout.removeWidget(r.tasks)
+        list_area=QWidget();left=QVBoxLayout(list_area);left.setContentsMargins(0,0,0,0);left.setSpacing(8)
+        left.addWidget(summary);left.addWidget(r.tasks,1)
+        # The details start level with the table's selection summary.
+        split=QSplitter();split.setHandleWidth(16);split.addWidget(list_area)
+        detail_scroll=self.scroll(detail);detail_scroll.setObjectName('LaunchDetailScroll');detail_scroll.setMinimumWidth(270)
+        details_area=QWidget();right=QVBoxLayout(details_area);right.setContentsMargins(0,15,0,0);right.addWidget(detail_scroll)
+        split.addWidget(details_area);split.setStretchFactor(0,5);split.setStretchFactor(1,3)
+        split.setSizes([790,488]);split.setChildrenCollapsible(False);page_layout.insertWidget(1,split,1)
+        r.tasks.setObjectName('LaunchTasks')
         for column in (1,3,4,6,7,8,9,10,11):r.tasks.setColumnHidden(column,True)
         header=r.tasks.horizontalHeader()
         for column in (0,2,12,5,13):header.moveSection(header.visualIndex(column),list((0,2,12,5,13)).index(column))
@@ -247,19 +339,25 @@ class ProductionWorkspace(QWidget):
         r.tasks.horizontalHeaderItem(2).setText('任务名称')
         r.tasks.currentCellChanged.connect(lambda *_:self._launch_detail())
         # Keep secondary operations reachable without a permanent bank of buttons.
-        while r.data_page.layout().count()>3:
-            item=r.data_page.layout().takeAt(3)
+        while page_layout.count()>2:
+            item=page_layout.takeAt(2)
             if item.widget():item.widget().hide()
             if item.layout():
                 while item.layout().count():
                     child=item.layout().takeAt(0)
                     if child.widget():child.widget().hide()
         more=QPushButton('更多');menu=QMenu(more)
-        for label,action in [('补充缺失资料（联网）',r._supplement_materials),('重新核对本任务（联网）',r._recheck_materials),
+        complete=r.refresh_button;complete.setText('补全中文资料');complete.clicked.disconnect()
+        complete.setProperty('roundupAction','_supplement_materials')
+        complete.setToolTip('先复用资料与译名；缺失时联网核对正式名称和背景，再补译中文显示。不会覆盖人工稿件。')
+        complete.clicked.connect(lambda:self.guard(r._supplement_materials));self.complete_launch_materials_button=complete
+        for label,action in [('刷新发射列表（联网）',r._refresh),('重新补全本任务',r._recheck_materials),
           ('同步名称与资料',self.refresh_names),('统计与资料缺口',lambda:self.inspect(dict(统计=roundup.statistics(r.draft),采集=r.draft['snapshot'].get('reason',''))))]:
             menu.addAction(label,lambda _=False,fn=action:self.guard(fn))
-        more.setMenu(menu);r.data_page.layout().itemAt(0).layout().addWidget(more)
-        self.chinese_name.textChanged.connect(self._stage_name);self.manual_summary.textChanged.connect(self._stage_name)
+        more.setMenu(menu);page_layout.itemAt(0).layout().addWidget(more)
+        for edit in (r.start,r.end):edit.setObjectName('LaunchDate')
+        for button in (r.recent_dates,more):button.setObjectName('LaunchAction')
+        r.recent_dates.setMinimumWidth(105);more.setMinimumWidth(86)
 
     def _show_task_evidence(self):
         if not self._detail_id:return
@@ -267,42 +365,90 @@ class ProductionWorkspace(QWidget):
         names=roundup.display_names(item)
         from translator.dictionary import load_dictionary
         terms={k:v for k,v in load_dictionary().items() if k in [item.get(f) for f in ('english_name','rocket','site_name','pad_name')]}
-        self.inspect(dict(原始名称=item['english_name'],名称对应=names,词典条目=terms,原始资料=item))
+        self.inspect(dict(原始名称=item['english_name'],名称对应=names,核对状态=roundup.material_status(item),词典条目=terms,原始资料=item))
+
+    def edit_launch_content(self):
+        if not self._detail_id:raise ValueError('请选择要编辑的任务')
+        from ui.launch_edit_dialog import LaunchEditDialog
+        item=next(i for i in self.roundup.draft['snapshot']['items'] if i['ll2_id']==self._detail_id)
+        LaunchEditDialog(self,item).exec()
+
+    def _stage_launch_name(self,text):
+        if self._detail_id:self.material_edits.setdefault(self._detail_id,{})['name']=text
+
+    def _edit_current_launch_name(self,_link):
+        if self.launch_name_edit.isEnabled():
+            self.launch_name_controls.show();self.launch_name_edit.setFocus();self.launch_name_edit.selectAll()
+
+    def save_launch_name(self):
+        if not self._detail_id:raise ValueError('请选择要修改的任务')
+        if not self.roundup.edit_task_field(self._detail_id,'name',self.launch_name_edit.text().strip()):
+            self._launch_name_saved(self._detail_id)
+
+    def _launch_name_saved(self,identifier):
+        self.material_edits.pop(identifier,None)
+        self.launch_name_controls.hide()
+        self._frame_key=self._timeline_key=None;self._launch_detail();self._changed()
 
     def _launch_detail(self):
         row=self.roundup.tasks.currentRow()
         if row<0 or row>=len(self.roundup.draft['selection']):
-            self._detail_id=None;self.launch_details.setPlainText('请选择列表中的任务查看详情。列表勾选用于纳入本期。')
+            self._detail_id=None;self.launch_title.setText('请选择一项发射任务')
+            self.launch_title.setToolTip('');self.launch_details.clear()
+            self.launch_status.hide();self.launch_detail_body.hide();self.launch_name_controls.hide()
+            self.launch_name_edit.clear();self.launch_name_edit.setEnabled(False);self.save_launch_name_button.setEnabled(False)
             for button in self.launch_detail_actions:button.setEnabled(False)
-            self.launch_detail_actions[0].setChecked(False);self.confirm_name.setEnabled(False);return
+            return
+        self.launch_status.show();self.launch_detail_body.show()
         for button in self.launch_detail_actions:button.setEnabled(True)
         identifier=self.roundup.draft['selection'][row]['id'];item=next(i for i in self.roundup.draft['snapshot']['items'] if i['ll2_id']==identifier)
-        state=roundup.material_status(item)
         names=roundup.display_names(item)
+        if self._detail_id!=identifier:self.launch_name_controls.hide()
+        self.launch_name_edit.setEnabled(self.roundup.worker is None);self.save_launch_name_button.setEnabled(self.roundup.worker is None)
+        self.launch_name_edit.setText(self.material_edits.get(identifier,{}).get('name',names['name']))
         from utils.time import format_datetime
+        from services.roundup_style import event_result
         self._detail_id=identifier
-        values=roundup.confirmed_values(item.get('research',{}),item)
-        summary=values.get('summary') or next((f['quote'] for f in roundup.background_facts(item) if f['evidence_level']=='primary_announcement' and any('\u4e00'<=c<='\u9fff' for c in f['quote'])),'')
-        from services.roundup_style import payload_display
-        payload=payload_display(item) if not summary and item.get('payload') and not state['evidence_conflict'] else ''
-        if payload==item.get('payload') and not re.search(r'[\u3400-\u9fff]',payload):payload=''
+        colors=self.theme.theme.colors
+        self.launch_title.setText(f'<a href="rename" style="color:{colors["text"]};text-decoration:none">{escape(names["name"])}</a>')
+        self.launch_title.setToolTip('点击修改本期任务名称\n原文：'+item['english_name'])
+        label,state=launch_badge(event_result(item,self.roundup.draft))
+        tint=QColor(colors.get('log_'+state,colors['text_muted']))
+        self.launch_status.setStyleSheet(f'color:{tint.name()}; background:rgba({tint.red()},{tint.green()},{tint.blue()},28); border-radius:13px; padding:4px 12px; font-weight:600;')
+        self.launch_status.setText(label)
+        self.launch_time.setText('发射时间\n'+(format_datetime(names.get('net',''),'Asia/Shanghai')[:16] or '待确认'))
+        self.launch_rocket.setText('火箭  '+(names['rocket'] or '待确认'))
+        for icon,key in zip(self.launch_meta_icons,('time','rocket')):
+            icon.setPixmap(QPixmap.fromImage(detail_icon(key,colors['text_subtle'])))
+        translated=names.get('description_translation') if not names['summary'] else ''
+        self.launch_summary_title.setText('任务简介 · AI 参考译文' if translated else '任务简介')
+        self.launch_summary.setText((names['summary'] or translated or '暂无已核实的中文简介。')[:400])
+        self.launch_summary.setToolTip('双击表格名称或按 F2 修改。原始名称和资料可在完整出处中查看。')
         orbit=roundup.event_context(item,self.roundup.draft)['orbit']
-        lines=['<h2>'+escape(names['name'])+'</h2><p>',escape(format_datetime(item.get('net',''),'Asia/Shanghai')[:16])+' · '+escape(names['rocket'])+'</p><hr>',
-         '<p>发射地点</p><p>'+escape(names['site_name'] or names['site'])+'<br>'+escape(names['pad_name'])+'</p><hr>',
-         '<p>目标轨道</p><p>'+escape(orbit or '待补充')+'</p><hr>',
-         '<p>'+('载荷资料（LL2）' if payload else '任务简介')+'</p><p>'+escape((summary or payload)[:240] or '暂无已核实的中文简介。')+'</p><hr>',
-         '<p>名称来源<br>'+escape(names['name_source'])+'</p><p>背景资料<br>'+escape(state['label'])+'</p>']
-        if state['evidence_conflict']:lines.append('<p>来源存在冲突，请查看出处核对。</p>')
-        self.launch_details.setHtml(''.join(lines))
-        values=self.material_edits.get(identifier,values);self._detail_loading=True
-        self.chinese_name.setText(values.get('chinese_name') or names['name']);self.manual_summary.setPlainText(values.get('summary',''))
-        self._detail_loading=False
-        self.confirm_name.setEnabled(self.roundup.worker is None)
-
+        quantity=str(names['payload_count']) if names['payload_count'] is not None else names['quantity_source']
+        facts=(('location','发射地点',names['location'],True),
+               ('agency','机构',names['provider']+'（'+(names['organization_type'] or '类型待核对')+'）',False),
+               ('payload','载荷',names['payload'] or '缺少对应载荷名称',True),
+               ('count','数量',quantity,False),('orbit','目标轨道',orbit or '待补充',True))
+        rows=[]
+        for key,title,value,stacked in facts:
+            self.launch_details.set_icon(key,detail_icon(key,colors['text_subtle']))
+            separator='<br>' if stacked else ' · '
+            rows.append(f'<tr><td width="34" valign="top"><img src="detail:{key}"></td>'
+                        f'<td valign="middle"><b>{title}</b>{separator}{escape(value or "待补充")}</td></tr>')
+        self.launch_details.setHtml(f'<table cellspacing="0" cellpadding="5" width="100%" style="color:{colors["text_muted"]}">'
+                                    +''.join(rows)+'</table>')
     def _task_column_sizes(self):
         table=self.roundup.tasks
         small=self.width()<1100
-        for column,width in ((0,44),(12,116 if small else 148),(5,110 if small else 154),(13,92)):table.setColumnWidth(column,width)
+        header=table.horizontalHeader()
+        header.setSectionResizeMode(2,QHeaderView.ResizeMode.Stretch)
+        for column,width in ((0,36 if small else 58),(12,82 if small else 154),
+                             (5,92 if small else 164),(13,56 if small else 106)):
+            table.setColumnWidth(column,width)
+        table.horizontalHeaderItem(5).setText('时间' if small else roundup.timezone_label(self.roundup.draft))
+        table.horizontalHeaderItem(13).setText('结果' if small else '发射结果')
+        for date in (self.roundup.start,self.roundup.end):date.setFixedWidth(124 if small else 153)
         blocked=table.blockSignals(True)
         for row in range(table.rowCount()):
             cell=table.item(row,5)
@@ -311,34 +457,9 @@ class ProductionWorkspace(QWidget):
 
     def resizeEvent(self,event):
         super().resizeEvent(event)
-        if hasattr(self,'roundup'):self._task_column_sizes()
-
-    def _stage_name(self,*_):
-        if self._detail_id and not self._detail_loading:
-            self.material_edits[self._detail_id]=dict(chinese_name=self.chinese_name.text(),summary=self.manual_summary.toPlainText())
-
-    def confirm_launch(self):
-        if self.roundup.worker:raise ValueError(tr('production.conflict'))
-        row=self.roundup.tasks.currentRow()
-        if row<0:raise ValueError(tr('production.select_content'))
-        if not self.chinese_name.text().strip():raise ValueError(tr('production.name_required'))
-        from services.launch_research import confirm_launch,load_launch_research,fingerprint,_store
-        identifier=self.roundup.draft['selection'][row]['id']
-        if identifier not in load_launch_research():
-            item=next(i for i in self.roundup.draft['snapshot']['items'] if i['ll2_id']==identifier)
-            record=deepcopy(item.get('research',{}))
-            conflict=record.get('evidence_status')=='conflict' or (record.get('previous_evidence') or {}).get('evidence_status')=='conflict'
-            record.update(version=1,input={k:deepcopy(v) for k,v in item.items() if k!='research'},fingerprint=fingerprint(item),
-                evidence_status='conflict' if conflict else 'pending',matches=[],reason='从打开的草稿人工确认；自动背景仍须核对')
-            _store(identifier,record)
-        confirm_launch(identifier,self.chinese_name.text(),self.manual_summary.toPlainText())
-        if self.add_to_dictionary.isChecked():
-            from translator.dictionary import load_dictionary,save_dictionary
-            item=next(i for i in self.roundup.draft['snapshot']['items'] if i['ll2_id']==identifier)
-            entries=load_dictionary();entries[item['english_name']]=dict(translation=self.chinese_name.text().strip(),type='mission',human_status='confirmed')
-            save_dictionary(entries)
-        self.material_edits.pop(self.roundup.draft['selection'][row]['id'],None)
-        self.refresh_names();self.material_editor.hide()
+        small=self.width()<1100
+        if hasattr(self,'roundup') and small!=getattr(self,'_narrow_tasks',None):
+            self._narrow_tasks=small;self._task_column_sizes()
 
     def refresh_names(self,update_manual=False):
         r=self.roundup
@@ -347,9 +468,44 @@ class ProductionWorkspace(QWidget):
         pending=roundup.sync_names(r.draft,update_manual=update_manual)
         selected=r.segment_list.currentRow();r._show_tasks();r._show_segments(selected)
         self._frame_key=self._timeline_key=None
-        self._launch_detail();self._voice_refresh()
+        self._launch_detail();self._refresh_visible_voice()
         self.name_update_button.setVisible(bool(pending))
         self.task_text.setText('名称已刷新；已有配音或人工编辑稿保留，请点击“更新稿件名称”采用新名称。' if pending else '名称已刷新；朗读有变化的旧音频需重新生成。')
+
+    @staticmethod
+    def _load_local_terms(draft):
+        roundup.sync_materials(draft)
+        roundup.sync_names(draft)
+        return draft
+
+    def _poll_terms(self):
+        paths=[resource_path('translator',name) for name in ('dictionary.json','launch_research.json','translation_cache.json')]
+        paths.append(resource_path('config','aerospace_terms.json'))
+        signature=tuple((str(p),p.stat().st_mtime_ns if p.exists() else None) for p in paths)
+        r=self.roundup
+        def basis(draft):
+            return roundup.digest([draft['snapshot'],draft['segments'],draft['name_bindings'] if 'name_bindings' in draft else None])
+        if self._terms_refresh:
+            future,original,previous,revision,started=self._terms_refresh
+            if not future.done() or r.worker:return
+            self._terms_refresh=None
+            if r.draft is original and revision==self._edition_revision and basis(original)==previous:
+                self._terms_signature=started
+                try:result=future.result()
+                except (OSError,ValueError,TypeError,KeyError) as error:
+                    self.task_text.setText('刷新本地发射资料失败：'+str(error))
+                else:
+                    if basis(result)!=previous:
+                        for key in ('snapshot','segments','name_bindings','name_updates_pending'):
+                            if key in result:original[key]=result[key]
+                        selected=r.segment_list.currentRow();r._show_tasks();r._show_segments(selected)
+                        self._launch_detail()
+                        if self.mode=='roundup':
+                            self._frame_key=self._timeline_key=None;self._refresh_visible_voice()
+        if signature!=getattr(self,'_terms_signature',None) and not r.worker:
+            draft=r.draft
+            local=deepcopy({key:draft[key] for key in ('snapshot','segments','name_bindings','name_updates_pending') if key in draft})
+            self._terms_refresh=(_BACKGROUND.submit(self._load_local_terms,local),draft,basis(draft),self._edition_revision,signature)
 
     def update_script_names(self):
         if QMessageBox.question(self,'更新稿件名称','仅替换稿件中的名称，保留其他人工文字。旧音频可能需重新生成。继续？')==QMessageBox.StandardButton.Yes:
@@ -357,57 +513,134 @@ class ProductionWorkspace(QWidget):
 
     def _voice_page(self):
         r=self.roundup;page=QWidget();layout=QVBoxLayout(page)
+        layout.setContentsMargins(0,0,0,0);layout.setSpacing(WORKSPACE_GAP)
+        setup_row=QHBoxLayout()
+        self.voice_status=QLabel();self.voice_status.setObjectName('MutedText');self.voice_status.setWordWrap(True)
+        setup_row.addWidget(self.voice_status)
+        self.button('production.configure_voice',self.show_voice_settings,setup_row)
+        setup_row.addWidget(QLabel('音色'))
+        self._detach_widget(r.voice_page,r.speaker);r.speaker.setMaximumWidth(160);setup_row.addWidget(r.speaker)
+        self.voice_sample_button=self.button('试听音色',self._voice_sample,setup_row)
+        setup_row.addStretch(1)
+        layout.addLayout(setup_row)
         self.voice_segments=QComboBox();self.voice_segments.currentIndexChanged.connect(self._voice_selected)
-        row=QHBoxLayout();row.addWidget(self.voice_segments,1)
-        self.listen_button=self.button('production.listen',self.listen_roundup,row,True)
-        self.speech_button=self.button('production.synthesize',self.synthesize_media,row)
-        r._button(row,'停止播放',self._stop_preview)
+        self.voice_segments.setObjectName('VoiceSegments')
+        self.voice_segments.view().setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.voice_segments.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
+        self.voice_segments.setMinimumWidth(144)
+        self.voice_scope=QLabel();self.voice_scope.setObjectName('MutedText');self.voice_scope.setBuddy(self.voice_segments)
+        row=QHBoxLayout();row.addWidget(self.voice_scope);row.addWidget(self.voice_segments,1)
+        self.listen_button=self.button('production.listen',self.listen_roundup,row)
+        self.speech_button=self.button('production.synthesize',self.synthesize_media,row,True)
         layout.addLayout(row)
-        voice=QHBoxLayout();voice.addWidget(QLabel('音色'))
-        self._detach_widget(r.voice_page,r.speaker);voice.addWidget(r.speaker)
-        self.voice_status=QLabel();voice.addWidget(self.voice_status,1)
+        row=QHBoxLayout()
         self.voice_image_use=QCheckBox('使用本条配图');self.voice_image_use.setToolTip('取消后预览和导出不使用配图；可在资料页更换或导入自行找到的图片。')
         self.voice_image_use.toggled.connect(lambda enabled:self.news.set_image_use(self.news.current_article(),enabled))
-        voice.addWidget(self.voice_image_use)
-        configure=QPushButton('配置语音');configure.clicked.connect(self.show_voice_settings);voice.addWidget(configure);layout.addLayout(voice)
-        split=QSplitter();text=QWidget();left=QVBoxLayout(text);left.addWidget(QLabel('口播文本'))
+        row.addWidget(self.voice_image_use)
+        self.voice_image_menu=QPushButton('管理画面素材');images=QMenu(self.voice_image_menu)
+        images.addAction('读取或重试配图',lambda:self.news.request_image({},article=self.news.current_article()))
+        images.addAction('选择候选图片',lambda:self.guard(lambda:self.news.choose_candidate(article=self.news.current_article())))
+        images.addAction('添加本地图片（可多选）',lambda:self.news.import_image(article=self.news.current_article()))
+        images.addAction('选择已保存图片和顺序',lambda:self.news.edit_gallery(article=self.news.current_article()))
+        images.addAction('添加本地视频',lambda:self.news.import_video(article=self.news.current_article()))
+        images.addAction('剪裁视频（I / O）',lambda:self.news.trim_video(article=self.news.current_article()))
+        images.addAction('移除本条视频',lambda:self.news.request_image(dict(remove_video=True),article=self.news.current_article()))
+        self.voice_image_menu.setMenu(images);row.addWidget(self.voice_image_menu)
+        row.addStretch(1);layout.addLayout(row)
+        self.music_panel=MusicPanel();self.music_panel.set_edition(self.episode);layout.addWidget(self.music_panel)
+        self.music_panel.changed.connect(lambda changes:self.guard(lambda:self._update_music(changes)))
+        self.music_panel.audition_started.connect(self._stop_preview)
+        self.music_panel.mix_requested.connect(lambda:self.guard(self._listen_mix))
+        self.music_panel.failed.connect(lambda message:self.task_text.setText(message))
+        split=QSplitter();split.setChildrenCollapsible(False)
+        text=QWidget();left=QVBoxLayout(text);left.setContentsMargins(0,0,0,0)
+        text_label=QLabel('口播文本');text_label.setObjectName('SectionTitle');left.addWidget(text_label)
         self.voice_text=QPlainTextEdit();left.addWidget(self.voice_text,1)
+        text_label.setBuddy(self.voice_text)
         self.voice_text.setToolTip('这里编辑口播；实际 TTS 输入在稿件页“最终朗读”下方预览。')
         self.voice_text.textChanged.connect(self._edit_voice_text)
         self.play_state=QLabel();self.play_state.setWordWrap(True);left.addWidget(self.play_state)
-        split.addWidget(text);view=QWidget();right=QVBoxLayout(view)
+        split.addWidget(text);view=QWidget();right=QVBoxLayout(view);right.setContentsMargins(0,0,0,0)
+        preview_label=QLabel('画面预览');preview_label.setObjectName('SectionTitle');right.addWidget(preview_label)
         self.frame=AspectPreview(tr('production.preview_hint'));self.frame.setAlignment(Qt.AlignmentFlag.AlignCenter);self.frame.setMinimumSize(240,135)
+        self.frame.setObjectName('ProductionPreview');self.frame.setWordWrap(True)
+        self.frame.image_clicked.connect(lambda point:self.guard(lambda:self._browse_launch_preview(point)))
         right.addWidget(self.frame,1)
         self.preview_slider=QSlider(Qt.Orientation.Horizontal);self.preview_slider.setObjectName('VideoPreviewSlider')
         self.preview_slider.setAccessibleName('整期音画预览位置');self.preview_slider.setEnabled(False)
         self.preview_slider.valueChanged.connect(lambda *_:self.guard(self._seek_preview))
         self.preview_slider.sliderPressed.connect(self._begin_preview_seek)
         self.preview_slider.sliderReleased.connect(lambda:self.guard(self._end_preview_seek))
-        right.addWidget(self.preview_slider);self.preview_clock=QLabel();self.preview_clock.setObjectName('MutedText');right.addWidget(self.preview_clock)
-        actions=QHBoxLayout();self.preview_button=self.button('production.preview',self.preview_roundup,actions)
+        right.addWidget(self.preview_slider)
+        time_row=QHBoxLayout();self.preview_clock=QLabel();self.preview_clock.setWordWrap(True)
+        self.preview_clock.setObjectName('MutedText');time_row.addWidget(self.preview_clock,1)
+        self.preview_tasks=QComboBox();self.preview_tasks.setMinimumWidth(100);self.preview_tasks.setMaximumWidth(220)
+        self.preview_tasks.activated.connect(lambda index:self.guard(lambda:self.jump_task(self.preview_tasks.itemData(index))))
+        time_row.addWidget(self.preview_tasks);right.addLayout(time_row)
+        actions=QHBoxLayout();self.preview_button=self.button('production.preview',self._request_visible_preview,actions)
         self.preview_play=QPushButton('播放画面');self.preview_play.clicked.connect(lambda:self.guard(self._toggle_preview));actions.addWidget(self.preview_play)
         self.sync_button=QPushButton('同步与画面');sync_menu=QMenu(self.sync_button)
         sync_menu.addAction('同步校准',lambda:self.guard(self.show_sync))
         sync_menu.addAction('镜头编排（高级）',lambda:self.guard(self.show_shot_settings))
         sync_menu.addAction('重新生成本条配音',lambda:self.guard(lambda:self.news_audio(force=True) if self.mode=='news' else r._audio_one()))
         self.sync_button.setMenu(sync_menu);actions.addWidget(self.sync_button)
-        self.preview_tasks=QComboBox();self.preview_tasks.setMinimumWidth(100);self.preview_tasks.setMaximumWidth(220)
-        self.preview_tasks.activated.connect(lambda index:self.guard(lambda:self.jump_task(self.preview_tasks.itemData(index))))
-        actions.addWidget(self.preview_tasks)
         actions.addStretch()
         right.addLayout(actions)
         self.preview_timer=QTimer(self);self.preview_timer.setInterval(33)
         self.preview_timer.timeout.connect(lambda:self.guard(self._advance_preview))
+        self._poster_timer=QTimer(self);self._poster_timer.setInterval(24)
+        self._poster_timer.timeout.connect(self._poll_poster)
         split.addWidget(view);split.setStretchFactor(0,2);split.setStretchFactor(1,3);split.setSizes([320,600]);layout.addWidget(split,1)
-        self.media.addTab(page,tr('production.roundup_voice'))
+        self.media.addTab(self.scroll(page),tr('production.roundup_voice'))
         r.preview_ready.connect(self._audio_preview_ready)
+        r.sample_ready.connect(self._voice_sample_ready)
+
+    def _voice_sample(self):
+        from ai.speech import SpeechRequest,generate_speech
+        from services.voice_profiles import REFERENCE_TEXT
+        from uuid import uuid4
+
+        if not self._voice_configured():self.show_voice_settings();return
+        r=self.roundup;configured=r.voice_settings()['tts']
+        def generate(options,token):
+            r.tts_provider.configure(options)
+            request=SpeechRequest(REFERENCE_TEXT,model=options['model'] or 'local-reference',
+                                  voice=options['speaker'],style=options.get('style',''))
+            return generate_speech(request,resource_path('cache','voice_samples',uuid4().hex),
+                                   provider=r.tts_provider,cancel_check=token.check).path
+        r._start_job('voice_sample',generate,configured)
+
+    def _voice_sample_ready(self,path):
+        if self.navigation.currentRow()==2 and self.media.currentIndex()==0:self.roundup._play(path)
+
+    def _update_music(self,changes):
+        previous=music_settings(self.episode)
+        track_change=changes.get('music',self.episode.get('music',[]))!=self.episode.get('music',[])
+        updated={**self.episode,**changes};validate_episode(updated)
+        options=music_settings(updated)
+        reprepare=track_change or any(previous[key]!=options[key] for key in ('enabled','loop','fade_in','fade_out'))
+        playing=self.preview_timer.isActive() and getattr(self,'_audio_playback',False)
+        self.episode.update(changes)
+        if track_change:self.music_panel.stop();self.music_panel.set_edition(self.episode)
+        self._update_preview_levels()
+        if reprepare and playing:self._stop_preview();self._prepare_audio_preview()
+        if reprepare:self._changed()
+
+    def _listen_mix(self):
+        if self.roundup.worker is not None:raise ValueError('请先等待当前任务完成或取消')
+        self._stop_preview();self._audition_end=None
+        self.preview_roundup()
+        from services.roundup_sync import row_at
+        if self.preview_slider.value()>=self.preview_slider.maximum():self.preview_slider.setValue(0)
+        clock=row_at(self._preview_timeline,self.preview_slider.value()/1000)
+        if not clock['audio']:raise ValueError('请先生成当前段落的配音')
+        self._prepare_audio_preview()
 
     def _edit_voice_text(self):
         r=self.roundup
         if self.mode=='news':
             if getattr(self,'_voice_loading',False) or self.worker or r.worker:return
-            draft=self.news.voice_draft()
-            if draft:
+            if self.news.is_selected(self.news.current_article()):
                 self._stop_preview();self.news.oral.setPlainText(self.voice_text.toPlainText())
             return
         if getattr(self,'_voice_loading',False) or r.worker or r.segment_list.currentRow()<0:return
@@ -513,16 +746,34 @@ class ProductionWorkspace(QWidget):
 
     def _export_page(self):
         page=QWidget();layout=QVBoxLayout(page)
-        self.export_hint=QLabel();self.export_hint.setWordWrap(True);layout.addWidget(self.export_hint)
-        path_row=QHBoxLayout();path_row.addWidget(QLabel(tr('video.output')))
+        layout.setContentsMargins(0,0,0,0);layout.setSpacing(WORKSPACE_GAP)
+        review=QWidget();review.setObjectName('WorkspacePanel');review_box=QVBoxLayout(review)
+        review_box.setContentsMargins(16,12,16,12);review_box.setSpacing(8)
+        self.export_hint=QLabel();self.export_hint.setObjectName('SectionTitle');self.export_hint.setWordWrap(True)
+        review_box.addWidget(self.export_hint)
+        scope_row=QHBoxLayout();self.export_contents=QLabel();self.export_contents.setWordWrap(True)
+        scope_row.addWidget(self.export_contents,1)
+        self.button('production.review_script',self._review_export_scope,scope_row).setObjectName('TextButton')
+        review_box.addLayout(scope_row)
+        self.export_voice_row=QWidget();self.export_voice_row.setProperty('formGroup',True)
+        voice_row=QHBoxLayout(self.export_voice_row);voice_row.setContentsMargins(0,0,0,0)
+        self.export_voice_state=QLabel();voice_row.addWidget(self.export_voice_state,1)
+        self.button('production.configure_voice',self.show_voice_settings,voice_row).setObjectName('TextButton')
+        review_box.addWidget(self.export_voice_row);layout.addWidget(review)
+        output=QWidget();output.setObjectName('WorkspacePanel');output_box=QVBoxLayout(output)
+        output_box.setContentsMargins(16,12,16,12);output_box.setSpacing(8)
+        path_row=QHBoxLayout();path_label=QLabel(tr('video.output'));path_row.addWidget(path_label)
         self._detach_widget(self.preferences,self.preferences.output_edit);path_row.addWidget(self.preferences.output_edit,1)
-        self.button('production.choose_output',self.choose_output,path_row);layout.addLayout(path_row)
+        path_label.setBuddy(self.preferences.output_edit)
+        self.button('production.choose_output',self.choose_output,path_row);output_box.addLayout(path_row)
         news_actions=QHBoxLayout()
-        self.complete_export_button=self.button('导出带配音的 MP4',self.export_complete,news_actions,True)
-        news_actions.addStretch(1);layout.addLayout(news_actions)
-        self.news_formats=QWidget();formats=QVBoxLayout(self.news_formats);formats.setContentsMargins(0,0,0,0);layout.addWidget(self.news_formats)
+        self.complete_export_button=self.button('导出本期视频',self.export_complete,news_actions,True)
+        self.episode_preview_button=self.button('预览本期（含配音）',lambda:self.export_complete(preview=True),news_actions)
+        news_actions.addStretch(1);output_box.addLayout(news_actions)
+        self.news_formats=QWidget();formats=QVBoxLayout(self.news_formats);formats.setContentsMargins(0,0,0,0);output_box.addWidget(self.news_formats)
+        self.news_formats.setProperty('formGroup',True)
         advanced=QPushButton('文稿与资料格式');advanced.setCheckable(True);formats.addWidget(advanced,0,Qt.AlignmentFlag.AlignLeft)
-        documents=QWidget();form=QFormLayout(documents)
+        documents=QWidget();documents.setProperty('formGroup',True);form=QFormLayout(documents)
         self._move_form_control(self.preferences,self.preferences.word_check,form,'Word 文档')
         self._move_form_control(self.preferences,self.preferences.markdown_check,form,'Markdown 文稿')
         self._move_form_control(self.preferences,self.preferences.premiere_check,form,'Premiere 素材快照（JSON）')
@@ -530,26 +781,52 @@ class ProductionWorkspace(QWidget):
         doc_actions=QHBoxLayout();self.export_news_button=self.button('导出所选文稿与资料',self.start_news_export,doc_actions)
         doc_actions.addStretch(1);form.addRow(doc_actions)
         documents.hide();formats.addWidget(documents);advanced.toggled.connect(documents.setVisible)
-        self.append_news=QCheckBox('发射综述后接本期已勾选新闻');layout.addWidget(self.append_news)
         export_layout=self.roundup.export_controls.layout()
         script=export_layout.takeAt(0).widget();visuals=export_layout.takeAt(0).widget()
         primary=QHBoxLayout();primary.addWidget(script);primary.addStretch(1)
         visuals.hide();visuals.deleteLater();script.setObjectName('TextButton');export_layout.insertLayout(0,primary)
-        layout.addWidget(self.roundup.export_controls)
+        output_box.addWidget(self.roundup.export_controls)
         actions=QHBoxLayout();self.cards_export_button=self.button('production.render_cards',self.render_cards,actions)
-        self.button('production.open_output',self.open_output,actions).setObjectName('TextButton');actions.addStretch(1);layout.addLayout(actions)
+        self.button('production.open_output',self.open_output,actions).setObjectName('TextButton');actions.addStretch(1);output_box.addLayout(actions)
         self.include_intro=QCheckBox('随视频素材导出已制作的片头（独立 MP4）')
-        layout.addWidget(self.include_intro)
-        results_bar=QHBoxLayout();self.result_title=QLabel('本期成果');results_bar.addWidget(self.result_title,1)
+        output_box.addWidget(self.include_intro);layout.addWidget(output)
+        results=QWidget();results.setObjectName('WorkspacePanel');results_box=QVBoxLayout(results)
+        results_box.setContentsMargins(16,10,16,12)
+        results_bar=QHBoxLayout();self.result_title=QLabel('本期成果');self.result_title.setObjectName('SectionTitle');results_bar.addWidget(self.result_title,1)
         self.history_toggle=QPushButton('查看历史成果');self.history_toggle.setCheckable(True)
-        self.history_toggle.toggled.connect(self._refresh_files);results_bar.addWidget(self.history_toggle);layout.addLayout(results_bar)
-        self.output_files=QListWidget();self.output_files.itemDoubleClicked.connect(lambda item:QDesktopServices.openUrl(QUrl.fromLocalFile(item.data(Qt.ItemDataRole.UserRole))))
-        self.output_hint=QLabel();layout.addWidget(self.output_hint)
-        layout.addWidget(self.output_files,1);self.pages.addWidget(page)
+        self.history_toggle.toggled.connect(self._refresh_files);results_bar.addWidget(self.history_toggle);results_box.addLayout(results_bar)
+        self.output_files=QListWidget();self.output_files.setProperty('flat',True)
+        self.output_files.itemDoubleClicked.connect(lambda item:QDesktopServices.openUrl(QUrl.fromLocalFile(item.data(Qt.ItemDataRole.UserRole))))
+        self.output_hint=QLabel();self.output_hint.setObjectName('MutedText');results_box.addWidget(self.output_hint)
+        results_box.addWidget(self.output_files,1);layout.addWidget(results,1);self.pages.addWidget(self.scroll(page))
+
+    def _export_checks(self):
+        complete=self.settings.video_workflow=='complete'
+        news=len(self.news.selected_articles()) if complete or self.mode=='news' else 0
+        launches=self._launch_count() if complete or self.mode=='roundup' else 0
+        key='production.export_selection' if news or launches else 'production.export_empty_selection'
+        self.export_contents.setText(tr(key,news=news,launches=launches))
+        self.export_voice_row.setVisible(complete)
+        if complete:
+            ready=self._voice_configured()
+            self.export_voice_state.setText(tr('production.voice_ready' if ready else 'production.voice_missing'))
+
+    def _review_export_scope(self):
+        if self.settings.video_workflow=='complete':
+            news=bool(self.news.selected_articles());launches=bool(self._launch_count())
+            if news!=launches:self.content.setCurrentIndex(0 if news else 1)
+        self.navigation.setCurrentRow(1)
+
+    def _voice_configured(self):
+        from services.voice_profiles import configured
+        r=self.roundup
+        return configured(dict(python=r.python.text().strip(),model=r.model.text().strip(),speaker=r.speaker_id()))
 
     def _settings_page(self):
         page=QWidget();layout=QVBoxLayout(page);self.settings_tabs=SegmentedTabs();layout.addWidget(self.settings_tabs,1)
+        layout.setContentsMargins(0,0,0,0);layout.setSpacing(WORKSPACE_GAP)
         self.preferences.layout().setContentsMargins(0,0,0,0);self.preferences.nav.setFixedWidth(140)
+        self.preferences.workspace_button.hide()
         self.preferences.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         for i in range(self.preferences.nav.count()):self.preferences.nav.item(i).setSizeHint(QSize(120,40))
         header=self.preferences.layout().itemAt(0).layout()
@@ -577,8 +854,8 @@ class ProductionWorkspace(QWidget):
         from ui.cache_maintenance_panel import CacheMaintenancePanel
         self.maintenance=CacheMaintenancePanel(self);self.settings_tabs.addTab(self.maintenance,'素材与缓存')
         output_options=QWidget();output_form=QFormLayout(output_options);self.video_workflow=QComboBox()
-        self.video_workflow.addItem('完整视频 · 带配音 MP4','complete')
-        self.video_workflow.addItem('画面素材 · 无声透明 MOV','materials')
+        self.video_workflow.addItem('模式 1 · 整期视频','complete')
+        self.video_workflow.addItem('模式 2 · 旧版分项素材','materials')
         self.video_workflow.setCurrentIndex(max(0,self.video_workflow.findData(self.settings.video_workflow)))
         output_form.addRow('视频输出方式',self.video_workflow)
         self.settings_tabs.addTab(output_options,'视频输出')
@@ -587,13 +864,18 @@ class ProductionWorkspace(QWidget):
         self.preferences.about_layout.addRow(self.updates)
         self.roundup.request_voice_setup=self.show_voice_settings
         self.roundup.voice_setup_busy=lambda:self.voice_setup.worker is not None
-        for index in (4,5):self.preferences.nav.item(index).setHidden(True)
+        for index in (2,4,5):self.preferences.nav.item(index).setHidden(True)
         for component in (self.preferences,self.rules):
             component.setMinimumSize(0,0)
             for box in component.findChildren(QDialogButtonBox):box.hide()
         actions=QHBoxLayout();self.apply_button=self.button('production.apply_settings',self.apply_preferences,actions,True)
-        self.button('术语词典',self.open_terms,actions)
-        self.button('production.apply_rules',self.apply_rules,actions);self.button('production.save_voice',self.roundup._save_voice,actions)
+        terms=self.button('术语词典',self.open_terms,actions)
+        rules=self.button('production.apply_rules',self.apply_rules,actions,True)
+        voice=self.button('production.save_voice',self.roundup._save_voice,actions,True)
+        def show_actions(index):
+            self.apply_button.setVisible(index in (0,4));terms.setVisible(index==0)
+            rules.setVisible(index==1);voice.setVisible(index==2)
+        self.settings_tabs.currentChanged.connect(show_actions);show_actions(self.settings_tabs.currentIndex())
         actions.insertStretch(0,1)
         layout.addLayout(actions);self.pages.addWidget(page)
 
@@ -655,14 +937,15 @@ class ProductionWorkspace(QWidget):
         self.materials.currentChanged.connect(self._materials_changed)
         self.news.collect_requested.connect(lambda:self.guard(self.start_news_collect));self.news.write_requested.connect(lambda:self.guard(self.start_news_write))
         self.dashboard.start_requested.connect(lambda:self.guard(self.start_news_collect));self.roundup.job_changed.connect(self._poll)
-        self.roundup.draft_changed.connect(self._header)
+        self.roundup.draft_changed.connect(self._changed)
         self.news.changed.connect(self._changed);self.dashboard.settings_changed.connect(self._changed);self.feed_panel.feeds_changed.connect(self._changed)
         d=self.dashboard
         for control in (d.date_mode_combo,d.launch_range_combo):control.currentIndexChanged.connect(self._remember_source_dates)
         for control in (d.start_date_edit,d.end_date_edit,d.launch_start_date_edit,d.launch_end_date_edit):
             control.dateChanged.connect(self._remember_source_dates)
-        self.news.changed.connect(lambda:self._voice_refresh() if self.mode=='news' else None)
-        self.news.article_changed.connect(lambda:self._voice_refresh() if self.mode=='news' else None)
+        self.news.changed.connect(self._sync_news_voice)
+        self.news.article_changed.connect(self._sync_news_voice)
+        self.news.oral_modified.connect(self._sync_edited_news_oral)
         self.news.narration_requested.connect(lambda:self.guard(self.propose_news_voice))
         self.news.retry_requested.connect(lambda:self.guard(self.retry_news_narrations))
         self.news.voice_requested.connect(self.open_news_voice)
@@ -670,8 +953,8 @@ class ProductionWorkspace(QWidget):
         self.news.image_requested.connect(lambda article,options:self.guard(lambda:self.start_news_image(article,options)))
         self.roundup.tts_state_changed.connect(lambda message:self.task_text.setText(message) if self.worker and self.worker_kind.startswith('voice_') else None)
         self.preferences.output_edit.editingFinished.connect(self._changed)
-        self.roundup.segment_list.currentRowChanged.connect(lambda *_:self._voice_refresh())
-        self.roundup.job_changed.connect(lambda:self._launch_detail() if self.roundup.worker is None else None)
+        self.roundup.segment_list.currentRowChanged.connect(self._roundup_voice_selection_changed)
+        self.roundup.job_changed.connect(self._launch_detail)
         self.roundup.job_changed.connect(lambda:self._stop_preview() if self.roundup.worker is not None else None)
         self.voice_setup.changed.connect(self._poll)
         self.preferences.accepted.connect(lambda:self.guard(self.apply_preferences));self.rules.accepted.connect(lambda:self.guard(self.apply_rules))
@@ -679,6 +962,8 @@ class ProductionWorkspace(QWidget):
 
     def _mode(self):
         self.mode=self.content.currentData();self.scripts.setCurrentIndex(1 if self.mode=='roundup' else 0)
+        if not self._restoring and self.navigation.currentRow()==0 and self.materials.currentIndex()<2:
+            self.materials.setCurrentIndex(self.content.currentIndex())
         if getattr(self,'_media_mode',None)!=self.mode:
             self._release_preview();self._frame_key=None;self._media_mode=self.mode
             self._preview_news_id=self._roundup_focus_id=None
@@ -686,24 +971,29 @@ class ProductionWorkspace(QWidget):
         self.media.setTabText(1,'画面素材')
         self.cards_mode_note.setVisible(self.mode=='roundup')
         materials_only=self.settings.video_workflow=='materials'
+        if hasattr(self,'preview_timer'):self.preview_timer.setInterval(33 if materials_only else 16)
         if not materials_only and self.media.currentIndex()==1:self.media.setCurrentIndex(0)
         self.media.setTabVisible(1,materials_only)
-        self.cards_export_button.setText('导出无声画面素材（MOV）')
+        self.cards_export_button.setText('导出旧版画面素材（MOV）')
         self.cards_export_button.setVisible(materials_only);self.include_intro.setVisible(materials_only)
-        self.complete_export_button.setVisible(not materials_only)
-        self.append_news.setVisible(not materials_only and self.mode=='roundup')
+        self.complete_export_button.setText(('导出发射 MP4' if self.mode=='roundup' else '导出新闻透明 MOV')
+                                           if materials_only else '导出本期视频')
+        self.episode_preview_button.setVisible(not materials_only)
         self.speech_button.setText('确认并生成本条配音' if self.mode=='news' else tr('production.synthesize'))
         self.listen_button.setText('试听本条' if self.mode=='news' else tr('production.listen'))
         self.preview_button.setText('预览新闻画面' if self.mode=='news' else tr('production.preview'))
         self.preview_tasks.setVisible(self.mode=='roundup')
+        self.voice_scope.setVisible(self.mode=='news')
+        self.voice_segments.setPlaceholderText(tr('production.choose_news_for_voice') if self.mode=='news' else '')
         self.voice_image_use.setVisible(self.mode=='news')
+        self.voice_image_menu.setVisible(self.mode=='news')
         self.roundup.export_controls.setVisible(materials_only and self.mode=='roundup')
         self.export_news_button.setVisible(self.mode=='news');self.news_formats.setVisible(self.mode=='news')
-        self.export_hint.setText('画面素材导出无声透明 MOV，可另行导出稿件。' if materials_only else
-            '本次成片只在所选目录新增一个带配音的 MP4。')
+        self.export_hint.setText('按稿件勾选范围导出带配音的分项素材。' if materials_only else
+            f"第 {self.episode['number']} 期 · {self.episode['date']} · 导出为带配音和字幕的 MP4")
         if self.navigation.currentRow()==2 and self.media.currentIndex()==1 and not self._restoring:self.guard(self.sync_current_cards)
         if self.navigation.currentRow()==3 and not self._restoring:self._refresh_files()
-        if self.navigation.currentRow()==2 and self.media.currentIndex()==0 and not self._restoring:self._voice_refresh()
+        self._refresh_visible_voice()
         self._header(check_saved=False)
 
     def _materials_changed(self,index):
@@ -712,7 +1002,7 @@ class ProductionWorkspace(QWidget):
 
     def _media_changed(self,index):
         self.inspector.hide()
-        if index==0 and not self._restoring:self._voice_refresh()
+        if index==0:self._refresh_visible_voice()
         if index!=0:self._release_preview()
         if index!=1:self.cards._stop_preview()
         if index==1 and not self._restoring:self.guard(self.sync_current_cards)
@@ -720,8 +1010,9 @@ class ProductionWorkspace(QWidget):
 
     def media_route(self,index):
         if index==1 and self.settings.video_workflow!='materials':index=0
+        unchanged=self.navigation.currentRow()==2 and self.media.currentIndex()==index
         self.navigation.setCurrentRow(2);self.media.setCurrentIndex(index)
-        if index==0:self._voice_refresh()
+        if unchanged and index==0:self._refresh_visible_voice()
         if index==3:self.sync_download_tasks()
 
     def open_rules(self):
@@ -730,9 +1021,9 @@ class ProductionWorkspace(QWidget):
         self.rules.type_list.setCurrentRow(PROMPT_TYPES.index('roundup') if self.mode=='roundup' else 0)
 
     def show_settings(self):
-        self.inspector.hide()
         self.navigation.blockSignals(True);self.navigation.setCurrentRow(-1);self.navigation.blockSignals(False)
         self.pages.setCurrentIndex(4)
+        self._navigated(-1)
         self.page_title.setText(tr('settings'))
 
     def show_about(self):
@@ -742,15 +1033,38 @@ class ProductionWorkspace(QWidget):
 
     def _navigated(self,index):
         self.inspector.hide()
-        if not self.busy():self.task_text.setText(tr('ready'))
         if index!=2:
-            self._stop_preview();self.cards._stop_preview();self.intro._stop_preview()
+            self._release_preview();self.cards._stop_preview();self.intro._stop_preview()
         if index>=0:
             self._last_page=index;self.page_title.setText(self.navigation.item(index).text())
+        if index==0 and not self._restoring and self.materials.currentIndex()<2:
+            self.materials.setCurrentIndex(self.content.currentIndex())
+        if index==1 and self.mode=='news' and not self._restoring:self.news.refresh_voice()
         if index==2:
             if self.media.currentIndex()==1 and not self._restoring:self.guard(self.sync_current_cards)
-            else:self._voice_refresh()
-        if index==3:self._refresh_files()
+            else:self._refresh_visible_voice()
+        if index==3:self._refresh_files();self._export_checks()
+        self._workflow_navigation()
+
+    def previous_step(self):
+        index=self.navigation.currentRow()
+        if index<0:self.navigation.setCurrentRow(self._last_page)
+        elif index>0:self.navigation.setCurrentRow(index-1)
+
+    def next_step(self):
+        index=self.navigation.currentRow()
+        if index==1:self.media.setCurrentIndex(0)
+        if 0<=index<len(WORKFLOW_PAGES)-1:self.navigation.setCurrentRow(index+1)
+
+    def _workflow_navigation(self):
+        index=self.navigation.currentRow()
+        self.content.setVisible(index>0)
+        self.content.setAccessibleName(tr('production.content_mode'))
+        self.previous_button.setVisible(index!=0)
+        self.previous_button.setText(tr('production.return_to_workflow' if index<0 else 'production.previous_step'))
+        has_next=0<=index<len(WORKFLOW_PAGES)-1
+        self.next_button.setVisible(has_next)
+        if has_next:self.next_button.setText(tr('production.next_step')+'  ·  '+self.navigation.item(index+1).text())
 
     def inspect(self,value):
         self.inspector_text.setPlainText(json.dumps(value,ensure_ascii=False,indent=2,default=str));self.inspector.show()
@@ -775,87 +1089,282 @@ class ProductionWorkspace(QWidget):
         if self.news.select_article(identifier):self.media_route(0)
 
     def _voice_selected(self,index):
-        self._stop_preview()
         if self.mode=='news':
             if index>=0:self.news.select_article(self.voice_segments.itemData(index))
             return
-        if index>=0 and index!=self.roundup.segment_list.currentRow():self.roundup.segment_list.setCurrentRow(index)
+        self._stop_preview()
+        identifier=self.voice_segments.itemData(index)
+        row=next((n for n,s in enumerate(self.roundup.draft['segments']) if s['id']==identifier),-1)
+        if row>=0 and row!=self.roundup.segment_list.currentRow():self.roundup.segment_list.setCurrentRow(row)
 
     def media_draft(self):
         if self.mode=='news':
-            draft=self.news.voice_draft()
+            article=self.news.current_article()
+            if article is not None and not self.news.is_selected(article):
+                raise ValueError('本条未纳入当前期次，请检查稿件勾选与本期统计日期')
+            draft=self.news.voice_draft(article)
             if draft is None:raise ValueError('请先在稿件页选择一条新闻')
             return draft
-        return self.roundup.draft
+        from services.production_export import selected_roundup
+        return selected_roundup(self.roundup.draft)
 
     def _media_basis(self):
-        if self.mode=='news':return roundup.digest([self.news.voice_draft(),False])
-        return roundup.digest([self.roundup.draft,self.roundup._voice_dirty])
+        if self.mode=='news':
+            return self._news_media_basis(self.news.voice_draft(assets=False),self._news_titles())
+        from services.production_export import selected_roundup
+        return roundup.digest([selected_roundup(self.roundup.draft),self.roundup._voice_dirty])
+
+    def _news_media_basis(self,draft,titles):
+        try:asset_stamp=resource_path('news-images','manifest.json').stat().st_mtime_ns
+        except OSError:asset_stamp=None
+        segment=draft['segments'][0] if draft else {}
+        screen={k:v for k,v in draft['screen_item'].items() if k not in ('image','image_error','slideshow','video')} if draft else {}
+        return roundup.digest([segment,screen,titles,self.settings.video_workflow,self._launch_count(),asset_stamp,self._edition_revision,
+            [draft.get(key) for key in ('tts','pronunciations','aligner','caption_overlay')] if draft else None])
 
     def synthesize_media(self):
         return self.news_audio() if self.mode=='news' else self.roundup._audio_all()
 
+    def _news_titles(self):
+        return [self.news._title(article) for article in self.news.selected_articles()]
+
+    def _launch_count(self):
+        return sum(row['included'] for row in self.roundup.draft['selection'])
+
+    def _sync_news_voice(self):
+        if self.mode!='news' or self._restoring:return
+        if self.navigation.currentRow()==2 and self.media.currentIndex()==0:
+            self._voice_refresh()
+            return
+        selected=self.news.is_selected(self.news.current_article())
+        self._set_voice_text(self.news.oral.toPlainText() if selected else '')
+
+    def _set_voice_text(self,text):
+        self._voice_loading=True
+        if self.voice_text.toPlainText()!=text:self.voice_text.setPlainText(text)
+        self._voice_loading=False
+
     def _news_voice_refresh(self):
-        from services import news_voice
-        draft=self.news.voice_draft();articles=self.news.bundle['articles'] if self.news.bundle else []
         from models.news import news_id
-        self.voice_segments.blockSignals(True);self.voice_segments.clear()
-        for article in articles:self.voice_segments.addItem(self.news._title(article),news_id(article.news.url))
+        from services import news_voice
+        articles=self.news.selected_articles()
+        selected=self.news.is_selected(self.news.current_article())
+        if (articles and not selected and not self._restoring and
+                self.navigation.currentRow()==2 and self.media.currentIndex()==0):
+            selected=self.news.select_article(news_id(articles[0].news.key))
+        draft=self.news.voice_draft(assets=False) if selected else None
+        choices=[(self.news._title(article),news_id(article.news.key)) for article in articles]
+        self.voice_scope.setText(tr('production.checked_news_for_voice',count=len(articles)))
+        self.voice_segments.blockSignals(True)
+        if getattr(self,'_news_voice_choices',None)!=choices:
+            self.voice_segments.clear()
+            for title,identifier in choices:self.voice_segments.addItem(title,identifier)
+            self._news_voice_choices=choices
         self.voice_segments.setCurrentIndex(self.voice_segments.findData(draft['news_id']) if draft else -1)
         self.voice_segments.blockSignals(False)
-        self._voice_loading=True
-        text=draft['segments'][0]['spoken'] if draft else ''
-        if self.voice_text.toPlainText()!=text:self.voice_text.setPlainText(text)
-        self._voice_loading=False;self.voice_text.setPlaceholderText('先在稿件页生成或填写新闻口播稿，摘要不会自动配音')
-        try:self.play_state.setText(news_voice.state(draft) if draft else '请选择新闻')
-        except ValueError as error:self.play_state.setText('最终朗读待检查：'+str(error))
-        self.news.refresh_voice();self.play_state.setToolTip(self.news.final_input.toPlainText())
-        from services.voice_profiles import configured
-        voice=(draft or {}).get('tts',{});self.voice_status.setText('语音已配置' if configured(voice) else '尚未配置语音模型')
+        self._set_voice_text(draft['segments'][0]['spoken'] if draft else '')
+        self.voice_text.setPlaceholderText('先在稿件页生成或填写新闻口播稿，摘要不会自动配音')
+        self.play_state.setText(self.news.voice_hint.text() if draft else '请选择新闻')
+        self.play_state.setToolTip(self.news.final_input.toPlainText())
+        self.voice_status.setText(tr('production.voice_ready' if self._voice_configured() else 'production.voice_missing'))
         from services import news_images
         try:
             row=news_images.load()['news'].get(draft['news_id'],{}) if draft else {}
             self.voice_image_use.setEnabled(draft is not None)
             self.voice_image_use.blockSignals(True);self.voice_image_use.setChecked(row.get('use_image',True));self.voice_image_use.blockSignals(False)
         except (OSError,ValueError,KeyError,TypeError):self.voice_image_use.setEnabled(False)
+        self.voice_image_menu.setEnabled(draft is not None and self.image_worker is None)
+        titles=[title for title,_ in choices]
+        key=self._news_media_basis(draft,titles)
         if not getattr(self,'_preview_syncing',False):
             identifier=draft['news_id'] if draft else None
             if identifier!=getattr(self,'_preview_news_id',None):
                 self._preview_news_id=identifier;self._preview_select_pending=True
-            if not draft or self._media_basis()!=getattr(self,'_frame_key',None):self._release_preview()
-        if draft and self.frame.isVisible():self._preview_news()
-        elif not draft:self.frame.setText('请选择新闻；没有音频时仍可预览条卡画面')
+            if not draft or key!=getattr(self,'_frame_key',None):
+                if not self._poster_request or self._poster_request[0]!=key:self._release_preview()
+        if draft and self.frame.isVisible() and key!=getattr(self,'_frame_key',None):
+            if not self._poster_request:
+                index=draft['screen_item']['ordinal']-1
+                previous=self.news.voice_draft(articles[index-1],assets=False) if index else None
+                position=0 if self._preview_select_pending else self.preview_slider.value()/1000
+                self._poster_request=(key,deepcopy(draft),deepcopy(previous),titles,self._launch_count(),
+                                     self.settings.video_workflow,position)
+                self.frame.set_image(None);self.frame.setText('正在准备本条新闻画面…')
+                self.preview_clock.setText('正在加载画面素材')
+                self.preview_slider.setEnabled(False)
+                if not self._poster_timer.isActive():self._poster_timer.start()
+        elif not draft:
+            self.frame.set_image(None);self.frame.setText(tr('production.choose_news_for_voice'))
+            self.preview_slider.setEnabled(False)
+        self.preview_play.setEnabled(draft is not None and not self._poster_request)
 
-    def _preview_news(self):
+    def _sync_edited_news_oral(self,text):
+        if self.mode!='news' or not self.news.is_selected(self.news.current_article()):return
+        self._set_voice_text(text)
+        if self._audio_playback or self.preview_timer.isActive():self._release_preview()
+        draft=self.news.voices.get(news_id(self.news.current_article().news.key))
+        if draft and draft['segments'][0].get('audio'):self.play_state.setText('旧配音已过期，请重新生成')
+
+    @staticmethod
+    def _render_news_poster(request):
+        from tools import news_visuals
         from services import news_voice
-        draft=self.media_draft();key=self._media_basis()
-        if getattr(self,'_frame_key',None)!=key:
-            self._news_frames=news_voice.prepare_frames(draft);self._preview_timeline=self._news_frames['timeline']
-            self._timeline_key=key;self._frame_key=key
-            self.preview_slider.blockSignals(True);self.preview_slider.setRange(0,round(self._preview_timeline['duration_seconds']*1000));self.preview_slider.blockSignals(False)
+        _,draft,previous,titles,launch_count,workflow,position=request
+        renderer=news_voice if workflow=='materials' else news_visuals
+        populate_voice_assets(draft)
+        if previous and renderer is news_visuals:populate_voice_assets(previous)
+        timeline,frames=ProductionWorkspace._build_news_frames(draft,renderer,previous,titles,launch_count)
+        position=min(position,round(timeline['duration_seconds']*1000)/1000)
+        try:
+            poster=renderer.frame_at(frames,position)
+            if position>0 and 'previous_picture' in frames:
+                poster=renderer.slide_from(frames,frames['previous_picture'],poster,position)
+        finally:news_visuals.close_frames(frames)
+        return timeline,frames,poster,position
+
+    def _poll_poster(self):
+        if self._poster_future is not None:
+            key,future=self._poster_future
+            if not future.done():return
+            self._poster_future=None
+            if self._poster_request and self._poster_request[0]==key:
+                _,draft,*_=self._poster_request;self._poster_request=None
+                try:timeline,frames,poster,position=future.result()
+                except (ValueError,OSError,RuntimeError,KeyError,TypeError) as error:
+                    self.frame.setText(str(error));self.preview_clock.clear()
+                else:
+                    self._adopt_news_frames(draft,key,timeline,frames)
+                    self._show_preview_image(poster)
+                    self._preview_select_pending=False
+                    self.preview_slider.setEnabled(True)
+                    self._update_news_clock(position)
+                    row=timeline['segments'][0]
+                    if draft['segments'][0].get('audio'):
+                        self.play_state.setText('配音有效 · '+row['message'] if row['audio'] else '旧配音已过期，请重新生成')
+                self.preview_play.setEnabled(True)
+        if self._poster_request:
+            self._poster_future=(self._poster_request[0],_BACKGROUND.submit(self._render_news_poster,self._poster_request))
+        else:self._poster_timer.stop()
+
+    def _preview_news(self, *, reuse=False):
+        from services import news_voice
+        from tools import news_visuals
+        renderer=news_voice if self.settings.video_workflow=='materials' else news_visuals
+        if not reuse or getattr(self,'_news_frames',None) is None:
+            draft=self.news.voice_draft(assets=False);key=self._news_media_basis(draft,self._news_titles())
+            if not draft or not self.news.is_selected(self.news.current_article()):
+                raise ValueError('请在稿件页勾选本条新闻')
+            if getattr(self,'_frame_key',None)!=key:
+                if self._poster_request:self._poster_request=None
+                populate_voice_assets(draft)
+                self._prepare_news_frames(draft,key,renderer)
         if getattr(self,'_preview_select_pending',False):
             self.preview_slider.blockSignals(True);self.preview_slider.setValue(0);self.preview_slider.blockSignals(False);self._preview_select_pending=False
-        time=self.preview_slider.value()/1000;image=news_voice.frame_at(self._news_frames,time)
-        qimage=QImage(image.tobytes(),image.width,image.height,image.width*4,QImage.Format.Format_RGBA8888).copy();self.frame.set_image(QPixmap.fromImage(qimage))
-        self.preview_slider.setEnabled(True);row=self._preview_timeline['segments'][0]
+        time=self.preview_slider.value()/1000;image=renderer.frame_at(self._news_frames,time)
+        # A still preview at the start should identify the selected article.
+        if renderer is news_visuals and 'previous_picture' in self._news_frames and (time>0 or self.preview_timer.isActive()):
+            image=renderer.slide_from(self._news_frames,self._news_frames['previous_picture'],image,time)
+        self._show_preview_image(image)
+        self.preview_slider.setEnabled(True);self._update_news_clock(time)
+
+    def _request_visible_preview(self):
+        if self.mode=='news':self._news_voice_refresh()
+        else:self.preview_roundup()
+
+    def _update_news_clock(self,time):
+        row=self._preview_timeline['segments'][0]
         cue=next((u['screen'] for u in row['units'] if u['global_start_seconds']<=time<u['global_end_seconds']),'')
         mode='播放器时间' if getattr(self,'_audio_playback',False) else '无声预览时间'
-        message=row['message'] if draft['segments'][0]['spoken'].strip() else '尚未生成口播稿；可先预览画面，再到稿件页生成或填写口播'
+        message=row['message'] if self._news_has_spoken else '尚未生成口播稿；可先预览画面，再到稿件页生成或填写口播'
         self.preview_clock.setWordWrap(True);self.preview_clock.setText(mode+f" · {time:.1f} / {self._preview_timeline['duration_seconds']:.1f} 秒 · "+message+('\n字幕：'+cue if cue else ''))
+
+    def _prepare_news_frames(self,draft,key,renderer):
+        from services import news_voice
+        self._close_news_frames()
+        index=draft['screen_item']['ordinal']-1
+        before=self.news.voice_draft(self.news.selected_articles()[index-1]) if index and renderer is not news_voice else None
+        timeline,frames=self._build_news_frames(draft,renderer,before,self._news_titles(),self._launch_count())
+        self._adopt_news_frames(draft,key,timeline,frames)
+
+    @staticmethod
+    def _build_news_frames(draft,renderer,before,titles,launch_count):
+        from services import news_voice
+        from services.roundup_sync import build_timeline
+        timeline=build_timeline(draft)
+        if renderer is news_voice:
+            frames=renderer.prepare_frames(draft,timeline=timeline)
+        else:
+            index=draft['screen_item']['ordinal']-1
+            frames=renderer.prepare_frames(draft,titles,index,timeline=timeline,launch_count=launch_count,entering=index==0,preview=True)
+            if before:
+                clock=build_timeline(before)
+                previous=renderer.prepare_frames(before,titles,index-1,timeline=clock,
+                    launch_count=launch_count,entering=index==1,preview=True)
+                try:frames['previous_picture']=renderer.frame_at(previous,clock['duration_seconds']-1/60)
+                finally:renderer.close_frames(previous)
+        return timeline,frames
+
+    def _adopt_news_frames(self,draft,key,timeline,frames):
+        self._preview_timeline=timeline;self._news_frames=frames
+        self._news_has_spoken=bool(draft['segments'][0]['spoken'].strip())
+        self._timeline_key=key;self._frame_key=key
+        self.preview_slider.blockSignals(True);self.preview_slider.setRange(0,round(self._preview_timeline['duration_seconds']*1000));self.preview_slider.blockSignals(False)
+        if self._preview_select_pending:
+            self.preview_slider.blockSignals(True);self.preview_slider.setValue(0);self.preview_slider.blockSignals(False)
+
+    def _show_preview_image(self,image):
+        if self.frame.image is not None and image is getattr(self,'_preview_image',None):return
+        qimage=QImage(image.tobytes(),image.width,image.height,image.width*4,QImage.Format.Format_RGBA8888).copy()
+        self.frame.set_image(QPixmap.fromImage(qimage))
+        self._preview_image=image
 
     def propose_news_voice(self):
         from services import news_voice
-        draft=self.media_draft();article=deepcopy(self.news.current_article());settings=self.current_settings()
+        draft=self.news.voice_draft()
+        if draft is None:raise ValueError('请先选择新闻')
+        article=deepcopy(self.news.current_article());settings=self.current_settings()
+        events={article.news.key:deepcopy(self.news.editorial_event(article))}
         self._news_proposal_basis=draft['segments'][0]['spoken']
-        self._news_job('voice_propose',lambda _data,token:news_voice.propose_missing([article],settings,token,set()),deepcopy(draft))
+        self._news_job('voice_propose',lambda _data,token:news_voice.propose_missing([article],settings,token,set(),events=events),deepcopy(draft))
 
     def retry_news_narrations(self):
         from services import news_voice
+        from services import news_editorial
+        from services.weekly_report import prepared_scope
         articles=deepcopy(self.news.failed_articles())
         if not articles:return
         settings=self.current_settings()
-        self.checkpoint()
-        self._news_job('narration_retry',lambda data,token:news_voice.propose_missing(data,settings,token,set()),articles)
+        events={a.news.key:deepcopy(self.news.editorial_event(a)) for a in articles}
+        source_events=deepcopy((self.news.bundle or {}).get('news_events',{}))
+        source_rows={a.news.key:deepcopy(a) for a in self.news._rows('sources')
+                     if any(a.news.key in row.get('related',[]) for row in events.values())}
+        fetch={a.news.key for a in articles if self.news.narration_failures[news_id(a.news.key)].get('状态') in ('待补资料','飞后结果待补')}
+        cutoff=news_editorial.cutoff_for(prepared_scope(settings)['news'],settings.display_timezone)
+        def retry(data,token):
+            refreshed={}
+            for article in data:
+                if token.is_cancelled:break
+                key=article.news.key;event=events[key]
+                if key not in fetch or any(row.get('manual') for row in article.evidence):continue
+                related=[source_rows[key] for key in event.get('related',[]) if key in source_rows]
+                try:
+                    if missing:=event.get('missing_sources'):
+                        for row in related:
+                            if row.news.key in missing:
+                                refreshed.update(news_editorial.retry_material(row,[],source_events.get(row.news.key,{}),token,cutoff))
+                        components=[refreshed.get(row.news.key,row) for row in related if row.news.key in event['merged_checks']]
+                        preview=news_editorial.merge_preview(components,source_events)
+                        event['missing_sources']=preview['missing_sources']
+                        event['conflicts']=preview['conflicts']
+                        if preview['spoken']:
+                            article.body=preview['spoken'];article.evidence=preview['evidence']
+                            refreshed[key]=article
+                    else:refreshed.update(news_editorial.retry_material(article,related if event.get('phase')=='pending' else [],
+                                                                   event,token,parse_datetime(event.get('cutoff')) or cutoff))
+                except TaskCancelledError:break
+            results=news_voice.propose_missing([refreshed.get(a.news.key,a) for a in data],settings,token,set(),events=events,cutoff=cutoff)
+            return (*results,refreshed,{key:row for key,row in events.items() if row})
+        self._news_job('narration_retry',retry,articles)
 
     def news_audio(self,*,force=False,play=False):
         from services import news_voice
@@ -870,7 +1379,7 @@ class ProductionWorkspace(QWidget):
         text=reading_text(draft,segment)
         if draft.get('approved_text')!=roundup.digest(text):
             if QMessageBox.question(self,'确认本条最终朗读文本',text+'\n\n按当前口播稿生成配音？来源和状态不会朗读。')!=QMessageBox.StandardButton.Yes:return
-        news_voice.approve(draft);self.checkpoint();self._news_play_after=play
+        news_voice.approve(draft);self._news_play_after=play
         provider=self.roundup.tts_provider
         def action(data,token):
             from ai.qwen_aligner import QwenForcedAligner
@@ -889,23 +1398,112 @@ class ProductionWorkspace(QWidget):
             return align_draft(data,QwenForcedAligner(data['aligner'],self.roundup.tts_state_changed.emit),token)
         self._news_job('voice_align',action,deepcopy(draft))
 
-    def export_complete(self):
-        from services.roundup_export import export_complete_video
-        if self.settings.video_workflow!='complete':return
-        drafts=[]
-        if self.mode=='roundup':
-            self.roundup._sync()
-            if not self.roundup.draft['segments']:raise ValueError('请先生成发射综述稿并配音')
-            drafts.append(self.roundup.draft)
-        if self.mode=='news' or self.append_news.isChecked():
-            articles=self.news.selected_bundle()['articles']
-            if not articles:raise ValueError('请先在稿件页勾选要导出的新闻')
-            drafts.extend(self.news.voice_draft(article) for article in articles)
-        output=self.preferences.output_edit.text().strip()
+    def edit_episode(self):
+        from services.roundup_audio import speech_text
+        from ui.widgets.date_range import date_edit
+        if self.busy():raise ValueError(tr('production.conflict'))
+        dialog=QDialog(self);dialog.setWindowTitle('本期设置');dialog.resize(660,620)
+        form=QFormLayout(dialog);number=QSpinBox();number.setRange(1,999999);number.setValue(self.episode['number'])
+        number.setObjectName('EditionNumber')
+        name=QLineEdit(episode_name(self.episode));name.setObjectName('EpisodeName')
+        name.setMaxLength(EPISODE_NAME_LIMIT);name.setPlaceholderText(DEFAULT_EPISODE_NAME)
+        published=QLineEdit(self.episode['date']);published.setPlaceholderText('YYYY-MM-DD')
+        launch=self.roundup.draft;settings=self.current_settings()
+        start,end=self.episode.get('review_range') or ([launch['start'],launch['end']] if launch['selection'] else
+            [settings.start_date,settings.end_date])
+        first,last=date_edit(start,-7),date_edit(end,-1)
+        first.setObjectName('EditionRangeStart');last.setObjectName('EditionRangeEnd')
+        dates=QHBoxLayout();dates.addWidget(first);dates.addWidget(QLabel('至'));dates.addWidget(last)
+        opening=QPlainTextEdit(self.episode['opening']);opening.setMaximumHeight(120)
+        final=QLabel();final.setWordWrap(True);final.setTextFormat(Qt.TextFormat.PlainText)
+        error=QLabel();error.setWordWrap(True)
+        for label,control in (('期号',number),('播报日期（北京时间）',published),('开场口播',opening),('最终朗读',final)):
+            form.addRow(label,control)
+        form.insertRow(2,'统计日期（北京时间）',dates)
+        form.insertRow(0,'周报名称',name)
+        music=MusicPlaylist(self.episode,dialog);form.addRow('背景音乐',music)
+        next_edition=False
+        def values():
+            return validate_episode(dict(name=name.text().strip() or DEFAULT_EPISODE_NAME,
+                number=number.value(),date=published.text().strip(),opening=opening.toPlainText().strip(),
+                review_range=[edit.date().toString('yyyy-MM-dd') for edit in (first,last)],
+                **music.values()))
+        def refresh():
+            try:
+                value=values()
+                default=opening_text(value,launch if any(row['included'] for row in launch['selection']) else None,
+                                     any(includes_news(value,a) for a in self.news.selected_articles()))
+                opening.setPlaceholderText(default)
+                final.setText(speech_text(value['opening'] or default,self.roundup.voice_settings()['pronunciations']))
+                error.clear()
+            except ValueError as issue:error.setText(str(issue))
+        for signal in (name.textChanged,number.valueChanged,published.textChanged,first.dateChanged,last.dateChanged,opening.textChanged):
+            signal.connect(refresh)
+        next_button=QPushButton('新建下一期')
+        def advance():
+            nonlocal next_edition
+            next_edition=True
+            new=new_episode(min(999999,self.episode['number']+1))
+            number.setValue(new['number']);published.setText(new['date']);opening.clear()
+            day=QDate.fromString(new['date'],'yyyy-MM-dd')
+            first.setDate(day.addDays(-7));last.setDate(day.addDays(-1))
+            next_button.setEnabled(False)
+        next_button.clicked.connect(advance);form.addRow(next_button);form.addRow(error)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(dialog.reject);form.addRow(buttons)
+        def save():
+            try:value=values()
+            except ValueError as issue:error.setText(str(issue));return
+            changed=value['review_range']!=[launch['start'],launch['end']] or launch.get('timezone')!='Asia/Shanghai'
+            if changed or next_edition:self.checkpoint()
+            self.episode=value
+            self._edition_revision+=1
+            self.music_panel.set_edition(self.episode)
+            self._sync_edition_dates()
+            if changed:self.roundup._new_snapshot(self.roundup.collection)
+            dialog.accept()
+        buttons.accepted.connect(save);refresh()
+        if dialog.exec()==QDialog.DialogCode.Accepted:
+            self.news._update_script_rows()
+            self._mode();self._changed();self._poll()
+
+    def export_complete(self,*,preview=False):
+        from services.episode import make_video
+        from services.voice_profiles import configured
+        from services.roundup_audio import current_audio
+        parts=self.settings.video_workflow=='materials'
+        if parts and preview:return
+        launch=self.roundup.draft
+        if (not parts or self.mode=='roundup') and any(row['included'] for row in launch['selection']):
+            self.roundup._sync(validate=False)
+        else:launch=None
+        articles=[a for a in self.news.selected_articles() if not self.news.blocked(a)] if not parts or self.mode=='news' else []
+        news=[self.news.voice_draft(article) for article in articles]
+        if not launch and not news:raise ValueError('请先勾选可制作的内容，待补资料可在稿件页处理')
+        voice=self.roundup.voice_settings()
+        existing=([launch] if launch else [])+news
+        if not configured(voice['tts']) and (not parts or any(not d['segments'] or any(
+                not current_audio(d,s) for s in d['segments']) for d in existing)):
+            self.show_voice_settings();self.voice_setup.status.setText('请配置语音环境后导出本期内容');return
+        output=str(resource_path('cache','episode-previews')) if preview else self.preferences.output_edit.text().strip()
         if not output:raise ValueError('请先选择输出目录')
-        mode=self.mode
-        self._complete_export_scope=self.export_scope(mode)
-        self._news_job('complete_video',lambda data,token:export_complete_video(data,output,token),deepcopy(drafts))
+        linked=bool(self.episode.get('review_range'))
+        payload=dict(episode=self.episode,launch=launch,articles=articles,news=news,voice=voice,parts=parts,
+                     preview=preview,
+                     intro=str(self.intro.result_path) if self.intro.result_path and not parts and not linked else None,
+                     intro_options=self.intro.options() if not parts and (self.intro.template.is_file() or linked and self.intro.result_path) else None,
+                     scope=self.export_scope(self.mode if parts else 'complete'))
+        payload['news_basis']={d['news_id']:d['segments'][0]['spoken'] for d in news}
+        payload['launch_basis']=roundup.digest(launch['segments']) if launch else None
+        settings=self.current_settings()
+        self._news_job('complete_video',lambda data,token:make_video(data,settings,output,self.roundup.tts_provider,token,
+            lambda message,done,total:self.worker.progress.emit(message,done,total)),deepcopy(payload))
+        self.worker.progress.connect(self._export_progress)
+
+    def _export_progress(self,message,done,total):
+        self._export_activity=message
+        self.task_text.setText(message);self.task_progress.setRange(0,max(1,round(total*100)))
+        self.task_progress.setValue(round(done*100))
 
     def _news_voice_finished(self,worker,kind):
         from services import news_voice
@@ -944,75 +1542,107 @@ class ProductionWorkspace(QWidget):
                 if current_audio(self.news.voices[identifier],self.news.voices[identifier]['segments'][0]):
                     self._preview_select_pending=True;self._preview_news();self._toggle_preview()
 
+    def _roundup_voice_selection_changed(self, _row):
+        if self.mode!='roundup':return
+        if not getattr(self,'_preview_syncing',False):self._preview_select_pending=True
+        self._refresh_visible_voice()
+
+    def _refresh_visible_voice(self):
+        if not self._restoring and self.navigation.currentRow()==2 and self.media.currentIndex()==0:
+            self._voice_refresh()
+
     def _voice_refresh(self):
         if not hasattr(self,'voice_segments'):return
         if self.mode=='news':return self._news_voice_refresh()
-        r=self.roundup;index=r.segment_list.currentRow();titles=[roundup.segment_title(r.draft,s) for s in r.draft['segments']]
-        if [self.voice_segments.itemText(i) for i in range(self.voice_segments.count())]!=titles:
-            self.voice_segments.blockSignals(True);self.voice_segments.clear();self.voice_segments.addItems(titles);self.voice_segments.blockSignals(False)
-        self.voice_segments.blockSignals(True);self.voice_segments.setCurrentIndex(index);self.voice_segments.blockSignals(False)
+        self._news_voice_choices=None
+        from services.production_export import roundup_scope
+        r=self.roundup;index=r.segment_list.currentRow();view,scope_issue=roundup_scope(r.draft)
+        segments=view['segments'];allowed={s['id'] for s in segments}
+        name_ids={identifier for segment in segments for identifier in segment['task_ids']}
+        name_ids.update(row['id'] for row in view['selection'] if row['included'])
+        task_names=roundup.task_names(r.draft,name_ids)
+        self.voice_segments.blockSignals(True);self.voice_segments.clear()
+        for segment in segments:
+            names=[name for name in task_names if name['task_id'] in segment['task_ids']]
+            self.voice_segments.addItem(roundup.segment_title(view,segment,names=names),segment['id'])
+        current=r.draft['segments'][index]['id'] if index>=0 else None
+        self.voice_segments.setCurrentIndex(self.voice_segments.findData(current));self.voice_segments.blockSignals(False)
+        if current not in allowed:index=-1
         text=roundup.narration_text(r.draft['segments'][index]) if index>=0 else ''
-        self._voice_loading=True
-        if self.voice_text.toPlainText()!=text:self.voice_text.setPlainText(text)
-        self._voice_loading=False
+        self._set_voice_text(text)
         self.voice_text.setPlaceholderText(tr('production.script_empty'));self.voice_text.setReadOnly(r.worker is not None)
-        from services.voice_profiles import configured
-        ready=configured(dict(python=r.python.text().strip(),model=r.model.text().strip(),speaker=r.speaker_id()))
-        self.voice_status.setText('语音已配置' if ready else '尚未配置语音模型')
-        self.play_state.setText(r.audio_state.text() if index>=0 else '请选择段落')
+        self.voice_status.setText(tr('production.voice_ready' if self._voice_configured() else 'production.voice_missing'))
+        self.play_state.setText(scope_issue or (r.audio_state.text() if index>=0 else '请在稿件页勾选制作内容'))
         self.play_state.setToolTip(r.reading_preview.toPlainText())
-        self.name_update_button.setVisible(bool(r.draft.get('name_updates_pending')))
         if not getattr(self,'_preview_syncing',False):
             identifier=r.draft['segments'][index]['id'] if index>=0 else None
             if identifier!=getattr(self,'_roundup_focus_id',None):
                 self._roundup_focus_id=identifier;self._preview_select_pending=True
             self._stop_preview()
-        task_values=[(roundup.display_names(i)['name'],i['ll2_id']) for i in r.draft['snapshot']['items']]
+        names_by_id={name['task_id']:name['display_name'] for name in task_names}
+        task_values=[(names_by_id[s['id']],s['id']) for s in view['selection'] if s['included']]
         if getattr(self,'_preview_task_values',None)!=task_values:
             self.preview_tasks.clear();self.preview_tasks.addItem('跳转到任务…',None)
             for title,identifier in task_values:self.preview_tasks.addItem(title,identifier)
             self._preview_task_values=task_values
-        key=self._preview_key() if index>=0 else None
+        self.preview_play.setEnabled(bool(segments) and not scope_issue)
+        if not segments or scope_issue:self.preview_slider.setEnabled(False)
         if getattr(self,'_preview_syncing',False):return
-        if getattr(self,'_frame_key',None)!=key:
-            if self.frame.image is not None and index>=0:self.preview_roundup()
-            else:self.frame.setText(tr('production.preview_hint'))
+        if self.frame.image is not None and index>=0 and not scope_issue:
+            if self._frame_key!=self._preview_key():self.preview_roundup()
+        else:
+            self.frame.set_image(None);self.frame.setText(scope_issue or tr('production.preview_hint'))
 
-    def preview_roundup(self):
-        if self.mode=='news':return self._preview_news()
-        r=self.roundup;index=r.segment_list.currentRow()
-        if index<0:raise ValueError(tr('production.script_empty'))
-        from tools.roundup_visuals import prepare_frames,frame_at
+    def preview_roundup(self, *, reuse=False):
+        if self.mode=='news':return self._preview_news(reuse=reuse)
+        r=self.roundup
+        from tools.roundup_visuals import prepare_frames,frame_at,shot_plan
         from services.roundup_sync import build_timeline,row_at
         from services.roundup_audio import segment_timing
-        basis=roundup.digest([r.draft,r._voice_dirty])
-        if getattr(self,'_timeline_key',None)!=basis:
-            view=deepcopy(r.draft)
-            if r._voice_dirty:
-                for s in view['segments']:s['audio']=None
-            self._preview_view=view;self._preview_timeline=build_timeline(view);self._timeline_key=basis
-            self.preview_slider.blockSignals(True);self.preview_slider.setRange(0,round(self._preview_timeline['duration_seconds']*1000));self.preview_slider.blockSignals(False)
+        if not reuse or not getattr(self,'_timeline_key',None):
+            view=self.media_draft()
+            if not view['segments']:raise ValueError('当前没有勾选的发射内容')
+            basis=roundup.digest([view,r._voice_dirty])
+            if getattr(self,'_timeline_key',None)!=basis:
+                if r._voice_dirty:
+                    for s in view['segments']:s['audio']=None
+                self._preview_view=view;self._preview_timeline=build_timeline(view);self._timeline_key=basis
+                self._preview_shots=None
+                self.preview_slider.blockSignals(True);self.preview_slider.setRange(0,round(self._preview_timeline['duration_seconds']*1000));self.preview_slider.blockSignals(False)
         if getattr(self,'_preview_select_pending',False):
-            clock=self._preview_timeline['segments'][index]
+            current=r.segment_list.currentRow()
+            identifier=r.draft['segments'][current]['id'] if current>=0 else None
+            rows=self._preview_timeline['segments']
+            clock=next((row for row in rows if row['segment_id']==identifier),rows[0])
             self.preview_slider.blockSignals(True);self.preview_slider.setValue(ceil(clock['start_seconds']*1000));self.preview_slider.blockSignals(False)
             self._preview_select_pending=False
         global_time=self.preview_slider.value()/1000
         clock=row_at(self._preview_timeline,global_time)
-        index=next(n for n,s in enumerate(r.draft['segments']) if s['id']==clock['segment_id'])
-        if index!=r.segment_list.currentRow():
+        original_index=next(n for n,s in enumerate(r.draft['segments']) if s['id']==clock['segment_id'])
+        if original_index!=r.segment_list.currentRow():
             self._preview_syncing=True
-            try:r.segment_list.setCurrentRow(index)
+            try:r.segment_list.setCurrentRow(original_index)
             finally:self._preview_syncing=False
         self._roundup_focus_id=clock['segment_id']
-        key=self._preview_key()
+        key=getattr(self,'_frame_key',None)
+        if not (reuse and key and getattr(self,'_preview_frames_segment',None)==clock['segment_id']):
+            key=self._preview_key()
         if getattr(self,'_frame_key',None)!=key:
+            index=next(n for n,s in enumerate(self._preview_view['segments']) if s['id']==clock['segment_id'])
             segment=self._preview_view['segments'][index]
             self._preview_timing=segment_timing(self._preview_view,segment)
-            self._preview_frames=prepare_frames(self._preview_view,segment,timing=self._preview_timing)
+            if not reuse or getattr(self,'_preview_shots',None) is None:
+                self._preview_shots=shot_plan(self._preview_view,self._preview_timeline)
+            self._preview_frames=prepare_frames(self._preview_view,segment,timeline=self._preview_timeline,
+                shot_table=self._preview_shots,
+                entering=index==0 and self.settings.video_workflow=='complete',preview=True)
+            self._preview_frames_segment=clock['segment_id']
         elapsed=max(0,global_time-clock['start_seconds']);duration=self._preview_timeline['duration_seconds']
-        image=frame_at(self._preview_frames,elapsed).convert('RGBA')
-        qimage=QImage(image.tobytes(),image.width,image.height,image.width*4,QImage.Format.Format_RGBA8888).copy()
-        self.frame.set_image(QPixmap.fromImage(qimage))
+        image=frame_at(self._preview_frames,elapsed)
+        self._roundup_list_scene=self._preview_frames['list_scene']
+        if elapsed==0 and self._preview_frames['entering'] and not self.preview_timer.isActive():
+            image=self._roundup_list_scene['image']
+        self._show_preview_image(image)
         self.preview_slider.setEnabled(True)
         mode='播放器时间' if getattr(self,'_audio_playback',False) else '无声预览时间'
         self.preview_clock.setText(mode+f' · {global_time:.1f} / {duration:.1f} 秒 · '+clock['message'])
@@ -1025,6 +1655,8 @@ class ProductionWorkspace(QWidget):
         if hasattr(self,'preview_player'):
             self.preview_player.pause()
             if was_playing:self._audio_position_changed(self.preview_player.position())
+        if hasattr(self,'preview_bed_player'):self.preview_bed_player.pause()
+        self.music_panel.stop()
         self.roundup._stop_playback()
 
     def _audio_position_changed(self, _position):
@@ -1035,9 +1667,20 @@ class ProductionWorkspace(QWidget):
             self._advance_preview()
 
     def _release_preview(self):
+        self._poster_request=None
         self._stop_preview();self._audio_playback=False;self._audio_ready=False;self._audio_pending_position=None
+        self._close_news_frames()
         if hasattr(self,'preview_player'):
             self.preview_player.stop();self.preview_player.setSource(QUrl())
+        if hasattr(self,'preview_bed_player'):
+            self.preview_bed_player.stop();self.preview_bed_player.setSource(QUrl())
+
+    def _close_news_frames(self):
+        if getattr(self,'_news_frames',None) is not None:
+            from tools.news_visuals import close_frames
+            close_frames(self._news_frames)
+            self._news_frames=None
+            self._frame_key=None
 
     def _toggle_preview(self):
         if self.preview_timer.isActive():self._stop_preview();return
@@ -1058,12 +1701,13 @@ class ProductionWorkspace(QWidget):
         if not self.frame.isVisible():self._stop_preview();return
         if getattr(self,'_audio_playback',False):
             if not getattr(self,'_audio_ready',False):return
+            self._sync_preview_bed()
             elapsed=self.preview_player.position()/1000+self._audio_offset
             if getattr(self,'_audition_end',None) is not None and elapsed>=self._audition_end:
                 self._stop_preview();self._audition_end=None
         else:elapsed=time.monotonic()-self._preview_started
         self.preview_slider.blockSignals(True);self.preview_slider.setValue(round(elapsed*1000));self.preview_slider.blockSignals(False)
-        self.preview_roundup()
+        self.preview_roundup(reuse=True)
         if elapsed>=self._preview_timeline['duration_seconds']:
             self._audio_finished=True;self._stop_preview()
 
@@ -1080,6 +1724,7 @@ class ProductionWorkspace(QWidget):
             if self._audio_offset<=target<=self._audio_end:
                 self._audio_finished=False
                 self.preview_player.setPosition(round((target-self._audio_offset)*1000))
+                self._sync_preview_bed(round(target*1000))
             else:
                 self._stop_preview();self._audio_playback=False
         self.preview_roundup()
@@ -1089,15 +1734,19 @@ class ProductionWorkspace(QWidget):
         if self.mode!='news':r._sync()
         target=self.preview_slider.value()/1000
         self._audio_target=target
+        self.music_panel.stop()
+        edition=deepcopy(self.episode)
         def prepare(data,token):
             from services.roundup_sync import build_timeline,timeline_audio,row_at,canonical_audio
+            from services.episode_music import preview_bed
             timeline=build_timeline(data);clock=row_at(timeline,target)
             if timeline['all_audio_current']:
                 path=timeline_audio(data,timeline,token);offset=0.;end=timeline['duration_seconds']
             else:
                 if not clock['audio']:raise ValueError('本段尚无当前配音，可使用无音频预览')
                 path=canonical_audio(clock['audio'],token);offset=clock['start_seconds'];end=clock['speech_end_seconds']
-            return dict(path=str(path),offset=offset,end=end,basis=roundup.digest(data))
+            bed=preview_bed(edition,timeline,token)
+            return dict(path=str(path),bed=str(bed) if bed else '',offset=offset,end=end,basis=roundup.digest(data))
         r._start_job('preview_audio',prepare,deepcopy(self.media_draft()))
         self._preview_request_active=True
 
@@ -1117,24 +1766,68 @@ class ProductionWorkspace(QWidget):
         self._audio_wants_play=True
         self._audio_pending_position=round(max(0,self._audio_target-result['offset'])*1000)
         url=QUrl.fromLocalFile(result['path'])
-        if self.preview_player.source()==url:
-            self._audio_ready=True;self.preview_player.setPosition(self._audio_pending_position);self._audio_pending_position=None;self.preview_player.play()
-        else:self.preview_player.setSource(url)
+        self._voice_loaded=self.preview_player.source()==url
+        self._bed_loaded=not result.get('bed')
+        self._load_preview_bed(result.get('bed'))
+        self._update_preview_levels()
+        if not self._voice_loaded:self.preview_player.setSource(url)
+        self._start_prepared_audio()
         self.preview_timer.start();self.preview_play.setText('暂停播放')
+
+    def _load_preview_bed(self,path):
+        from PySide6.QtMultimedia import QAudioOutput,QMediaPlayer
+        if not path:
+            if hasattr(self,'preview_bed_player'):self.preview_bed_player.setSource(QUrl())
+            return
+        if not hasattr(self,'preview_bed_player'):
+            self.preview_bed_player=QMediaPlayer(self);self.preview_bed_output=QAudioOutput(self)
+            self.preview_bed_player.setAudioOutput(self.preview_bed_output)
+            self.preview_bed_player.mediaStatusChanged.connect(self._bed_media_status)
+            self.preview_bed_player.errorOccurred.connect(lambda *_:self._audio_preview_error(self.preview_bed_player))
+        bed=self.preview_bed_player;url=QUrl.fromLocalFile(path)
+        if bed.source()==url:self._bed_loaded=True
+        else:bed.setSource(url)
+
+    def _update_preview_levels(self):
+        options=music_settings(self.episode)
+        if hasattr(self,'preview_audio_output'):self.preview_audio_output.setVolume(options['voice_volume']/100)
+        if hasattr(self,'preview_bed_output'):self.preview_bed_output.setVolume(options['music_volume']/100)
+
+    def _bed_media_status(self,status):
+        from PySide6.QtMultimedia import QMediaPlayer
+        if status in (QMediaPlayer.MediaStatus.LoadedMedia,QMediaPlayer.MediaStatus.BufferedMedia):
+            self._bed_loaded=True;self._start_prepared_audio()
+
+    def _start_prepared_audio(self):
+        if self._audio_pending_position is None or not (getattr(self,'_voice_loaded',False) and getattr(self,'_bed_loaded',True)):
+            return
+        position=self._audio_pending_position;self._audio_pending_position=None
+        self.preview_player.setPosition(position);self._audio_ready=True
+        if self._audio_wants_play:self.preview_player.play()
+        self._sync_preview_bed(position+round(self._audio_offset*1000))
+
+    def _sync_preview_bed(self,position=None):
+        from PySide6.QtMultimedia import QMediaPlayer
+        bed=getattr(self,'preview_bed_player',None)
+        if not bed or bed.source().isEmpty():return
+        chosen=position if position is not None else self.preview_player.position()+round(self._audio_offset*1000)
+        if position is not None or abs(bed.position()-chosen)>140:bed.setPosition(chosen)
+        if self.preview_player.playbackState()==QMediaPlayer.PlaybackState.PlayingState:
+            if bed.playbackState()!=QMediaPlayer.PlaybackState.PlayingState:bed.play()
+        elif bed.playbackState()==QMediaPlayer.PlaybackState.PlayingState:bed.pause()
 
     def _audio_media_status(self,status):
         from PySide6.QtMultimedia import QMediaPlayer
         if status in (QMediaPlayer.MediaStatus.LoadedMedia,QMediaPlayer.MediaStatus.BufferedMedia) and self._audio_pending_position is not None:
-            self.preview_player.setPosition(self._audio_pending_position);self._audio_pending_position=None;self._audio_ready=True
-            if self._audio_wants_play:self.preview_player.play()
+            self._voice_loaded=True;self._start_prepared_audio()
         elif status==QMediaPlayer.MediaStatus.EndOfMedia:
             self._audio_finished=True
             self.preview_slider.blockSignals(True);self.preview_slider.setValue(round(self._audio_end*1000));self.preview_slider.blockSignals(False)
             self.preview_roundup();self._stop_preview()
 
-    def _audio_preview_error(self):
+    def _audio_preview_error(self,player=None):
         self._stop_preview();self._audio_playback=False
-        self.task_text.setText('音频播放失败：'+self.preview_player.errorString())
+        self.task_text.setText('音频播放失败：'+(player or self.preview_player).errorString())
 
     def listen_roundup(self):
         if self.mode=='news':return self.news_audio(play=True)
@@ -1160,6 +1853,20 @@ class ProductionWorkspace(QWidget):
             if not row:raise ValueError('该任务没有讲解关联，请在稿件页检查')
             target=row['start_seconds'];self.task_text.setText('尚无有效句子对齐，已定位到关联段落')
         self._stop_preview();self._preview_select_pending=False;self.preview_slider.setValue(ceil(target*1000));self.preview_roundup()
+
+    def _browse_launch_preview(self,point):
+        scene=getattr(self,'_roundup_list_scene',None)
+        if self.mode!='roundup' or scene is None:return
+        from tools import roundup_visuals,video_cards
+        x,y=point.x()*video_cards.W,point.y()*video_cards.H
+        identifier=next((task for (left,top,right,bottom),task in scene['targets']
+                         if left<=x<=right and top<=y<=bottom),None)
+        if identifier is None:return
+        self._stop_preview()
+        draft=self._preview_view
+        selection=roundup_visuals.scene_plan(draft,dict(task_ids=[identifier]))[0]
+        self._roundup_list_scene=roundup_visuals.render_scene(draft,selection)
+        self._show_preview_image(self._roundup_list_scene['image'])
 
     def audition_sync(self,identifier,start,end):
         from services.roundup_sync import build_timeline
@@ -1190,7 +1897,28 @@ class ProductionWorkspace(QWidget):
         self._stop_preview();self._frame_key=None
 
     def show_shot_settings(self):
-        if self.mode=='news':raise ValueError('新闻使用固定条卡画面，不套用发射镜头编排')
+        if self.mode=='news':
+            draft=self.news.voice_draft()
+            if draft is None:raise ValueError('请先选择新闻')
+            if self.busy():raise ValueError(tr('production.conflict'))
+            legacy=self.settings.video_workflow=='materials'
+            dialog=QDialog(self);dialog.setWindowTitle('新闻条时间' if legacy else '新闻段落时间');form=QFormLayout(dialog)
+            fields={}
+            options=[('before_voice','入场完成后等待（秒）'),('after_voice','配音结束后保持（秒）')]
+            if legacy:options.append(('summary_close_before_end','摘要收起时长（秒，0为自动；读完时收好）'))
+            for key,label in options:
+                value=QDoubleSpinBox();value.setRange(0,60 if key=='summary_close_before_end' else 2);value.setSingleStep(.1)
+                value.setValue(draft.get('animation_gaps',{}).get(key,0 if key=='summary_close_before_end' else .2));fields[key]=value;form.addRow(label,value)
+            buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
+            buttons.button(QDialogButtonBox.StandardButton.Save).setText('保存');buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+            buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);form.addRow(buttons)
+            if dialog.exec()==QDialog.DialogCode.Accepted:
+                gaps=draft.setdefault('animation_gaps',{})
+                for key,value in fields.items():
+                    if key=='summary_close_before_end' and value.value()==0:gaps.pop(key,None)
+                    else:gaps[key]=value.value()
+                self._stop_preview();self._frame_key=None;self._changed()
+            return
         if self.roundup.worker:raise ValueError(tr('production.conflict'))
         from ui.roundup_shots_dialog import RoundupShotsDialog
         RoundupShotsDialog(self).exec()
@@ -1206,7 +1934,7 @@ class ProductionWorkspace(QWidget):
             from ai.qwen_aligner import QwenForcedAligner
             r.tts_provider.unload()
             return align_draft(data,QwenForcedAligner(data.get('aligner',{}),r.tts_state_changed.emit),token,segment_id=identifier)
-        r._start_job('align',align,deepcopy(r.draft))
+        r._start_job('align',align,self.media_draft())
 
     def _preview_key(self):
         if self.mode=='news':return self._media_basis()
@@ -1215,12 +1943,40 @@ class ProductionWorkspace(QWidget):
         entries=load_dictionary()
         return roundup.digest([draft['id'],segment,draft['segments'],draft['snapshot'],draft['selection'],
                                draft['tts'],draft['pronunciations'],draft.get('aligner'),draft['pause_seconds'],
-                               draft.get('visuals'),draft.get('closing_hold_seconds'),self.roundup._voice_dirty,[roundup.display_names(i,entries) for i in draft['snapshot']['items']]])
+                               draft.get('visuals'),draft.get('closing_hold_seconds'),self.roundup._voice_dirty,
+                               self.settings.video_workflow,
+                               [roundup.display_names(i,entries) for i in draft['snapshot']['items']]])
 
     def current_settings(self):
-        return self.dashboard.settings_snapshot(replace(self.settings,output_dir=self.preferences.output_edit.text().strip(),
+        settings=self.dashboard.settings_snapshot(replace(self.settings,output_dir=self.preferences.output_edit.text().strip(),
          export_markdown=self.preferences.markdown_check.isChecked(),export_word=self.preferences.word_check.isChecked(),
          export_premiere=self.preferences.premiere_check.isChecked(),export_sqlite=self.preferences.sqlite_check.isChecked()))
+        if span:=self.episode.get('review_range'):
+            start,end=span
+            return replace(settings,date_mode='custom',start_date=start,end_date=end,launch_range='custom',
+                           launch_start_date=start,launch_end_date=end,display_timezone='Asia/Shanghai')
+        return settings
+
+    def _sync_edition_dates(self):
+        span=self.episode.get('review_range')
+        dashboard,r=self.dashboard,self.roundup
+        combos=(dashboard.date_mode_combo,dashboard.launch_range_combo)
+        fields=(dashboard.start_date_edit,dashboard.end_date_edit,dashboard.launch_start_date_edit,dashboard.launch_end_date_edit)
+        dates=(*fields,r.start,r.end,self.intro.date,self.intro.end_date)
+        for control in (*combos,*dates):
+            control.setEnabled(not span)
+            if span:control.setToolTip('在「本期设置」修改统一统计日期')
+        r.recent_dates.setEnabled(not span)
+        if not span:return
+        was_restoring=self._restoring;self._restoring=True
+        was_loading=r._loading;r._loading=True;r.range_timer.stop()
+        try:
+            for combo in combos:combo.setCurrentIndex(combo.findData('custom'))
+            for control,value in zip(dates,span*4):
+                control.setDate(QDate.fromString(value,'yyyy-MM-dd'))
+            r.settings=replace(r.settings,display_timezone='Asia/Shanghai')
+        finally:
+            r._loading=was_loading;self._restoring=was_restoring
 
     def _save_runtime(self):
         if not self.dashboard.date_ranges_valid():raise ValueError(tr('date.range.invalid'))
@@ -1231,36 +1987,84 @@ class ProductionWorkspace(QWidget):
         if any(k not in ('maintenance','news_image','update') for k,*_ in self.task_rows()):raise ValueError(tr('production.conflict'))
         self._stop_preview()
         self._news_export_scope=self.export_scope('news')
-        self._save_runtime();self.worker_kind=kind;self.worker=RoundupWorker(action,payload,self)
+        self._save_runtime();self.worker_kind=kind
+        self._news_phase=''
+        if kind=='complete_video':self._export_activity='正在准备本期视频'
+        if kind in ('collect','write','narration_retry','voice_audio','complete_video'):
+            path=self._checkpoint_path()
+            before=self.snapshot()
+            output=Path(self.settings.output_dir)
+            def run(data,token):
+                write_json(path,before,compact=True)
+                token.check()
+                value=action(data,token)
+                if kind in ('collect','write') and isinstance(value,dict) and not token.is_cancelled:
+                    try:value['_launch_collection']=load_existing(output)
+                    except (OSError,ValueError,TypeError):pass
+                return value
+        else:run=action
+        self.worker=RoundupWorker(run,payload,self)
+        self.worker.news_context=(workspace_path(),self._edition_revision,self.news.bundle,self.news.selection_revision)
         self.worker.finished.connect(self._news_finished)
-        self.news.set_running(True)
+        if kind in ('collect','write'):self.worker.progress.connect(self._show_news_phase)
+        self.news.set_running(kind!='export')
         self.worker.start();self._poll()
 
+    def _show_news_phase(self,message,*_):
+        if self.sender() is self.worker and self.worker and not self.worker.token.is_cancelled:
+            self._news_phase=message;self.task_text.setText(message)
+
+    def _report_news_phase(self,message):
+        self.worker.progress.emit(message,0,0)
+
     def start_news_image(self,article,options):
-        if self.image_worker:raise ValueError('正在处理新闻图片，可等待或在底部取消')
-        from services.news_images import acquire
-        self.image_worker=RoundupWorker(lambda data,token:acquire(data,token,**options),deepcopy(article),self)
+        if self.image_worker:raise ValueError('正在处理新闻素材，可等待或在底部取消')
+        from models.news import news_id
+        from services.news_images import acquire, acquire_slideshow, set_slideshow
+        if options.get('video'):
+            from services.news_video import acquire as acquire_video
+            action=lambda data,token:acquire_video(data,options['video'],token)
+        elif options.get('remove_video'):
+            from services.news_video import remove
+            action=lambda data,token:remove(data)
+        elif options.get('trim'):
+            from services.news_video import trim
+            action=lambda data,token:trim(news_id(data.news.key),*options['trim'])
+        elif 'files' in options:action=lambda data,token:acquire_slideshow(data,options['files'],token)
+        elif 'slideshow' in options:action=lambda data,token:set_slideshow(data,options['slideshow'])
+        else:action=lambda data,token:acquire(data,token,**options)
+        self.image_worker=RoundupWorker(action,deepcopy(article),self)
+        self.image_worker.video=bool(options.get('video') or options.get('remove_video') or options.get('trim'))
         self.image_worker.finished.connect(self._news_image_finished);self.image_worker.start();self._poll()
 
     def _news_image_finished(self):
         worker=self.image_worker;self.image_worker=None
-        if self.news.bundle:
-            for article in self.news.bundle.get('source_articles',[])+self.news.bundle['articles']:
-                if article.news.url==worker.payload.news.url:article.news.images=worker.payload.news.images
-        self.news.refresh_image();self._frame_key=None
-        if self.mode=='news':self._voice_refresh()
-        self.task_text.setText('图片处理失败：'+worker.error if worker.error else '已取消图片下载，正式图片保留' if worker.cancelled else '图片处理完成；未找到配图时可导入本地图片')
+        self.news.set_article_images(worker.payload);self._frame_key=None
+        if self.mode=='news':self._refresh_visible_voice()
+        if worker.video:
+            self.task_text.setText('视频素材处理失败：'+worker.error if worker.error else
+                '已取消新闻视频处理' if worker.cancelled else '新闻视频素材已更新')
+        else:
+            self.task_text.setText('图片处理失败：'+worker.error if worker.error else '已取消图片下载，正式图片保留' if worker.cancelled else '图片处理完成；未找到配图时可导入本地图片')
         worker.deleteLater();self._changed();self._poll()
 
     def start_news_collect(self):
         if self.news.bundle and QMessageBox.question(self,tr('production.materials'),tr('production.replace_collection'))!=QMessageBox.StandardButton.Yes:return
-        self.checkpoint();feeds=self.feed_panel.enabled_feeds();self._news_job('collect',lambda data,token:prepare_news(feeds,token,collect_only=True),{})
+        feeds=self.feed_panel.enabled_feeds()
+        self._news_job('collect',lambda data,token:prepare_news(feeds,token,collect_only=True,progress=self._report_news_phase),{})
 
     def start_news_write(self):
         from services.news_voice import has_existing_spoken
-        bundle=self.news.selected_bundle(for_write=True);self.checkpoint();feeds=self.feed_panel.enabled_feeds()
+        bundle=self.news.selected_bundle(for_write=True);feeds=self.feed_panel.enabled_feeds()
         skip={identifier for identifier,draft in self.news.voices.items() if has_existing_spoken(draft)}
-        self._news_job('write',lambda data,token:prepare_news(feeds,token,prepared=data,narration_skip=skip),bundle);self.navigation.setCurrentRow(1)
+        skip.update(identifier for identifier,row in self.news.narration_failures.items() if row.get('已跳过'))
+        skip.update(news_id(key) for key in self.news.merged_members())
+        bundle['editorial_protected']=[key for key,checked in self.news.script_preferences.items() if checked]
+        bundle['editorial_merges']={key:row for key,row in bundle.get('news_events',{}).items() if 'merged_checks' in row}
+        bundle['editorial_launches']=deepcopy(self.roundup.draft['snapshot']['items'])
+        self._news_job('write',lambda data,token:prepare_news(feeds,token,prepared=data,narration_skip=skip,
+            progress=self._report_news_phase),bundle)
+        self.navigation.setCurrentRow(1)
 
     def start_news_export(self):
         bundle=self.news.selected_bundle();settings=self.current_settings()
@@ -1277,6 +2081,50 @@ class ProductionWorkspace(QWidget):
     def _news_finished(self):
         worker,kind=self.worker,self.worker_kind;self.worker=None
         self.news.set_running(False)
+        workspace,edition,bundle,revision=worker.news_context
+        changed=bundle is not self.news.bundle or revision!=self.news.selection_revision
+        if workspace!=workspace_path() or edition!=self._edition_revision or (kind in ('collect','write','narration_retry','complete_video') and changed):
+            worker.deleteLater();self._poll()
+            self.task_text.setText('期次或工作区已切换，已忽略旧任务的界面结果')
+            return
+        if kind=='complete_video':
+            data=worker.payload
+            for draft in data['news']:
+                identifier=draft['news_id'];previous=self.news.voices.get(identifier)
+                if previous and previous['segments'][0]['spoken']==data['news_basis'][identifier]:
+                    self.news.voices[identifier]=draft
+                    if draft['segments'][0]['spoken'].strip():self.news.narration_failures.pop(identifier,None)
+            launch=data['launch'];current=self.roundup.draft
+            if launch and launch['id']==current['id']:
+                produced=data.get('produced_launch') or {}
+                by_id={s['id']:s for s in produced.get('segments',[])}
+                new_segments=roundup.digest(current['segments'])==data['launch_basis']
+                if new_segments:
+                    current['segments']=launch['segments']
+                for s in current['segments']:
+                    generated=by_id.get(s['id'])
+                    if generated and roundup.narration_text(generated)==roundup.narration_text(s):
+                        for key in ('audio','audio_error','alignment','alignment_error','sync_manual','units'):
+                            if key in generated:s[key]=generated[key]
+                if new_segments:self.roundup._show_segments(max(0,self.roundup.segment_list.currentRow()))
+            result=worker.value or dict(paths=[],failed=[],cancelled=worker.cancelled)
+            if data['preview'] and result['paths']:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(result['paths'][0]))
+            elif not data['preview']:
+                for path in result['paths']:self.add_result(path,data['scope'])
+            if result['failed'] or result.get('alignment_pending'):
+                self.record_diagnostic(dict(制作失败=result['failed'],字幕对齐=result.get('alignment_pending',[])))
+            self._refresh_files();self._voice_refresh();self._changed();self._poll()
+            if result['failed']:
+                issue=result['failed'][0]
+                status=f"{issue['title']} · {issue['reason'].splitlines()[0]}" if issue['reason'] else issue['title']
+                if len(result['failed'])>1:status+=f" · 共 {len(result['failed'])} 项失败，查看诊断后可重试"
+            elif result['cancelled']:status='已取消，可再次导出'
+            else:
+                status='本期预览已打开' if data['preview'] else '本期视频已导出' if not data['parts'] else f"已导出 {len(result['paths'])} 项素材"
+                if result.get('alignment_pending'):status+=' · 部分字幕采用段落级时间'
+            self.task_text.setText(worker.error or status)
+            worker.deleteLater();return
         if kind.startswith('voice_'):return self._news_voice_finished(worker,kind)
         if worker.error:
             self.record_diagnostic(dict(操作=kind,原因=worker.error))
@@ -1292,27 +2140,30 @@ class ProductionWorkspace(QWidget):
                 self.news.batch_hint.setText(f"口播阶段开始前已取消，共 {len(worker.payload['articles'])} 条，已有稿件保留。")
                 self.news.batch_hint.show()
         elif kind=='narration_retry':
-            proposals,failures,states=worker.value
-            self.news.apply_narrations(proposals,failures,states);self.news._update_script_rows()
+            proposals,failures,states,refreshed,events=worker.value
+            self.news.apply_retry_material(refreshed,events)
+            self.news.apply_narrations(proposals,failures,states)
+            self.news.script_included.update(a.news.key for a in self.news._rows('articles') if news_id(a.news.key) in proposals
+                                             and self.news.script_preferences.get(a.news.key) is not False)
+            self.news._update_script_rows()
             if failures:self.record_diagnostic(dict(口播失败=failures))
             self.task_text.setText('口播重试结束' if self.mode=='news' and self.navigation.currentRow()==1 else tr('ready'))
         elif kind=='export':
             for path in worker.value:self.add_result(path,self._news_export_scope)
             self._refresh_files();self.task_text.setText(tr('production.export_done'))
-        elif kind=='complete_video':
-            self.add_result(worker.value,self._complete_export_scope)
-            self._refresh_files();self.task_text.setText('已导出带配音的 MP4')
         elif kind=='import':
             self.task_text.setText('旧数据已备份并导入：'+worker.value+'；原目录保留。')
             if QMessageBox.question(self,'导入完成','是否打开导入后的工作区？原目录与备份均保留。')==QMessageBox.StandardButton.Yes:
                 QTimer.singleShot(0,lambda path=worker.value:self.request_leave(path))
         else:
             failures=worker.value.get('narration_failures',{})
+            collection=worker.value.pop('_launch_collection',None)
             self.news.adopt(worker.value,collected=kind=='collect')
             if failures:self.record_diagnostic(dict(口播失败=failures))
             self.task_text.setText('新闻稿件已处理' if kind=='write' else '新闻资料已采集')
-            self.roundup.collection=load_existing(Path(self.settings.output_dir))
+            if collection is not None:self.roundup.collection=collection
         worker.deleteLater();self._changed();self._poll()
+        if kind in ('write','narration_retry') and not worker.error and not worker.cancelled and failures:self.news.show_failures()
 
     def start_diagnostic(self,kind):
         if self.aux_worker is not None:raise ValueError(tr('production.conflict'))
@@ -1380,12 +2231,12 @@ class ProductionWorkspace(QWidget):
         for item in self.roundup.draft['snapshot']['items']:
             if item['ll2_id'] not in selected:continue
             names=roundup.display_names(item);name=names['name']
-            items.append(dict(id='ll2:'+item['ll2_id'],title=names['rocket'],summary=name,source='Launch Library 2',
-                published=item['net'],url=item.get('record_url') or item.get('ll2_source',{}).get('url') or 'https://ll.thespacedevs.com/2.3.0/launches/'+item['ll2_id']+'/',
+            items.append(dict(id='ll2:'+item['ll2_id'],title=names['title'],summary=name,source='Launch Library 2',display_record=names,
+                published=names['net'],url=item.get('record_url') or item.get('ll2_source',{}).get('url') or 'https://ll.thespacedevs.com/2.3.0/launches/'+item['ll2_id']+'/',
                 categories=[],video_type='launch',launch_context=item,
-                launch=dict(orbit=names['orbit'],payload=payload_display(item) if item.get('payload') else '',site=names['site'],
-                    time=format_datetime(item['net'],self.roundup.draft.get('timezone','Asia/Shanghai')),
-                    status=launch_status_text(dict(id=item.get('status_id'),name=item.get('status_name'))),recovery=item.get('recovery',''))))
+                launch=dict(orbit=names['orbit'],payload=names['payload'],site=names['location'],
+                    time=format_datetime(names['net'],self.roundup.draft.get('timezone','Asia/Shanghai')),
+                    status=launch_status_text(dict(id=names['status_id'],name=names['status_name'])),recovery=roundup.event_context(item,self.roundup.draft)['recovery'])))
         return items
 
     def cards_from_script(self):
@@ -1411,7 +2262,7 @@ class ProductionWorkspace(QWidget):
             bundle=self.news.bundle or {}
             context=bundle.get('context') or _export_context(self.settings,{})
             context=replace(context,report_title=self.dashboard.report_title_line.text().strip() or 'SpaceWeekly')
-            articles=[a for a in bundle.get('articles',[]) if a.news.url in self.news.script_included]
+            articles=[a for a in bundle.get('articles',[]) if a.news.key in self.news.script_included]
             data=build_snapshot(articles,bundle.get('summaries',{}),context,self.settings.language,
                                 launches=bundle.get('launch_video_items',[]),job_id=job)
             data['items']+=data.pop('launches',[])
@@ -1468,7 +2319,8 @@ class ProductionWorkspace(QWidget):
     def apply_preferences(self):
         if self.busy():raise ValueError(tr('production.conflict'))
         self.settings=self.dashboard.settings_snapshot(replace(self.preferences.settings(),video_workflow=self.video_workflow.currentData()))
-        save_settings(self.settings);apply_settings(self.settings);set_language(self.settings.language)
+        if self.episode.get('review_range'):self.settings=replace(self.settings,display_timezone='Asia/Shanghai')
+        save_settings(self.settings);apply_settings(self.settings);set_ui_language(self.settings.language)
         self.theme.apply(self.settings.theme_mode);self.log.apply_theme(self.theme);self.roundup.settings=self.settings
         self._saved_preferences=self.preference_signature()
         self.settings_applied.emit();self._mode();self._header();self.task_text.setText(tr('production.settings_saved'))
@@ -1481,7 +2333,7 @@ class ProductionWorkspace(QWidget):
 
     def _remember_source_dates(self,*_):
         if self._restoring or not self.dashboard.date_ranges_valid():return
-        settings=self.dashboard.settings_snapshot(self.settings)
+        settings=self.current_settings()
         try:
             write_json(resource_path('config','source-date-ranges.json'),
                        {key:getattr(settings,key) for key in SOURCE_DATE_KEYS})
@@ -1509,17 +2361,34 @@ class ProductionWorkspace(QWidget):
          target=r.target.currentText(),python=r.python.text(),model=r.model.text(),speaker=r.speaker_id(),
          style=r.style.text(),device=r.device.currentText(),timeout=r.timeout.value(),pause=r.pause.value(),pronunciations=r.pronunciations.toPlainText())
 
-    def content_state(self):
+    def content_state(self, *, for_poll=False):
         self.cards._store_editor()
-        return dict(version=1,daily=self._daily(),roundup=self.roundup.draft,roundup_controls=self._roundup_controls(),news=self.news.snapshot(),material_edits=self.material_edits,
+        draft=self.roundup.draft
+        if for_poll:
+            # Generation replaces this audit record as a whole.
+            writing_input=draft.get('writing_input')
+            if writing_input is not self._writing_input_digest[0]:
+                self._writing_input_digest=(writing_input,roundup.digest(writing_input))
+            if writing_input is not None:draft=dict(draft,writing_input=self._writing_input_digest[1])
+        return dict(version=1,daily=self._daily(),roundup=draft,roundup_controls=self._roundup_controls(),news=self.news.snapshot(for_poll=for_poll),material_edits=self.material_edits,
          cards=dict(data=self.cards.data,base=self._cards_base,source=str(self.cards.source) if self.cards.source else None,
           selected=sorted(self.cards.selected_ids()) if self.cards.data else [],seconds=self.cards.seconds.value(),encoding=self.cards.encoding.currentData(),
           sort_order=self.cards.sort_order.currentData()),
          intro=self.intro.options(),intro_file=str(self.intro.result_path) if self.intro.result_path else None,
-         results=self.results,result_scopes=self.result_scopes)
+         results=self.results,result_scopes=self.result_scopes,episode=self.episode)
+
+    @staticmethod
+    def _voice_state_hash(state):
+        episode={key:value for key,value in state['episode'].items() if key not in ('music','music_settings')}
+        return roundup.digest({**state,'episode':episode})
 
     def snapshot(self):
-        value=deepcopy(self.content_state())
+        state=self.content_state()
+        writing_input=state['roundup'].get('writing_input')
+        # The writing audit is replaced as a whole when a new draft is generated.
+        detached={id(state['news']):state['news']}
+        if writing_input is not None:detached[id(writing_input)]=writing_input
+        value=deepcopy(state,detached)
         value['view']=dict(page=self.navigation.currentRow() if self.navigation.currentRow()>=0 else self._last_page,mode=self.mode,materials=self.materials.currentIndex(),media=self.media.currentIndex(),
          roundup_segment=self.roundup.segment_list.currentRow(),news_source=self.news.sources.currentRow(),news_article=self.news.articles.currentRow(),
          cards_row=self.cards.items.currentRow(),cards_frame=self.cards.slider.value(),
@@ -1528,17 +2397,23 @@ class ProductionWorkspace(QWidget):
         article=self.news.current_article()
         if article:
             from models.news import news_id
-            value['view']['news_article_id']=news_id(article.news.url)
+            value['view']['news_article_id']=news_id(article.news.key)
+        value['view'].update(self.news.view_state())
         if self._detail_id:value['view']['launch_detail_id']=self._detail_id
         return value
 
     def _restore(self,path=None):
+        self._finish_recovery_write(wait=True)
+        self._poster_request=None
+        self._edition_revision=getattr(self,'_edition_revision',0)+1
         manual=resource_path('config','production-session.json');recovery=resource_path('cache','production-recovery.json')
         paths=[p for p in (manual,recovery) if p.exists()]
         if not paths and path is None:return
         path=path or max(paths,key=lambda p:p.stat().st_mtime_ns)
         try:
             value=validate_session(json.loads(path.read_text(encoding='utf-8')))
+            self.episode=value.get('episode') or new_episode()
+            self.music_panel.set_edition(self.episode)
             daily=value.get('daily',{});self.settings=replace(self.settings,**{k:v for k,v in daily.items() if k in self._daily()})
             self.material_edits=value.get('material_edits',{})
             self.dashboard.apply_settings(self.settings);self.preferences.output_edit.setText(self.settings.output_dir)
@@ -1576,14 +2451,16 @@ class ProductionWorkspace(QWidget):
             if 'pause' in staged:r.pause.setValue(staged['pause'])
             if 'pronunciations' in staged:r.pronunciations.setPlainText(staged['pronunciations'])
             r._loading=False;r._voice_dirty=True
+            self._sync_edition_dates()
             self.news.restore(value.get('news',{}))
             self.results=value.get('results',[]);self.result_scopes=value.get('result_scopes',{})
             self.intro.result_scope=self.result_scopes.get(str(self.intro.result_path))
             view=value.get('view',{});self.materials.setCurrentIndex(view.get('materials',0))
             self.content.setCurrentIndex(1 if view.get('mode')=='roundup' else 0)
             self.navigation.setCurrentRow(max(0,min(3,view.get('page',0))));self.media.setCurrentIndex(view.get('media',0))
-            r.segment_list.setCurrentRow(view.get('roundup_segment',0));self.news.sources.setCurrentRow(view.get('news_source',0))
-            if not self.news.select_article(view.get('news_article_id')):self.news.articles.setCurrentRow(view.get('news_article',0))
+            r.segment_list.setCurrentRow(view.get('roundup_segment',0))
+            self.news.restore_view(view)
+            if 'news_articles_focus' not in view:self.news.select_article(view.get('news_article_id'))
             for index,row in enumerate(r.draft['selection']):
                 if row['id']==view.get('launch_detail_id'):r.tasks.setCurrentCell(index,2);break
             if 'result_scopes' not in value:
@@ -1601,14 +2478,16 @@ class ProductionWorkspace(QWidget):
             self._recovery_blocked=True;self.task_text.setText(tr('production.restore_failed',error=str(error)))
 
     def save(self):
+        self._finish_recovery_write(wait=True)
         self.roundup._store_segment();value=self.snapshot();path=resource_path('config','production-session.json')
         if self._recovery_blocked and path.exists():
             from uuid import uuid4
             backup=path.with_name(path.stem+'.unreadable-'+uuid4().hex[:8]+'.json');backup.write_bytes(path.read_bytes())
-        write_json(path,value);write_json(resource_path('cache','production-recovery.json'),value)
-        self._saved_hash=roundup.digest(self.content_state());self._recovery_blocked=False
+        write_json(path,value,compact=True);write_json(resource_path('cache','production-recovery.json'),value,compact=True)
+        self._saved_hash=roundup.digest({key:state for key,state in value.items() if key!='view'});self._recovery_blocked=False
         if not self.busy() and self.dashboard.date_ranges_valid():self._save_runtime()
-        self._header()
+        self._observed_hash=roundup.digest(self.content_state(for_poll=True))
+        self._header(check_saved=False);self._update_save_tooltip(self._saved_hash)
 
     def preference_signature(self):
         return roundup.digest([self.video_workflow.currentData(),{k:v for k,v in vars(self.preferences.settings()).items() if k not in self._daily()}])
@@ -1617,15 +2496,20 @@ class ProductionWorkspace(QWidget):
         value=self.rules.settings()
         return roundup.digest({key:getattr(value,key) for key in ('summary_prompt','filter_prompt','title_prompt','roundup_prompt','prompt_preset')})
 
-    def checkpoint(self):
+    @staticmethod
+    def _checkpoint_path():
         from uuid import uuid4
         from datetime import datetime
-        path=resource_path('output','production-versions',datetime.now().strftime('%Y%m%d_%H%M%S_')+uuid4().hex[:8]+'.json')
-        write_json(path,self.snapshot())
+        return resource_path('cache','production-versions',datetime.now().strftime('%Y%m%d_%H%M%S_')+uuid4().hex[:8]+'.json')
+
+    def checkpoint(self):
+        write_json(self._checkpoint_path(),self.snapshot(),compact=True)
 
     def open_edition(self):
         if self.busy():raise ValueError(tr('production.conflict'))
-        path,_=QFileDialog.getOpenFileName(self,tr('production.open_edition'),str(resource_path('output','production-versions')),'JSON (*.json)')
+        directory=resource_path('cache','production-versions')
+        if not directory.exists():directory=resource_path('output','production-versions')
+        path,_=QFileDialog.getOpenFileName(self,tr('production.open_edition'),str(directory),'JSON (*.json)')
         if path:
             if roundup.digest(self.content_state())!=self._saved_hash:
                 if QMessageBox.question(self,tr('production.unsaved'),tr('production.open_version_question'))!=QMessageBox.StandardButton.Yes:return
@@ -1636,16 +2520,39 @@ class ProductionWorkspace(QWidget):
             self._remember_source_dates();self._mode();self._header()
 
     def _changed(self,*_):
-        if not self._restoring:self._header()
+        if not self._restoring:self._header(check_saved=False)
 
     def _header(self,*,check_saved=True):
         if not hasattr(self,'period'):return
         s=self.current_settings();news=s.start_date+' - '+s.end_date if s.date_mode=='custom' else self.dashboard.date_mode_combo.currentText()
         r=self.roundup.draft
+        self.name_update_button.setVisible(bool(r.get('name_updates_pending')))
         self.edition_button.setText(self.dashboard.report_title_line.text() or '点击填写期次名称')
         self.edition_button.setToolTip('点击修改期次名称\n'+self.workspace_label.toolTip())
-        self.period.setText((r['start']+' — '+r['end']+' · '+roundup.timezone_label(r)) if self.mode=='roundup' else news)
-        if check_saved and self._saved_hash:self.saved.setText(tr('production.saved' if roundup.digest(self.content_state())==self._saved_hash else 'production.unsaved'))
+        span=self.episode.get('review_range')
+        period=(' — '.join(span)+' · '+tr('production.beijing_time')) if span else (
+            r['start']+' — '+r['end']+' · '+roundup.timezone_label(r) if self.mode=='roundup' else news)
+        issue=tr('production.edition_number',number=self.episode['number'])
+        display_span=span or ([r['start'],r['end']] if self.mode=='roundup' else
+            [s.start_date,s.end_date] if s.date_mode=='custom' else [])
+        if len(display_span)==2 and all(len(day)==10 for day in display_span) and display_span[0][:4]==display_span[1][:4]:
+            visible_period=' — '.join(day[5:] for day in display_span)
+        else:visible_period=period.split(' · ')[0]
+        self.period.set_caption(issue+'  ·  '+visible_period,issue)
+        self.period.setToolTip(tr('production.edition_settings')+'\n'+issue+' · '+period)
+        self.period.setAccessibleName(tr('production.edition_settings'))
+        self.period.setAccessibleDescription(issue+' · '+period)
+        descriptions=(tr('production.materials_selection',news=len(self.news.included),launches=self._launch_count()),
+                      tr('production.script_description'),tr('production.media_description'),tr('production.export_description'))
+        for index,description in enumerate(descriptions):
+            item=self.navigation.item(index)
+            item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,description);item.setToolTip(description)
+        self._workflow_navigation()
+        if self.navigation.currentRow()==3:self._export_checks()
+        if check_saved and self._saved_hash:self._update_save_tooltip(roundup.digest(self.content_state()))
+
+    def _update_save_tooltip(self, content_hash):
+        self.save_button.setToolTip(tr('production.saved' if content_hash==self._saved_hash else 'production.unsaved'))
 
     def _edit_title(self):
         self.edition_button.hide();self.dashboard.report_title_line.show();self.dashboard.report_title_line.setFocus();self.dashboard.report_title_line.selectAll()
@@ -1655,7 +2562,12 @@ class ProductionWorkspace(QWidget):
 
     def export_scope(self,mode=None):
         mode=mode or self.mode
-        if mode=='roundup':
+        if mode=='complete':
+            basis=[self.episode['number'],self.episode['date'],self.episode.get('music',[]),self.export_scope('roundup'),self.export_scope('news')]
+            if self.episode.get('review_range'):basis.append(self.episode['review_range'])
+            options=music_settings(self.episode)
+            if options!=MUSIC_DEFAULTS:basis.append(options)
+        elif mode=='roundup':
             draft=self.roundup.draft
             basis=[draft['start'],draft['end'],draft.get('timezone')]
         else:
@@ -1671,8 +2583,9 @@ class ProductionWorkspace(QWidget):
     def _refresh_files(self):
         from datetime import datetime
         self.output_files.clear()
-        scope=self.export_scope()
-        current={Path(path).resolve() for path in self.results if self.result_scopes.get(path)==scope}
+        scopes={self.export_scope()}
+        if self.settings.video_workflow=='complete':scopes.add(self.export_scope('complete'))
+        current={Path(path).resolve() for path in self.results if self.result_scopes.get(path) in scopes}
         if self.mode=='roundup' and self.settings.video_workflow=='complete':
             current={path for path in current if path.suffix.lower()=='.mp4' and not path.name.lower().endswith('.intro.mp4')}
         history=self.history_toggle.isChecked()
@@ -1711,7 +2624,8 @@ class ProductionWorkspace(QWidget):
     def task_rows(self):
         rows=[]
         if self.updates.worker:rows.append(('update','软件更新',self.updates.status.text(),self.updates.cancel_work))
-        if self.image_worker:rows.append(('news_image','新闻配图','正在下载或导入图片',self.image_worker.token.cancel))
+        if self.image_worker:rows.append(('news_image','新闻画面素材','正在更新视频素材' if self.image_worker.video
+                                          else '正在下载或导入图片',self.image_worker.token.cancel))
         if self.maintenance.worker:rows.append(('maintenance','缓存维护',self.maintenance.status.text(),self.maintenance.cancel))
         if self.voice_setup.worker:
             rows.append(('voice_setup','语音配置',self.voice_setup.status.text(),self.voice_setup.cancel_work))
@@ -1720,6 +2634,8 @@ class ProductionWorkspace(QWidget):
             label={'voice_propose':'生成新闻口播','voice_audio':'新闻配音与对齐','voice_align':'新闻对齐',
                 'collect':'采集新闻','write':'生成新闻稿','narration_retry':'重试失败口播',
                 'export':'导出新闻','complete_video':'导出带配音的 MP4','import':'备份与导入旧工作区'}.get(self.worker_kind,'处理新闻')
+            if self.worker_kind in ('collect','write'):label=self._news_phase or label
+            if self.worker.token.is_cancelled:label=tr('production.cancelling')
             rows.append(('news:'+self.worker_kind,tr('production.news'),label,self.worker.token.cancel))
         for key,component in (('roundup',self.roundup),('cards',self.cards),('intro',self.intro),('downloads',self.downloads)):
             worker=getattr(component,'worker',None) or getattr(component,'preview_worker',None)
@@ -1734,18 +2650,28 @@ class ProductionWorkspace(QWidget):
         for _key,_name,_text,cancel in self.task_rows():cancel()
         self.task_text.setText(tr('production.cancelling'))
 
-    def _poll(self):
+    def _finish_recovery_write(self,*,wait=False):
+        future=self._recovery_write
+        if future is not None and (wait or future.done()):
+            self._recovery_write=None
+            try:self._update_save_tooltip(future.result())
+            except OSError as error:
+                self._recovery_blocked=True;self.task_text.setText(tr('production.failed',error=str(error)))
+
+    @staticmethod
+    def _write_recovery(path,snapshot):
+        write_json(path,snapshot,compact=True)
+        return roundup.digest({key:value for key,value in snapshot.items() if key!='view'})
+
+    def _poll(self,*,initialize=False):
         if self._restoring:return
-        paths=[resource_path('translator',name) for name in ('dictionary.json','launch_research.json')]
-        paths.append(resource_path('config','aerospace_terms.json'))
-        signature=tuple((str(p),p.stat().st_mtime_ns if p.exists() else None) for p in paths)
-        if getattr(self,'_terms_signature',signature)!=signature and self.roundup.worker is None:
-            self.guard(self.refresh_names)
-        if self.roundup.worker is None:self._terms_signature=signature
-        rows=self.task_rows();self.cancel_tasks.setEnabled(bool(rows))
+        self._finish_recovery_write()
+        if not initialize:self._poll_terms()
+        rows=self.task_rows();self.cancel_tasks.setVisible(bool(rows))
         self.task_progress.setVisible(bool(rows))
-        self.task_progress.setRange(0,0)
-        if rows:self.task_text.setText(' | '.join(name+': '+text for _,name,text,_ in rows))
+        if self.worker_kind!='complete_video' or not self.worker:self.task_progress.setRange(0,0)
+        if rows:self.task_text.setText(self._export_activity if self.worker and self.worker_kind=='complete_video'
+                                      and not self.worker.token.is_cancelled else ' | '.join(name+': '+text for _,name,text,_ in rows))
         for key,component in (('roundup',self.roundup),('cards',self.cards),('intro',self.intro),('downloads',self.downloads)):
             text=component.status.text()
             if self._last_statuses.get(key)!=text:
@@ -1753,28 +2679,39 @@ class ProductionWorkspace(QWidget):
                 self.log.append_html(escape(key+': '+text))
                 page=self.navigation.currentRow()
                 if not rows and ((key=='roundup' and self.mode=='roundup' and page in (0,1,2,3))
+                    or key=='roundup' and page==2 and self.roundup._job_kind in ('preview_audio','voice_sample')
                     or page==2 and self.media.currentIndex()=={'cards':1,'intro':2,'downloads':3}.get(key)):
                     self.task_text.setText(text)
         self.apply_button.setEnabled(not rows)
         voice_idle=self.worker is None and self.roundup.worker is None and self.voice_setup.worker is None
         self.voice_settings.setEnabled(voice_idle);self.roundup.speaker.setEnabled(voice_idle)
+        self.voice_sample_button.setEnabled(voice_idle)
+        self.music_panel.enabled.setEnabled(self.roundup.worker is None)
+        self.music_panel.manage.setEnabled(self.roundup.worker is None)
+        self.music_panel.mix_button.setEnabled(self.roundup.worker is None)
         has_text=self.mode!='news' or bool(self.voice_text.toPlainText().strip())
         self.listen_button.setEnabled(voice_idle and has_text);self.speech_button.setEnabled(voice_idle and has_text)
         self.voice_text.setReadOnly(not voice_idle)
         self.sync_button.setEnabled(voice_idle)
-        self.confirm_name.setEnabled(self.roundup.worker is None and self.roundup.tasks.currentRow()>=0)
+        self.period.setEnabled(not rows)
+        self.launch_detail_actions[0].setEnabled(self.roundup.worker is None and self.roundup.tasks.currentRow()>=0)
         self.export_news_button.setEnabled(self.worker is None)
         self.complete_export_button.setEnabled(not rows)
+        self.episode_preview_button.setEnabled(not rows)
         self.cards_export_button.setEnabled(self.cards.worker is None)
         self.news.sources.setEnabled(True);self.dashboard.setEnabled(self.worker is None)
-        value=self.content_state();key=roundup.digest(value)
-        if key!=self._observed_hash:
+        value=self.content_state(for_poll=True);key=roundup.digest(value)
+        if key!=self._observed_hash and self._recovery_write is None:
             self._observed_hash=key
+            snapshot=self.snapshot()
             if not self._recovery_blocked and not self._discard:
-                try:write_json(resource_path('cache','production-recovery.json'),self.snapshot())
-                except OSError as error:
-                    self._recovery_blocked=True;self.task_text.setText(tr('production.failed',error=str(error)))
-            self._voice_refresh();self._header()
+                self._recovery_write=_BACKGROUND.submit(self._write_recovery,resource_path('cache','production-recovery.json'),snapshot)
+            voice_key=self._voice_state_hash(value)
+            if voice_key!=self._observed_voice_hash:
+                self._observed_voice_hash=voice_key
+                self._refresh_visible_voice()
+            self._header(check_saved=False)
+            self.save_button.setToolTip(tr('production.unsaved'))
         path=getattr(self.roundup,'last_export_path',None)
         if path and Path(path).exists() and str(Path(path).resolve()) not in self.results:
             self.add_result(path,self.export_scope('roundup'));self._refresh_files()

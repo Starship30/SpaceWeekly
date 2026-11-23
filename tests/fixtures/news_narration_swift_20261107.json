@@ -1,0 +1,27 @@
+{
+  "source": {
+    "title": "Farewell Swift",
+    "source_text": "NASA’s Neil Gehrels Swift Observatory reentered this morning, bringing the 22-year-old mission to an end. NASA contracted with Katalyst Space in September 2025 to revamp an existing system to try […]",
+    "reported_at": "2026-11-05T00:16:40Z",
+    "source_url": "https://spacepolicyonline.com/news/farewell-swift/",
+    "glossary": {},
+    "verified_sources": [],
+    "material_type": "正文"
+  },
+  "responses": [
+    {
+      "spoken": "美国航天局的尼尔·格雷尔斯·斯威夫特天文台今天上午再入大气层，这颗已运行22年的卫星任务随之结束。此前，航天局于2025年9月与Katalyst Space公司签约，改造一套现有系统。",
+      "quotes": [
+        "NASA’s Neil Gehrels Swift Observatory reentered this morning, bringing the 22-year-old mission to an end.",
+        "NASA contracted with Katalyst Space in September 2025"
+      ]
+    },
+    {
+      "spoken": "美国航天局的尼尔·盖雷尔斯·斯威夫特天文台今天上午再入大气层，这项运行了22年的任务就此结束。此前在2025年9月，美国航天局与Katalyst Space签约，改造一套现有系统。",
+      "quotes": [
+        "NASA’s Neil Gehrels Swift Observatory reentered this morning, bringing the 22-year-old mission to an end.",
+        "NASA contracted with Katalyst Space in September 2025 to revamp an existing system"
+      ]
+    }
+  ]
+}

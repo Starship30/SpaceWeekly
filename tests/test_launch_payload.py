@@ -41,7 +41,7 @@ class LaunchPayloadTests(unittest.TestCase):
         self.raw['rocket']['payloads'] = []
         item = launches._launch_video_item(self.raw, 'Asia/Shanghai')
         self.assertEqual(item['summary'], RAW['mission']['name'])
-        self.assertEqual(item['launch']['payload'], self.raw['mission']['description'])
+        self.assertEqual(item['launch']['payload'], '')
         self.assertNotEqual(item['summary'], item['launch']['payload'])
         self.assertEqual(mission_search_keywords(item)[0], RAW['mission']['name'])
 
@@ -64,7 +64,9 @@ class LaunchPayloadTests(unittest.TestCase):
             dict(amount=1, payload=dict(name='Fictional Probe', type=dict(name='Scientific probe')))]
         item = launches._launch_video_item(self.raw, 'UTC')
         self.assertEqual(item['launch']['payload'],
-                         '3 × FictionalSat: Weather observations.; Fictional Probe: Scientific probe')
+                         'FictionalSat; Fictional Probe')
+        from services.launch_display import resolve_launch
+        self.assertEqual(resolve_launch(item['launch_context'])['payload_count'],4)
         self.assertNotIn(self.raw['mission']['description'], item['launch']['payload'])
 
     def test_missing_or_malformed_payload_never_falls_back_to_mission_name(self):
@@ -73,7 +75,7 @@ class LaunchPayloadTests(unittest.TestCase):
             self.raw['rocket']['payloads'] = flights
             with self.subTest(flights=flights):
                 self.assertEqual(launches._launch_video_item(self.raw, 'UTC')['launch']['payload'],
-                                 self.raw['mission']['description'])
+                                 '')
         for description in (None, '', {}, []):
             self.raw['mission']['description'] = description
             self.assertEqual(launches._launch_video_item(self.raw, 'UTC')['launch']['payload'], '')
@@ -91,12 +93,12 @@ class LaunchPayloadTests(unittest.TestCase):
             article = launches._launch_to_article(self.raw)
             doc = word.export_word([], launches=[article])
             md = markdown.export_markdown([], launches=[article])
-        self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['launches'][0]['launch']['payload'], description)
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['launches'][0]['launch']['payload'], '')
         self.assertIn('Additional payload details.', md.read_text(encoding='utf-8'))
         self.assertIn('Additional payload details.', '\n'.join(p.text for p in Document(doc).paragraphs))
         loaded = video.load_snapshot(path)['items'][0]
         video.make_card(loaded, 1)
-        self.assertEqual(loaded['launch']['payload'], description)
+        self.assertEqual(loaded['launch']['payload'], '')
         self.assertEqual(item, before)
 
     def test_payload_only_elides_to_fit_without_changing_short_text(self):
@@ -114,17 +116,15 @@ class LaunchPayloadTests(unittest.TestCase):
             video.fit_text('必须完整显示的其他字段' * 100, 430, 80, 38, 24)
 
     def test_description_localization_retains_original_on_empty_and_cancels(self):
+        self.raw['rocket']['payloads']=[dict(amount=1,payload=dict(name='Fictional satellite'))]
         item = launches._launch_video_item(self.raw, 'UTC')
         translator = Mock()
+        translator.settings.language='zh_CN'
         translator.summarize_payload.return_value = ''
         result = _localize_launch_video_items([item], translator, CancellationToken())[0]
         self.assertEqual(result['launch']['payload'], item['launch']['payload'])
-        translator.summarize_payload.assert_called_once_with(item['summary'], item['launch']['payload'])
-        token = CancellationToken()
-        def cancel(mission, text):
-            token.cancel()
-            return text
-        translator.summarize_payload.side_effect = cancel
+        translator.summarize_payload.assert_not_called()
+        token = CancellationToken();token.cancel()
         with self.assertRaises(TaskCancelledError):
             _localize_launch_video_items([item], translator, token)
 

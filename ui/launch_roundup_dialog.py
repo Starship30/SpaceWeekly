@@ -23,6 +23,7 @@ from ai.qwen_tts import QwenTTSProvider, capabilities
 
 
 class RoundupWorker(QThread):
+    progress = Signal(str,float,float)
     def __init__(self, action, payload, parent=None, *, protect_cache=True):
         super().__init__(parent)
         self.action, self.payload = action, payload
@@ -46,7 +47,9 @@ class LaunchRoundupDialog(ProductionComponent):
     tts_state_changed = Signal(str)
     job_changed = Signal()
     draft_changed = Signal()
+    task_edited = Signal(str)
     preview_ready = Signal(object)
+    sample_ready = Signal(str)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -116,15 +119,16 @@ class LaunchRoundupDialog(ProductionComponent):
         dates = QHBoxLayout()
         self.start, self.end = QDateEdit(), QDateEdit()
         self.date_label = QLabel('日期')
-        for label, edit in [(self.date_label, self.start), (QLabel('至'), self.end)]:
+        for label, edit in [(self.date_label, self.start), (QLabel('→'), self.end)]:
             edit.setCalendarPopup(True)
             edit.setDisplayFormat('yyyy-MM-dd')
             edit.setMaximumWidth(145)
             dates.addWidget(label)
             dates.addWidget(edit)
-        self._button(dates, '最近7天', self._default_dates).setToolTip('最近七个完整自然日，不含今天')
+        self.recent_dates=self._button(dates, '最近7天', self._default_dates)
+        self.recent_dates.setToolTip('最近七个完整自然日，不含今天')
         dates.addStretch(1)
-        self._button(dates, '联网刷新', self._refresh).setObjectName('PrimaryButton')
+        self.refresh_button=self._button(dates, '联网刷新', self._refresh);self.refresh_button.setObjectName('PrimaryButton')
         self.range_timer = QTimer(self)
         self.range_timer.setSingleShot(True)
         self.range_timer.setInterval(500)
@@ -139,6 +143,7 @@ class LaunchRoundupDialog(ProductionComponent):
         summary_row.addWidget(self.include_all);summary_row.addWidget(self.stats,1);layout.addWidget(summary)
         self.tasks = QTableWidget(0, 14)
         configure_table(self.tasks);self.tasks.setItemDelegateForColumn(13,StatusDelegate(self.tasks))
+        self.tasks.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed)
         self.tasks.setHorizontalHeaderLabels(['纳入', '重点', '任务名（悬停查看ID）', '分类', '分组（可编辑）', '北京时间', '发射地国家', '机构',
                                               '资料准备', '资料来源', '独立来源支持', '人工确认（名称）', '火箭', '发射结果'])
         for index in (11, 10, 9, 8):
@@ -153,8 +158,8 @@ class LaunchRoundupDialog(ProductionComponent):
         self._button(actions, '关联本地素材', self._associate)
         layout.addLayout(actions)
         actions = QHBoxLayout()
-        self._button(actions, '补充缺失资料（联网）', self._supplement_materials)
-        self._button(actions, '重新核对选中任务（联网）', self._recheck_materials)
+        self._button(actions, '补全中文资料', self._supplement_materials)
+        self._button(actions, '重新补全本任务', self._recheck_materials)
         self._button(actions, '同步已保存资料（本地）', self._sync_materials)
         layout.addLayout(actions)
         hint = QLabel('资料操作沿用当前搜索服务，临时启用本次联网核对；不改变网络开关。引文匹配与转述支持分别核验，机器复核不等于人工确认。')
@@ -181,6 +186,7 @@ class LaunchRoundupDialog(ProductionComponent):
         layout.addWidget(self.script_origin)
         split = QSplitter()
         self.segment_list = QListWidget()
+        self.segment_list.itemChanged.connect(self._segment_inclusion)
         self.segment_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.segment_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.segment_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -216,8 +222,10 @@ class LaunchRoundupDialog(ProductionComponent):
         self.audio_state = QLabel('尚无段落')
         self.audio_state.setWordWrap(True)
         form.addRow(self.audio_state)
+        self._segment_edit_timer=QTimer(self);self._segment_edit_timer.setSingleShot(True)
+        self._segment_edit_timer.setInterval(150);self._segment_edit_timer.timeout.connect(self._store_segment)
         for edit in (self.spoken, self.screen):
-            edit.textChanged.connect(self._store_segment)
+            edit.textChanged.connect(self._segment_text_changed)
         self.narration_edit.textChanged.connect(self._store_narration)
         self.ids.editingFinished.connect(self._store_segment)
         self.preview_seconds.valueChanged.connect(self._store_segment)
@@ -357,25 +365,27 @@ class LaunchRoundupDialog(ProductionComponent):
             name = names['name']
             classification = {'actual': '实际发射', 'planned': '计划', 'delayed': '延期', 'cancelled': '取消', 'pending': '待确认'}
             state = roundup.material_status(item)
-            values = ['', '', name, classification[roundup.category(item, roundup.parse_datetime(self.draft['as_of']))], selection['group'], format_datetime(item.get('net', ''), self.draft.get('timezone', 'Asia/Shanghai')),
-                      item.get('site_country', ''), item.get('provider', ''),
+            values = ['', '', name, classification[roundup.category(item, roundup.parse_datetime(self.draft['as_of']))], selection['group'], format_datetime(names.get('net', ''), self.draft.get('timezone', 'Asia/Shanghai')),
+                      item.get('site_country', ''), names['provider'],
                       state['preparation_label'], state['source_label'], state['independent_label'], state['human_label'],
                       names['rocket'], event_result(item,self.draft)]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
                 cell.setData(Qt.ItemDataRole.UserRole,selection['id']);cell.setToolTip(str(value))
+                if column==2:cell.setToolTip(name+'\n原文：'+item['english_name']+'\n'+names['name_source']+'\n双击或按F2修改本期名称')
                 if column == 5:cell.setText(str(value)[:16])
                 if 8 <= column <= 11:
                     cell.setToolTip(json.dumps(state, ensure_ascii=False, indent=2) + '\n独立支持指已有外部原句与事件匹配；机器复核不等于官方或人工确认。')
                 if column in (0, 1):
                     cell.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable)
                     cell.setCheckState(Qt.CheckState.Checked if selection['included' if column == 0 else 'featured'] else Qt.CheckState.Unchecked)
-                elif column != 4:
+                elif column not in (2,4,12):
                     cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.tasks.setItem(row, column, cell)
-        self.tasks.resizeColumnsToContents()
-        self.tasks.setColumnWidth(2, min(320, self.tasks.columnWidth(2)))
         if hasattr(self,'task_column_sizes'):self.task_column_sizes()
+        else:
+            self.tasks.resizeColumnsToContents()
+            self.tasks.setColumnWidth(2, min(320, self.tasks.columnWidth(2)))
         self._loading = False
         if self.draft['selection']:
             row=next((n for n,s in enumerate(self.draft['selection']) if s['id']==selected_id),0)
@@ -386,6 +396,16 @@ class LaunchRoundupDialog(ProductionComponent):
     def _selection_changed(self, *_):
         if self._loading:
             return
+        if _ and hasattr(_[0],'column') and _[0].column() in (2,12):
+            cell=_[0];identifier=cell.data(Qt.ItemDataRole.UserRole)
+            key='name' if cell.column()==2 else 'rocket';value=cell.text().strip()
+            def commit():
+                def edit():
+                    try:self.edit_task_field(identifier,key,value)
+                    finally:self._show_tasks()
+                self._guard(edit)
+            QTimer.singleShot(0,commit)
+            return
         if _ and hasattr(_[0], 'column') and _[0].column() == 1:
             self.draft['focus_mode'] = 'manual'
         for row, item in enumerate(self.draft['selection']):
@@ -393,6 +413,18 @@ class LaunchRoundupDialog(ProductionComponent):
             item['featured'] = self.tasks.item(row, 1).checkState() == Qt.CheckState.Checked
             item['group'] = self.tasks.item(row, 4).text()
         self._show_stats()
+
+    def edit_task_field(self,identifier,key,value):
+        if self.worker:raise ValueError('请等待本期发射任务处理结束后修改')
+        from services.launch_display import edit_fields,resolve_launch
+        item=next(i for i in self.draft['snapshot']['items'] if i['ll2_id']==identifier)
+        if resolve_launch(item).get(key)==value:return False
+        if hasattr(self,'before_task_edit'):self.before_task_edit()
+        self._store_segment();edit_fields(item,{key:value})
+        self._show_tasks();self._show_segments(self._current)
+        self.task_edited.emit(identifier);self.draft_changed.emit()
+        self.status.setText('本期名称已保存；原文和来源保留，人工口播与已有配音未自动覆盖。')
+        return True
 
     def _include_all(self,state):
         if self._loading or self.worker:return
@@ -406,16 +438,27 @@ class LaunchRoundupDialog(ProductionComponent):
         self.stats.setText(f"已选{stats['total']}项，已发射{stats['actual']}项，成功{stats['results']['success']}项"
             + (' · 当前收录不完整或仅选中部分任务' if not stats['complete'] else ''))
         self.stats.setToolTip(roundup.overview(self.draft))
+        self._show_script_scope()
 
-    def _store_segment(self, *_):
+    def _segment_text_changed(self):
+        if self._loading:return
+        self._store_segment(refresh=False)
+        self._segment_edit_timer.start()
+
+    def _store_segment(self, *_, refresh=True):
         if self._loading or not 0 <= self._current < len(self.draft['segments']):
             return
         segment = self.draft['segments'][self._current]
         ids = [i.strip() for i in self.ids.text().split(',') if i.strip()]
         new = dict(spoken=self.spoken.toPlainText(), screen=self.screen.toPlainText(), task_ids=ids)
         if any(segment.get(key) != value for key, value in new.items()):
+            spoken_changed=segment.get('spoken')!=new['spoken'] or segment.get('task_ids')!=new['task_ids']
             segment.update(new, edited=True)
+            if spoken_changed and segment.get('statistics_key'):
+                from services.production_export import selected_roundup
+                segment['statistics_key']=roundup.digest(roundup.statistics(selected_roundup(self.draft,strict=False)))
         segment['preview_seconds'] = self.preview_seconds.value()
+        if not refresh:return
         self.audio_state.setText('人工编辑' if segment.get('edited') else '资料约束生成')
         audio = current_audio(self.draft, segment) if not self._voice_dirty else None
         self.audio_state.setText(self.audio_state.text() + (f" · 当前配音 {audio['duration_seconds']:.2f} 秒" if audio else
@@ -433,7 +476,7 @@ class LaunchRoundupDialog(ProductionComponent):
             label = {'ai_polish':'AI口播润色（非人工确认）', 'event_organize':'口播整理（待复核）'}.get(value.get('origin'), '人工朗读编辑（待复核）')
             self.audio_state.setText(self.audio_state.text() + ' · ' + label)
         names = roundup.task_names(self.draft, segment['task_ids'])
-        self.names.setText(' / '.join(n['confirmed_chinese_name'] or n['original_name'] for n in names))
+        self.names.setText(' / '.join(n['display_name'] for n in names))
         self.names.setToolTip(json.dumps(names, ensure_ascii=False, indent=2))
         try:
             rules = json.loads(self.pronunciations.toPlainText())
@@ -453,12 +496,12 @@ class LaunchRoundupDialog(ProductionComponent):
                     for s in roundup.narration_sources(segment)]
             segment['narration'] = dict(text=text, based_on=roundup.narration_basis(segment), origin='manual_edit',
                                         source_refs=refs, human_confirmed=False)
-        self._store_segment()
+        self._segment_text_changed()
 
     def _select_segment(self, index):
         if self._loading:
             return
-        self._store_segment()
+        self._store_segment(refresh=False)
         self._current = index
         self._loading = True
         segment = self.draft['segments'][index] if index >= 0 else {}
@@ -475,10 +518,23 @@ class LaunchRoundupDialog(ProductionComponent):
         self.segment_list.clear()
         for segment in self.draft['segments']:
             origin = {'ai': 'AI综述', 'local_template': '本地模板', 'program_statistics': '程序统计'}.get(segment.get('origin'), '来源未记录')
-            self.segment_list.addItem(roundup.segment_title(self.draft, segment))
-            self.segment_list.item(self.segment_list.count()-1).setToolTip(roundup.segment_title(self.draft,segment)+'\n'+origin)
-        origins = set(s.get('origin', 'unknown') for s in self.draft['segments'])
-        reasons = list(dict.fromkeys(s.get('generation_reason', '') for s in self.draft['segments'] if s.get('generation_reason')))
+            members = roundup.task_names(self.draft, segment['task_ids'])
+            title = roundup.segment_title(self.draft, segment, names=members)
+            self.segment_list.addItem(f'{len(members)} 项 · {title}' if len(members)>1 else title)
+            cell=self.segment_list.item(self.segment_list.count()-1)
+            cell.setFlags(cell.flags()|Qt.ItemFlag.ItemIsUserCheckable)
+            cell.setData(Qt.ItemDataRole.UserRole,segment['id'])
+            cell.setCheckState(Qt.CheckState.Checked if segment.get('included',True) else Qt.CheckState.Unchecked)
+            cell.setToolTip('\n'.join([origin]+([entry['display_name'] for entry in members] or [title])))
+        self._show_script_scope()
+        self._current = -1
+        self._loading = False
+        self.segment_list.setCurrentRow(selected if self.draft['segments'] else -1)
+
+    def _show_script_scope(self):
+        segments = self.draft['segments']
+        origins = set(s.get('origin', 'unknown') for s in segments)
+        reasons = list(dict.fromkeys(s.get('generation_reason', '') for s in segments if s.get('generation_reason')))
         label = 'AI综述（资料约束生成）' if origins == {'ai'} else '本地模板稿（非AI综述）' if origins == {'local_template'} else '混合稿/人工稿，请查看各段来源'
         detail = (label + ('；' + '；'.join(reasons) if reasons else '')) if origins else '尚无稿件'
         if any(s.get('edited') or (s.get('narration') or {}).get('origin') == 'manual_edit' for s in self.draft['segments']):
@@ -486,11 +542,28 @@ class LaunchRoundupDialog(ProductionComponent):
         count = sum(bool(roundup.current_narration(s)) for s in self.draft['segments'])
         if count:
             detail += f'；{count}段有独立朗读文本'
-        self.script_origin.setText(label + (' · 含人工编辑' if any(s.get('edited') for s in self.draft['segments']) else '') if origins else '尚无稿件')
+        selected = {entry['id'] for entry in self.draft['selection'] if entry['included']}
+        active = [s for s in segments if s.get('included', True) and selected.intersection(s['task_ids'])]
+        covered = selected & {identifier for s in active for identifier in s['task_ids']}
+        excluded = (selected - covered) & {identifier for s in segments if not s.get('included', True) for identifier in s['task_ids']}
+        missing = selected - covered - excluded
+        scope = f'稿件关联 {len(covered)}/{len(selected)} 项发射 · {len(active)} 个任务段'
+        if excluded:scope += f' · {len(excluded)} 项在稿件中取消勾选'
+        if missing:
+            scope += f' · {len(missing)} 项尚未编入'
+            if segments:detail += '\n尚未编入：' + '、'.join(n['display_name'] for n in roundup.task_names(self.draft,missing))
+        if any(set(s['task_ids']) - selected for s in active):
+            scope += ' · 有合并段落需按资料勾选更新'
+        title = label + (' · 含人工编辑' if any(s.get('edited') for s in segments) else '') if origins else '尚无稿件'
+        self.script_origin.setText(title + ' · ' + scope)
         self.script_origin.setToolTip(detail)
-        self._current = -1
-        self._loading = False
-        self.segment_list.setCurrentRow(selected if self.draft['segments'] else -1)
+
+    def _segment_inclusion(self,item):
+        if self._loading:return
+        segment=next(s for s in self.draft['segments'] if s['id']==item.data(Qt.ItemDataRole.UserRole))
+        segment['included']=item.checkState()==Qt.CheckState.Checked
+        self._show_script_scope()
+        self.draft_changed.emit()
 
     def _sync(self, validate=True):
         if (self.start.date().toString('yyyy-MM-dd'), self.end.date().toString('yyyy-MM-dd')) != (self.draft['start'], self.draft['end']):
@@ -540,12 +613,27 @@ class LaunchRoundupDialog(ProductionComponent):
             self._loading = False
 
     def _new_snapshot(self, collection):
+        previous=self.draft
         voice, rules = deepcopy(self.draft['tts']), deepcopy(self.draft['pronunciations'])
         aligner=deepcopy(self.draft.get('aligner',{}))
         hold=self.draft.get('closing_hold_seconds',1.5)
+        edits={i['ll2_id']:deepcopy(i) for i in self.draft['snapshot']['items'] if i.get('edition_fields')}
         self.collection = collection
         self.draft = roundup.create_draft(collection, self.start.date().toString('yyyy-MM-dd'), self.end.date().toString('yyyy-MM-dd'), self.settings.display_timezone)
         self.draft.update(tts=voice, pronunciations=rules,aligner=aligner,closing_hold_seconds=hold)
+        for item in self.draft['snapshot']['items']:
+            if item['ll2_id'] in edits:
+                old=edits[item['ll2_id']]
+                from services.launch_display import overrides,original_source
+                source=deepcopy(original_source(item))
+                item.update(edition_fields=deepcopy(overrides(old)),edition_version=2,source_original=source)
+                item['edition_legacy']=deepcopy(old.get('edition_legacy',old.get('edition_fields',{})))
+        if (previous['start'],previous['end'])==(self.draft['start'],self.draft['end']):
+            known={i['ll2_id'] for i in self.draft['snapshot']['items']}
+            self.draft['segments']=deepcopy([s for s in previous['segments'] if set(s['task_ids'])<=known])
+            selected={s['id']:s for s in self.draft['selection']}
+            old_ids={s['id'] for s in previous['selection']}
+            self.draft['selection']=[deepcopy(s) for s in previous['selection'] if s['id'] in known]+[s for i,s in selected.items() if i not in old_ids]
         self._show_draft()
 
     def _refresh(self):
@@ -557,10 +645,11 @@ class LaunchRoundupDialog(ProductionComponent):
         def refresh(_data, token):
             data = refresh_collection(start, end, settings, token)
             if settings.aerospace_translation_enabled:
-                from services.launch_research import LaunchResearchService
+                from services.launch_research import LaunchResearchService,prepare_launch_translation
                 service = LaunchResearchService(settings, token)
                 for item in data['items']:
                     token.check()
+                    prepare_launch_translation(item,settings,token)
                     try:
                         item['research'] = service.review(item)
                     except (OSError, ValueError) as error:
@@ -576,7 +665,7 @@ class LaunchRoundupDialog(ProductionComponent):
 
     def _checkpoint(self):
         if self.draft['segments']:
-            path = resource_path('output', 'roundup-drafts', self.draft['id'] + '-' + uuid4().hex[:8] + '.json')
+            path = resource_path('cache', 'roundup-drafts', self.draft['id'] + '-' + uuid4().hex[:8] + '.json')
             write_json(path, self.draft)
 
     def _sync_materials(self):
@@ -597,6 +686,17 @@ class LaunchRoundupDialog(ProductionComponent):
         if row < 0:
             raise ValueError('请选择一项任务')
         self._supplement_materials(self.draft['selection'][row]['id'])
+
+    def _translate_fields(self,recheck=False):
+        self._sync(validate=False)
+        identifier=None
+        if recheck:
+            row=self.tasks.currentRow()
+            if row<0:raise ValueError('请选择一项任务')
+            identifier=self.draft['selection'][row]['id']
+        self._checkpoint()
+        self._start_job('translations',lambda data,token:roundup.prepare_translations(
+            data,self.settings,token,recheck_id=identifier),deepcopy(self.draft))
 
     def _move_task(self, direction):
         row = self.tasks.currentRow()
@@ -836,11 +936,13 @@ class LaunchRoundupDialog(ProductionComponent):
     def _audio_job(self, identifier=None, force=False, play=False):
         if getattr(self,'voice_setup_busy',lambda:False)():raise ValueError('语音环境正在配置，请等待完成或取消')
         self._sync()
+        from services.production_export import selected_roundup
+        view=selected_roundup(self.draft)
         if not self.draft['segments']:
             raise ValueError('请先生成稿件或添加人工段落')
         self._play_after = identifier if play else None
         settings = deepcopy(self.draft['tts'])
-        needed = [s for s in self.draft['segments'] if (not identifier or s['id'] == identifier)
+        needed = [s for s in view['segments'] if (not identifier or s['id'] == identifier)
                   and (force or not current_audio(self.draft, s))]
         if needed:
             from services.voice_profiles import PREFIX,configured,load
@@ -862,7 +964,7 @@ class LaunchRoundupDialog(ProductionComponent):
                 for s in data['segments']:
                     if not identifier or s['id']==identifier:s['alignment_error']='尚未配置强制对齐模型，保留配音并使用段落级展示'
             return errors
-        self._start_job('audio', synthesize, deepcopy(self.draft))
+        self._start_job('audio', synthesize, view)
 
     def _tts_state(self, message):
         self.voice_info.setText(message)
@@ -924,8 +1026,9 @@ class LaunchRoundupDialog(ProductionComponent):
         self.worker.finished.connect(self._finished)
         self._busy_inputs(True)
         self.cancel.setEnabled(True)
-        self.status.setText('正在' + {'refresh':'刷新资料','script':'生成综述','segment':'重写段落','materials':'核对资料',
-            'polish':'润色口播','audio':'生成配音与对齐','align':'强制对齐','preview_audio':'准备音画预览','export':'导出','unload':'卸载语音模型'}.get(kind,'处理任务') + '，可取消。')
+        self.status.setText('正在' + {'refresh':'刷新资料','script':'生成综述','segment':'重写段落','materials':'核对资料','translations':'翻译字段',
+            'polish':'润色口播','audio':'生成配音与对齐','align':'强制对齐','preview_audio':'准备音画预览',
+            'voice_sample':'生成音色试听','export':'导出','unload':'卸载语音模型'}.get(kind,'处理任务') + '，可取消。')
         self.worker.start()
         self.job_changed.emit()
 
@@ -946,11 +1049,19 @@ class LaunchRoundupDialog(ProductionComponent):
                     widget.setEnabled(not busy)
         loading, self._loading = self._loading, True
         for row in range(self.tasks.rowCount()):
-            for column in (0, 1, 4):
+            for column in (0, 1, 2, 4, 12):
                 cell = self.tasks.item(row, column)
-                flag = Qt.ItemFlag.ItemIsEditable if column == 4 else Qt.ItemFlag.ItemIsUserCheckable
+                flag = Qt.ItemFlag.ItemIsEditable if column in (2,4,12) else Qt.ItemFlag.ItemIsUserCheckable
                 cell.setFlags(cell.flags() & ~flag if busy else cell.flags() | flag)
         self._loading = loading
+
+    def _translation_notice(self):
+        items=self.draft['snapshot']['items']
+        entries=[v for i in items for v in i.get('field_translations',{}).values()]
+        translated=sum(v.get('status')=='candidate' and v.get('translation')!=v.get('original') for v in entries)
+        failed=sum(v.get('status')=='failed' for v in entries)
+        supported=sum(roundup.material_status(i)['independent_support'] for i in items)
+        return f'当前列表 {supported} 项取得公告支持；参考译文 {translated} 个字段，{failed} 个待重试。名称和背景确认状态分开显示。'
 
     def _finished(self):
         worker, kind = self.worker, self._job_kind
@@ -958,10 +1069,14 @@ class LaunchRoundupDialog(ProductionComponent):
         self._busy_inputs(False)
         self.cancel.setEnabled(False)
         try:
-            if kind in ('audio', 'materials','align'):
-                self.draft = worker.payload
+            if kind in ('audio', 'materials','align','translations'):
+                if kind in ('audio','align'):
+                    produced={s['id']:s for s in worker.payload['segments']}
+                    for segment in self.draft['segments']:
+                        if segment['id'] in produced:segment.update(produced[segment['id']])
+                else:self.draft = worker.payload
                 self._show_segments(max(0, self._current))
-                if kind == 'materials':
+                if kind in ('materials','translations'):
                     self._show_tasks()
             if worker.error:
                 self.status.setText('失败，已成功的分段/文件保留：' + worker.error)
@@ -971,7 +1086,7 @@ class LaunchRoundupDialog(ProductionComponent):
                                    if kind == 'audio' else '当前任务已取消；已有结果和驻留语音模型保留')
             elif kind == 'refresh':
                 self._new_snapshot(worker.value)
-                self.status.setText('刷新完成。' + (worker.value.get('reason') or '分页完整；未核对字段保留原文'))
+                self.status.setText('刷新完成。' + (worker.value.get('reason') or '分页完整。') + self._translation_notice())
             elif kind in ('script', 'segment'):
                 for key in ('writing_input', 'writing_warnings', 'focus_plan'):
                     if key in worker.payload:
@@ -984,7 +1099,9 @@ class LaunchRoundupDialog(ProductionComponent):
                 self.tabs.setCurrentIndex(1)
                 self.status.setText(self.script_origin.text() + '；' + '；'.join(self.draft.get('writing_warnings', [])) + '；目标时长需在实际配音后复核')
             elif kind == 'materials':
-                self.status.setText('资料准备完成；原稿和人工编辑保留，请查看每项资料状态后再生成新稿。')
+                self.status.setText('资料准备完成；原稿和人工编辑保留。'+self._translation_notice())
+            elif kind=='translations':
+                self.status.setText(self._translation_notice()+'已有稿件和配音保留；可用“同步名称与资料”采用新译名。')
             elif kind == 'polish':
                 self._review_narration(worker.value, '润色口播')
             elif kind == 'audio':
@@ -1003,6 +1120,9 @@ class LaunchRoundupDialog(ProductionComponent):
                 self.status.setText('对齐完成，请试听检查切换点' if not worker.value else '部分段落待校准；配音保留，请打开同步校准查看原因')
             elif kind == 'preview_audio':
                 self.preview_ready.emit(worker.value)
+            elif kind == 'voice_sample':
+                self.sample_ready.emit(str(worker.value))
+                self.status.setText('音色试听已生成')
             elif kind == 'export':
                 self.last_export_path=str(worker.value)
                 self.status.setText('已导出：' + str(worker.value))

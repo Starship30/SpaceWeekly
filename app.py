@@ -54,11 +54,11 @@ def main() -> None:
         from ui.prompt_studio_dialog import PromptStudioDialog
         from services.news_dates import publication_evidence
         from tools import video_cards, video_intro
-        assert video_cards.FONT == video_cards.BUNDLED_FONT, 'Bundled text font was not selected'
-        assert video_cards.NUMBER_FONT == video_cards.BUNDLED_FONT, 'Bundled number font was not selected'
+        assert video_cards.FONT.is_file() and video_cards.NUMBER_FONT.is_file(), 'Selected video fonts are missing'
+        assert video_cards.BUNDLED_FONT.is_file(), 'Bundled fallback font is missing'
         font = video_cards._load_font(video_cards.BUNDLED_FONT, 32)
         assert bytes(font.getmask('航')) != bytes(font.getmask('天')), 'Bundled Chinese glyphs failed'
-        checked('bundled-fonts-selected')
+        checked('bundled-fonts-available')
         ThemeManager(app).apply("light")
         settings = default_settings()
         settings.deepseek_api_key = ""
@@ -138,8 +138,11 @@ def main() -> None:
         assert exported['launch']['payload'] == payload_description, 'Full payload description lost'
         raw = dict(mission=dict(name='Fictional mission', description='Fictional payload description'))
         item = _launch_video_item(raw, 'UTC')
-        assert item['summary'] == 'Fictional mission' and item['launch']['payload'] == 'Fictional payload description'
-        checked('launch-payload-description')
+        assert item['summary'] == 'Fictional mission' and item['launch']['payload'] == ''
+        raw['rocket']=dict(payloads=[dict(amount=2,payload=dict(name='Fictional payload'))])
+        item=_launch_video_item(raw,'UTC')
+        assert item['launch']['payload']=='Fictional payload' and item['display_record']['payload_count']==2
+        checked('launch-payload-name-and-count')
         from dataclasses import replace
         from translator.translator import Translator
         from services.weekly_report import _localize_launch_video_items
@@ -148,7 +151,7 @@ def main() -> None:
         payload_ai = Translator(settings=replace(settings, language='en_US'), mode='ai',
                                 ai_callable=lambda *_: 'test satellite', web_search=False)
         short = _localize_launch_video_items([item], payload_ai, CancellationToken())
-        assert short[0]['launch']['payload'] == 'test satellite', 'Payload phrase generation failed'
+        assert short[0]['launch']['payload'] == 'Fictional payload', 'Payload name was replaced by prose'
         raw_video = VideoInfo('raw', 'Original video', 'https://www.bilibili.com/video/BV1Q8HP69EJh')
         sub_video = VideoInfo('sub', '[中字] video', raw_video.url)
         assert sort_search_items([sub_video, raw_video], 'relevance') == [raw_video, sub_video]

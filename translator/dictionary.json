@@ -20,8 +20,34 @@
     "type": "rocket"
   },
   "Gravity-1": {
-    "translation": "引力-1",
-    "type": "rocket"
+    "translation": "引力一号",
+    "type": "rocket",
+    "human_status": "confirmed"
+  },
+  "Orienspace": {
+    "translation": "东方空间",
+    "type": "organization",
+    "source_url": "https://www.orienspace.com/aboutPage"
+  },
+  "Jiuquan": {
+    "translation": "酒泉",
+    "type": "location"
+  },
+  "Taiyuan": {
+    "translation": "太原",
+    "type": "location"
+  },
+  "Xichang": {
+    "translation": "西昌",
+    "type": "location"
+  },
+  "Wenchang": {
+    "translation": "文昌",
+    "type": "location"
+  },
+  "Haiyang": {
+    "translation": "海阳",
+    "type": "location"
   },
   "Low Earth Orbit": {
     "translation": "近地轨道",
@@ -38,5 +64,192 @@
   "Launch Successful": {
     "translation": "发射成功",
     "type": "status"
+  },
+  "Long March 4B": {
+    "translation": "长征四号乙",
+    "type": "rocket",
+    "source_url": "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html",
+    "source_title": "航天科技集团长征系列发射记录（名称对应，不核实任务背景）"
+  },
+  "Long March 6A": {
+    "translation": "长征六号改",
+    "type": "rocket",
+    "source_url": "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html",
+    "source_title": "航天科技集团长征系列发射记录（名称对应，不核实任务背景）"
+  },
+  "Long March 8A": {
+    "translation": "长征八号甲",
+    "type": "rocket",
+    "source_url": "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html",
+    "source_title": "航天科技集团长征系列发射记录（名称对应，不核实任务背景）"
+  },
+  "Yaogan 50-03": {
+    "translation": "遥感五十号03星",
+    "type": "mission",
+    "source_url": "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html",
+    "source_title": "航天科技集团长征系列发射记录（名称对应，不核实任务背景）"
+  },
+  "Yaogan 53-07 to 09/56-19 to 21": {
+    "translation": "遥感五十三号07—09星、遥感五十六号19—21星",
+    "type": "mission",
+    "source_url": "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html",
+    "source_title": "航天科技集团长征系列发射记录（名称对应，不核实任务背景）"
+  },
+  "SatNet LEO Group 28": {
+    "translation": "卫星互联网低轨28组卫星",
+    "type": "mission",
+    "source_url": "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html",
+    "source_title": "航天科技集团长征系列发射记录（名称对应，不核实任务背景）"
+  },
+  "Jiuquan Satellite Launch Center, People's Republic of China": {
+    "translation": "酒泉卫星发射中心",
+    "type": "location",
+    "source_url": "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html",
+    "source_title": "航天科技集团长征系列发射记录（名称对应，不核实任务背景）"
+  },
+  "Taiyuan Satellite Launch Center, People's Republic of China": {
+    "translation": "太原卫星发射中心",
+    "type": "location",
+    "source_url": "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html",
+    "source_title": "航天科技集团长征系列发射记录（名称对应，不核实任务背景）"
+  },
+  "Wenchang Space Launch Site, People's Republic of China": {
+    "translation": "文昌航天发射场",
+    "type": "location",
+    "source_url": "https://m.spacechina.com/n142/n152/n657792/c3556658/content.html",
+    "source_title": "航天科技集团长征系列发射记录（名称对应，不核实任务背景）"
+  },
+  "Vandenberg SFB, CA, USA": {
+    "translation": "范登堡太空军基地",
+    "type": "location",
+    "source_url": "https://news.cctv.com/2025/02/24/ARTIAmxrfTskyn9S44wp8tOx250224.shtml",
+    "source_title": "央视新闻中的基地名称用法（仅名称对应，不核实本期任务背景）"
+  },
+  "Space Launch Complex 4E": {
+    "translation": "范登堡太空军基地 SLC-4E",
+    "type": "location"
+  },
+  "Rocket Lab Launch Complex 1, Mahia Peninsula, New Zealand": {
+    "translation": "火箭实验室1 发射场（新西兰马希亚半岛）",
+    "type": "location",
+    "source_url": "https://rocketlabcorp.com/updates/rocket-lab-launch-complex-1-ready-for-launches/",
+    "human_status": "confirmed"
+  },
+  "Rocket Lab Launch Complex 1A": {
+    "translation": "火箭实验室1A 工位",
+    "type": "location",
+    "source_url": "https://rocketlabcorp.com/assets/Uploads/F64-iQPS-Presskit-The-Sea-God-Sees.pdf",
+    "human_status": "confirmed"
+  },
+  "Electron": {
+    "translation": "电子号",
+    "type": "rocket",
+    "exact_only": true,
+    "source_url": "https://news.cctv.com/2020/07/06/ARTIEb3uOFqrfc7Y1S6bmxdG200706.shtml"
+  },
+  "Kinetica 2": {
+    "translation": "力箭二号",
+    "type": "rocket",
+    "source_url": "https://www.cas-space.com/article/610.html"
+  },
+  "Kinetica-2": {
+    "translation": "力箭二号",
+    "type": "rocket",
+    "source_url": "https://www.cas-space.com/article/610.html"
+  },
+  "CAS Space": {
+    "translation": "中科宇航",
+    "type": "organization",
+    "source_url": "https://www.cas-space.com/article/610.html"
+  },
+  "GSLV Mk. II": {
+    "translation": "地球同步卫星运载火箭 Mk II",
+    "type": "rocket",
+    "source_url": "https://www.isro.gov.in/GSLV_Launchers.html"
+  },
+  "Satish Dhawan Space Centre, India": {
+    "translation": "印度萨蒂什达万航天中心",
+    "type": "location",
+    "source_url": "https://news.cctv.com/2019/09/08/ARTIPxOq8ZpkbA6zkGiSPkXc190908.shtml"
+  },
+  "Satish Dhawan Space Centre Second Launch Pad": {
+    "translation": "2号工位",
+    "type": "location",
+    "source_url": "https://www.isro.gov.in/Mission_GSLVF18.html"
+  },
+  "IRNSS-1L (NVS-03)": {
+    "translation": "印度导航卫星 NVS-03",
+    "type": "mission",
+    "source_url": "https://www.isro.gov.in/Mission_GSLVF18.html"
+  },
+  "Indian Space Research Organization": {
+    "translation": "印度空间研究组织",
+    "type": "organization",
+    "source_url": "https://www.isro.gov.in/LaunchMissions.html"
+  },
+  "SatNet LEO Group": {
+    "translation": "卫星互联网低轨卫星",
+    "type": "mission",
+    "human_status": "confirmed"
+  },
+  "Long March 10B": {
+    "translation": "长征十号乙",
+    "type": "rocket"
+  },
+  "China Aerospace Science and Technology Corporation": {
+    "translation": "中国航天科技集团公司",
+    "type": "organization"
+  },
+  "Commercial LC-2": {
+    "translation": "海南商业发射场 LCC-2",
+    "type": "location"
+  },
+  "Demo Flight": {
+    "translation": "演示飞行",
+    "type": "mission"
+  },
+  "Space Launch Complex 40": {
+    "translation": "卡纳维拉尔角 SLC-40",
+    "type": "location"
+  },
+  "Transporter 17 (Dedicated SSO Rideshare)": {
+    "translation": "Transporter 17（专用太阳同步轨道拼车）",
+    "type": "mission"
+  },
+  "Long March 3B/E": {
+    "translation": "长征三号乙",
+    "type": "rocket"
+  },
+  "Polar Orbit": {
+    "translation": "极地轨道",
+    "type": "orbit"
+  },
+  "Orbital Launch Pad 2": {
+    "translation": "轨道发射台2号",
+    "type": "location"
+  },
+  "Long March 3B/E | Tianlian 2-06": {
+    "translation": "长征3B/E | 天链2-06",
+    "type": "mission"
+  },
+  "Kinetica 1": {
+    "translation": "力箭一号",
+    "type": "rocket",
+    "human_status": "confirmed"
+  },
+  "Xiguang-4": {
+    "translation": "西光肆",
+    "type": "mission",
+    "human_status": "confirmed"
+  },
+  "SpaceSail Polar Group": {
+    "translation": "千帆极地轨道组",
+    "type": "mission",
+    "human_status": "confirmed"
+  },
+  "Spacesail": {
+    "translation": "千帆",
+    "type": "term",
+    "human_status": "confirmed"
   }
 }

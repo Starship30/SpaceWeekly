@@ -64,9 +64,9 @@ def export_word(
             _add_article(
                 document,
                 article,
-                (ai_summaries or {}).get(article.news.url),
+                (ai_summaries or {}).get(article.news.key),
                 context,
-                (assessments or {}).get(article.news.url),
+                (assessments or {}).get(article.news.key),
             )
 
     with reserved_output(OUTPUT_DIR, ".docx") as (output_path, temp_path):
@@ -137,7 +137,7 @@ def _add_article(
 ) -> None:
     news = article.news
     title = (
-        context.localized_titles.get(news.url, news.title)
+        context.localized_titles.get(news.key, news.title)
         if context is not None
         else news.title
     )
@@ -169,7 +169,7 @@ def _add_article(
         paragraph.add_run(
             f"{tr('report_link')}{tr('label_separator')}"
         ).bold = True
-        _add_hyperlink(paragraph, news.url, news.url)
+        if news.url:_add_hyperlink(paragraph, news.url, news.url)
 
     if context is None or context.include_body:
         body_text = _body_text(article, context)
@@ -242,7 +242,7 @@ def _group_by_importance(
     grouped = {_importance_label(level): [] for level in IMPORTANCE_LEVELS}
 
     for article in articles:
-        assessment = assessments.get(article.news.url)
+        assessment = assessments.get(article.news.key)
         level = assessment.importance if assessment is not None else "Medium"
         label = _importance_label(level)
         grouped.setdefault(label, []).append(article)

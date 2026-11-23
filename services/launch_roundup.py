@@ -57,9 +57,16 @@ def narration_sources(segment):
 
 
 def task_names(draft, ids):
-    return [dict(task_id=i['ll2_id'], original_name=i['english_name'],
-                 confirmed_chinese_name=display_names(i)['name'], name_source=display_names(i)['name_source'])
-            for i in draft['snapshot']['items'] if i['ll2_id'] in ids]
+    if not ids:return []
+    entries=load_dictionary()
+    result=[]
+    for item in draft['snapshot']['items']:
+        if item['ll2_id'] not in ids:continue
+        names=display_names(item, entries)
+        confirmed=names['name'] if names['name_source'] in ('术语词典','任务人工确认','有来源支持的正式名称') else ''
+        result.append(dict(task_id=item['ll2_id'],original_name=item['english_name'],display_name=names['name'],
+                           confirmed_chinese_name=confirmed,name_source=names['name_source']))
+    return result
 
 
 def sync_names(draft, *, update_manual=False):
@@ -75,11 +82,23 @@ def sync_names(draft, *, update_manual=False):
             for old in (item.get(original, ''), previous.get(item['ll2_id'], {}).get(key, '')):
                 if old and old != names[key]:
                     replacements[old] = {'translation': names[key]}
+    # Match the full current name before a shorter raw alias, even on repeated refreshes.
+    for name in {entry['translation'] for entry in replacements.values()} - {''}:
+        replacements.setdefault(name, {'translation': name})
+    task_names_with_suffix = {entry['name'] for entry in current.values() if entry['name'].endswith('任务')}
+    duplicates = (re.compile(r'(?<![A-Za-z0-9])(' + '|'.join(re.escape(n) for n in
+                  sorted(task_names_with_suffix, key=len, reverse=True)) + r')(?:任务)+', re.I)
+                  if task_names_with_suffix else None)
+
+    def updated_text(text):
+        translated = dictionary_replace(text, replacements)[0]
+        return duplicates.sub(r'\1', translated) if duplicates else translated
+
     pending = []
     for segment in draft['segments']:
         narration = current_narration(segment)
-        fields = {key: dictionary_replace(segment[key], replacements)[0] for key in ('spoken', 'screen')}
-        reading = dictionary_replace(narration['text'], replacements)[0] if narration else None
+        fields = {key: updated_text(segment[key]) for key in ('spoken', 'screen')}
+        reading = updated_text(narration['text']) if narration else None
         changed = any(segment[k] != v for k, v in fields.items()) or narration and reading != narration['text']
         if not changed:
             continue
@@ -97,9 +116,9 @@ def sync_names(draft, *, update_manual=False):
                 text = unit['text']
                 leading = text[:len(text)-len(text.lstrip())]
                 trailing = text[len(text.rstrip()):]
-                text = leading + dictionary_replace(text, replacements)[0] + trailing
+                text = leading + updated_text(text) + trailing
                 unit.update(text=text, start=offset, end=offset+len(text),
-                            screen=dictionary_replace(unit['screen'], replacements)[0])
+                            screen=updated_text(unit['screen']))
                 offset += len(text)
             spoken = narration_text(segment)
             if ''.join(unit['text'] for unit in units) == spoken:
@@ -111,13 +130,13 @@ def sync_names(draft, *, update_manual=False):
     return pending
 
 
-def segment_title(draft, segment):
+def segment_title(draft, segment, *, names=None):
     if segment['kind'] == 'overview':
         return '开场'
     if segment['kind'] == 'transition':
         return '结尾'
-    names = task_names(draft, segment['task_ids'])
-    return '、'.join(n['confirmed_chinese_name'] for n in names) or '补充段落'
+    if names is None:names = task_names(draft, segment['task_ids'])
+    return '、'.join(n['display_name'] for n in names) or '补充段落'
 
 
 def default_range(now=None, display_timezone='Asia/Shanghai'):
@@ -136,6 +155,8 @@ def range_bounds(start, end, display_timezone='Asia/Shanghai'):
 
 def category(item, now=None):
     """Launch and landing results are independent. Unknown never means launched."""
+    from services.launch_display import effective_item
+    item=effective_item(item)
     status = item.get('status_id')
     if type(status) is int and status in (3, 4, 6, 7, 9):
         return 'actual'
@@ -154,7 +175,8 @@ def statistics(draft, now=None):
     now = now or parse_datetime(draft.get('as_of', '')) or datetime.now(BEIJING)
     first, last = range_bounds(draft['start'], draft['end'], draft.get('timezone', 'Asia/Shanghai'))
     chosen = {s['id'] for s in draft['selection'] if s['included']}
-    all_items = [i for i in draft['snapshot']['items'] if parse_datetime(i.get('net', '')) is not None
+    from services.launch_display import effective_item
+    all_items = [i for i in map(effective_item,draft['snapshot']['items']) if parse_datetime(i.get('net', '')) is not None
                  and first <= parse_datetime(i['net']) < last]
     items = [i for i in all_items if i['ll2_id'] in chosen]
     counts = Counter(category(i, now) for i in items)
@@ -445,7 +467,7 @@ def sync_materials(draft):
     for item in draft['snapshot']['items']:
         record = records.get(item['ll2_id'], {})
         original = record.get('input', {})
-        if (not item.get('ll2_source') and original.get('ll2_source') and original.get('ll2_id') == item['ll2_id']
+        if (not item.get('edition_fields') and not item.get('ll2_source') and original.get('ll2_source') and original.get('ll2_id') == item['ll2_id']
                 and parse_datetime(original.get('net')) == parse_datetime(item.get('net'))):
             item.update(deepcopy(original))
         if record and record.get('fingerprint') == fingerprint(item) and record != item.get('research'):
@@ -457,8 +479,8 @@ def sync_materials(draft):
 def prepare_materials(draft, settings, token, *, recheck_id=None, service=None, hydrate=None, on_progress=None):
     """Called only by an explicit online preparation action, never by rendering/writing."""
     sync_materials(draft)
-    service = service or LaunchResearchService(replace(settings, web_search_enabled=True,
-                                                      aerospace_translation_mode='hybrid'), token)
+    settings=replace(settings,web_search_enabled=True,aerospace_translation_enabled=True,aerospace_translation_mode='hybrid')
+    service = service or LaunchResearchService(settings, token)
     hydrate = hydrate or supplement_context
     selected = {s['id'] for s in draft['selection'] if s['included']}
     for item in draft['snapshot']['items']:
@@ -468,6 +490,8 @@ def prepare_materials(draft, settings, token, *, recheck_id=None, service=None, 
         record = item.get('research', {})
         if (not recheck_id and has_primary_background(item) and record.get('fingerprint') == fingerprint(item)
                 and not record.get('recheck_requested') and not record.get('needs_review')):
+            from services.launch_research import prepare_launch_translation
+            prepare_launch_translation(item,settings,token)
             continue
         ll2 = item.get('ll2_source', {})
         if (not ll2 or ll2.get('identity') != {k: item.get(k) for k in ('english_name', 'net', 'rocket', 'site', 'provider')}
@@ -481,9 +505,24 @@ def prepare_materials(draft, settings, token, *, recheck_id=None, service=None, 
                 item['preparation_error'] = 'LL2原始说明补取失败：' + str(error)
         token.check()
         item['research'] = service.review(item, force=bool(recheck_id), require_background=True)
+        from services.launch_research import prepare_launch_translation
+        prepare_launch_translation(item,settings,token,force=bool(recheck_id))
         if on_progress:
             on_progress(item['ll2_id'])
     return [dict(id=i['ll2_id'], **material_status(i)) for i in draft['snapshot']['items']]
+
+
+def prepare_translations(draft,settings,token,*,recheck_id=None):
+    """Explicit retry for existing drafts; paragraphs, audio and edition edits stay intact."""
+    from services.launch_research import prepare_launch_translation
+    if settings.language!='zh_CN' or not settings.aerospace_translation_enabled or settings.aerospace_translation_mode=='dictionary':
+        raise ValueError('请在设置中开启中文航天翻译，并选择 AI 或混合模式')
+    selected={s['id'] for s in draft['selection'] if s['included']}
+    for item in draft['snapshot']['items']:
+        token.check()
+        if item['ll2_id']==recheck_id or not recheck_id and item['ll2_id'] in selected:
+            prepare_launch_translation(item,settings,token,force=bool(recheck_id))
+    return [dict(id=i['ll2_id'],translations=i.get('field_translations',{})) for i in draft['snapshot']['items']]
 
 
 def writing_materials(draft):
@@ -740,6 +779,9 @@ def _sync_auto_focus(draft):
 
 
 def save_draft(draft, path):
+    draft=deepcopy(draft)
+    from services.launch_display import resolve_launch
+    draft['display_records']={i['ll2_id']:resolve_launch(i) for i in draft['snapshot']['items']}
     validate_draft(draft)
     write_json(Path(path), draft)
 
@@ -768,20 +810,19 @@ def validate_draft(draft):
     known = {s['ll2_id'] for s in draft['snapshot']['items']}
     if not allowed <= known:
         raise ValueError('任务不在草稿数据快照中')
+    from services.launch_display import overrides
+    for item in draft['snapshot']['items']:overrides(item)
     seen = set()
     for segment in draft['segments']:
         if (not isinstance(segment, dict) or not isinstance(segment.get('id'), str) or segment['id'] in seen
                 or not isinstance(segment.get('task_ids'), list)
                 or any(not isinstance(i, str) for i in segment['task_ids'])
-                or segment.get('kind') not in KINDS or not set(segment.get('task_ids', [])) <= allowed
+                or segment.get('kind') not in KINDS or not set(segment.get('task_ids', [])) <= known
                 or not isinstance(segment.get('spoken'), str) or not isinstance(segment.get('screen'), str)):
             raise ValueError('段落或任务关联无效；任务选择变化后请重写或移除相关段落')
         seen.add(segment['id'])
         from services.roundup_sync import validate_unit_structure
         validate_unit_structure(segment)
-        if (segment['kind'] in ('overview', 'transition') and segment.get('statistics_key')
-                and segment['statistics_key'] != digest(statistics(draft))):
-            raise ValueError('任务或统计已变化，请选中总览并点击“只重写选中段”同步程序统计')
         if not statistics(draft)['complete'] and re.search(r'全球.*(?:共|完成|发射).*?(?:\d|[一二三四五六七八九十])', segment['spoken'] + segment['screen']):
             raise ValueError('资料不完整，不能使用全球完整统计表述')
         if re.search(r'https?://|www\.', segment['spoken'], re.I):
@@ -800,6 +841,7 @@ def validate_draft(draft):
 
 def load_draft(path):
     draft = json.loads(Path(path).read_text(encoding='utf-8'))
+    draft.pop('display_records',None) # Exported resolved fields are a snapshot; resolve current terms on reopening.
     validate_draft(draft)
     _sync_auto_focus(draft)
     for segment in draft['segments']:

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from functools import lru_cache
+from threading import local
 from io import BytesIO
 from uuid import uuid4
 
@@ -33,8 +34,17 @@ def _font_bytes(path):
     return path.read_bytes()
 
 
+_fonts = local()
+
+
 def _load_font(path, size):
-    path = Path(path)
+    if not hasattr(_fonts, 'load'):
+        # FreeType faces are reused only on the thread drawing them.
+        _fonts.load = lru_cache(maxsize=32)(_new_font)
+    return _fonts.load(Path(path), size)
+
+
+def _new_font(path, size):
     try:
         # FreeType must not retain one Windows file handle per font instance.
         return ImageFont.truetype(BytesIO(_font_bytes(path)), size)
@@ -75,6 +85,7 @@ def load_snapshot(path: Path) -> dict:
 
 
 def validate_snapshot(data: dict) -> dict:
+    from models.news import is_manual_id, is_news_url
     if not isinstance(data, dict) or data.get('protocol_version') != '1.0':
         raise ValueError('仅支持 SpaceWeekly protocol_version 1.0')
     for key in ('job_id', 'report_title', 'language'):
@@ -104,10 +115,11 @@ def validate_snapshot(data: dict) -> dict:
         for key in ('id', 'title', 'summary', 'source', 'published', 'url'):
             if not isinstance(item.get(key), str):
                 raise ValueError(f'第 {index} 条缺少字符串 {key}')
-        for key in ('id', 'title', 'source', 'url'):
+        for key in ('id', 'title', 'source'):
             if not item[key].strip():
                 raise ValueError(f'第 {index} 条 {key} 为空')
-        if not re.fullmatch(r'https?://[^\s/]+(?:/[^\s]*)?', item['url'], re.IGNORECASE):
+        if not is_news_url(item['url']) and not (item.get('video_type','news')=='news' and
+                                                is_manual_id(item['id']) and item['url']==''):
             raise ValueError(f'第 {index} 条 URL 无效')
         if item['id'] in ids:
             raise ValueError(f'重复新闻 ID：{item["id"]}')
@@ -269,32 +281,43 @@ def reveal_text(image, x, y, direction, boundary, progress):
     return image.crop((0, top, image.width, image.height)), x, max(y, boundary)
 
 
-def scroll_offset(card, t):
+def scroll_offset(card, t, timing=None):
+    if timing and 'summary_scroll_start' in timing:
+        start,end=timing['summary_scroll_start'],timing['summary_scroll_end']
+        progress=max(0,min(1,(t-start)/max(.001,end-start)))
+        return card['scroll_distance']*progress
     return min(card['scroll_distance'], max(0, (t-4.5)*SCROLL_SPEED))
 
 
-def render_frame(card: dict, t: float, seconds: float) -> Image.Image:
+def render_frame(card: dict, t: float, seconds: float, *, timing=None) -> Image.Image:
     if card.get('video_type') == 'launch':
         return render_launch_frame(card, t, seconds)
     canvas = Image.new('RGBA', (W, H))
     draw = ImageDraw.Draw(canvas)
-    offset = round(-W*(1-smooth(t, 0, .53))+W*smooth(t, seconds-.8, .67))
+    out = timing['strip_out'] if timing else None
+    # All text/lines retract before the plate moves, so nothing is left outside it.
+    background_out = timing.get('background_out',out+.55) if timing else seconds-.8
+    offset = round(-W*(1-smooth(t, 0, .53))+W*smooth(t, background_out, timing.get('background_out_duration',.67) if timing else .67))
     draw.rectangle((48+offset, 812, 1872+offset, 1032), fill=BLUE)
-    line = smooth(t, .5, .55)*(1-smooth(t, seconds-1.3, .35))
+    line = smooth(t, .5, .55)*(1-smooth(t, out if timing else seconds-1.3, .35))
     if line > 0:
         draw.rounded_rectangle((72, 932, 72+148*line, 939), 3, fill=WHITE)
-    line = smooth(t, 1.3, .35)*(1-smooth(t, seconds-2.1, .3))
+    line = smooth(t, 1.3, .35)*(1-smooth(t, out if timing else seconds-2.1, .3))
     if line > 0:
         draw.rounded_rectangle((TEXT_LEFT, 934, TEXT_LEFT+(TEXT_RIGHT-TEXT_LEFT)*line, 941), 3, fill=WHITE)
-    line = smooth(t, .6, .35)*(1-smooth(t, seconds-1.1, .35))
+    line = smooth(t, .6, .35)*(1-smooth(t, out if timing else seconds-1.1, .35))
     if line > 0:
         draw.rounded_rectangle((232, 844, 238, 844+164*line), 3, fill=WHITE)
     for index, (image, x, y, direction, boundary, start, duration, end_offset) in enumerate(card['layers']):
-        progress = smooth(t, start, duration)*(1-smooth(t, seconds-end_offset, duration))
+        if timing and index == 3:
+            progress = smooth(t, timing['summary_in'], max(.001, timing['summary_in_duration']))*(1-smooth(t, timing['summary_out'], max(.001, timing['summary_out_duration'])))
+        else:
+            exit_start = out if timing else seconds-end_offset
+            progress = smooth(t, start, duration)*(1-smooth(t, exit_start, duration))
         if progress > 0:
             visible, px, py = reveal_text(image, x, y, direction, boundary, progress)
             if index == 3:
-                px -= round(scroll_offset(card, t))
+                px -= round(scroll_offset(card, t, timing))
                 left = max(0, TEXT_LEFT-px)
                 right = min(visible.width, TEXT_RIGHT-px)
                 visible = visible.crop((left, 0, max(left, right), visible.height))
@@ -330,7 +353,7 @@ def launch_badge_labels(fields, language='zh_CN'):
             label, state = en if english else zh, result
             break
     states = set(recovery_states(fields.get('recovery', '')))
-    if not states or states == {'unknown'}:
+    if not states or set(states) <= {'unknown','pending'}:
         return [(label, state)]
     if 'partial' in states or {'failure', 'success'} <= states:
         recovery = 'partial'
@@ -465,17 +488,22 @@ def verify_video(path: Path, frames: int, seconds: float, ffmpeg: str, ffprobe: 
 
 
 def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel, on_frame=None,
-                encoding='png',frame_provider=None,audio=None,subtitles=None):
-    if encoding not in ('png', 'prores'):
-        raise ValueError('未知透明视频编码')
+                encoding='png',frame_provider=None,audio=None,subtitles=None,transparent_audio=False,fps=FPS):
+    if encoding not in ('png', 'prores','h264'):
+        raise ValueError('未知视频编码')
     codec_args = (['-c:v', 'png', '-pix_fmt', 'rgba', '-pred', 'mixed', '-compression_level', '6'] if encoding == 'png' else
                   ['-c:v', 'prores_ks', '-profile:v', '4', '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16'])
-    seconds = frames/FPS
+    seconds = frames/fps
     suffix = '.launch.mov' if card.get('video_type') == 'launch' else '.news.mov'
-    if audio is not None:
+    if audio is not None and not transparent_audio:
         suffix = '.mp4'
         codec_args = ['-c:v','libx264','-pix_fmt','yuv420p','-preset','fast','-crf','18',
                       '-c:a','aac','-movflags','+faststart']
+    elif audio is not None:
+        codec_args+=['-c:a','pcm_s16le']
+    if encoding=='h264':
+        suffix='.mp4'
+        codec_args=H264_CLIP_ARGS
     inputs = ['-an'] if audio is None else ['-i',str(audio),'-map','0:v:0','-map','1:a:0']
     if subtitles is not None:
         inputs[2:2]=['-i',str(subtitles)]
@@ -488,14 +516,18 @@ def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel
                 process = None
                 try:
                     process = subprocess.Popen([ffmpeg, '-hide_banner', '-y', '-f', 'rawvideo',
-                        '-pixel_format', 'rgba', '-video_size', f'{W}x{H}', '-framerate', str(FPS),
+                        '-pixel_format', 'rgba', '-video_size', f'{W}x{H}', '-framerate', str(fps),
                         '-i', 'pipe:0', *inputs, *codec_args, '-threads', '4', str(temporary)],
                         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log,
                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                    previous_image, frame_data = None, None
                     for i in range(frames):
                         cancel_check()
-                        process.stdin.write((frame_provider(i/FPS) if frame_provider else render_frame(card, i/FPS, seconds)).tobytes())
-                        if on_frame is not None and ((i+1) % FPS == 0 or i+1 == frames):
+                        image = frame_provider(i/fps) if frame_provider else render_frame(card, i/fps, seconds)
+                        if image is not previous_image:
+                            previous_image, frame_data = image, image.tobytes()
+                        process.stdin.write(frame_data)
+                        if on_frame is not None and ((i+1) % fps == 0 or i+1 == frames):
                             on_frame((i+1)/frames)
                     process.stdin.close()
                     while process.poll() is None:
@@ -510,14 +542,18 @@ def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel
                     if audio is not None:
                         streams = json.loads(subprocess.check_output([ffprobe,'-v','error','-show_streams',
                             '-of','json',str(temporary)],timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)))['streams']
-                        expected=['h264','aac']+(['mov_text'] if subtitles is not None else [])
+                        expected=(['png' if encoding=='png' else 'prores','pcm_s16le'] if transparent_audio else ['h264','aac'])+(['mov_text'] if subtitles is not None else [])
                         if ([s['codec_name'] for s in streams]!=expected
                                 or int(streams[0].get('nb_frames',0))!=frames
-                                or abs(float(streams[1]['duration'])-seconds)>1/FPS+.002):
+                                or abs(float(streams[1]['duration'])-seconds)>1/fps+.002):
                             raise RuntimeError('成片音轨或帧数与时间表不一致')
+                        if transparent_audio and streams[0]['pix_fmt'] not in ('rgba','yuva444p12le','yuva444p10le'):
+                            raise RuntimeError('新闻条缺少透明通道')
+                    elif encoding=='h264':
+                        verify_h264_clip(temporary,frames,ffprobe,fps=fps)
                     else:
                         samples = ((1200, 500, 0), (20, 500, card['background_alpha'])) if card.get('video_type') == 'launch' else ((1200, 500, 0), (120, 970, 255))
-                        probe=min(4,max(0,seconds-1/FPS)) if frame_provider else 4
+                        probe=min(4,max(0,seconds-1/fps)) if frame_provider else 4
                         if frame_provider:
                             expected=frame_provider(probe);samples=tuple((x,y,expected.getpixel((x,y))[3]) for x,y,_ in samples)
                         verify_video(temporary, frames, seconds, ffmpeg, ffprobe, encoding, samples,probe)
@@ -540,6 +576,18 @@ def encode_card(card, directory, frames, ffmpeg, ffprobe, cancel_check=no_cancel
         finally:
             log_path.unlink(missing_ok=True)
     return final
+
+
+H264_CLIP_ARGS=['-c:v','libx264','-pix_fmt','yuv420p','-preset','fast','-crf','18',
+                '-bf','0','-video_track_timescale','24000']
+
+
+def verify_h264_clip(path,frames,ffprobe,*,fps=FPS):
+    streams=json.loads(subprocess.check_output([ffprobe,'-v','error','-show_streams','-of','json',str(path)],
+        timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)))['streams']
+    if len(streams)!=1 or (streams[0]['codec_name'],streams[0]['width'],streams[0]['height'],
+                           int(streams[0].get('nb_frames',0)),streams[0]['r_frame_rate'])!=('h264',W,H,frames,f'{fps}/1'):
+        raise RuntimeError('分段视频格式或帧数与时间表不一致')
 
 
 def reading_seconds(item):

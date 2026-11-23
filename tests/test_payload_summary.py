@@ -104,7 +104,7 @@ class PayloadSummaryTests(unittest.TestCase):
         with patch.object(translator, 'translate_term_result') as terms:
             localized = _localize_launch_video_items([item], translator, CancellationToken())[0]
         terms.assert_not_called()
-        self.assertEqual(localized['launch']['payload'], '27 Starlink satellites')
+        self.assertEqual(localized['launch']['payload'], '')
         self.assertEqual(localized['title'], 'Falcon 9')
         self.assertEqual(item, original)
         with patch('services.weekly_report._launch_term_translator', return_value=translator), \
@@ -113,7 +113,7 @@ class PayloadSummaryTests(unittest.TestCase):
             _export_reports([], {}, {}, _export_context(settings, {}), [], settings, False, True,
                             CancellationToken(), launch_video_items=[item])
         self.assertIsNone(word.call_args.kwargs['launch_term_translator'])
-        self.assertEqual(premiere.call_args.kwargs['launches'][0]['launch']['payload'], '27 Starlink satellites')
+        self.assertEqual(premiere.call_args.kwargs['launches'][0]['launch']['payload'], '')
 
 
 class SubtitlePriorityTests(unittest.TestCase):

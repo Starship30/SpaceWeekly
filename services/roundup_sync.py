@@ -87,15 +87,27 @@ def validate_unit_structure(segment):
 def reading_units(draft, segment):
     validate_unit_structure(segment)
     text = narration_text(segment)
-    if not segment.get('units'):
+    saved = segment.get('units')
+    if not saved:
         raise ValueError('缺少句子与任务关联，请建立并检查讲解单元')
-    if segment.get('units_basis') != digest(text):
-        raise ValueError('朗读稿已修改，旧讲解单元待复查；请重建并检查关联')
     news=content_namespace(draft)=='news'
+    if segment.get('units_basis') != digest(text):
+        spans = sentence_spans(text)
+        # A saved association survives punctuation edits or deletion of an aside
+        # when each original sentence still matches in place, without guessing IDs.
+        normalized = lambda value: value.strip().rstrip('。！？!?；;').strip()
+        if (news or len(spans)!=len(saved) or any(
+                normalized(unit['text'])!=normalized(text[start:end]) and
+                normalized(re.sub(r'（[^（）]*）|\([^()]*\)', '', unit['text']))!=normalized(text[start:end])
+                for unit,(start,end) in zip(saved,spans))):
+            raise ValueError('朗读稿已修改，旧讲解单元待复查；请重建并检查关联')
+        saved = [dict(unit,start=start,end=end,text=text[start:end],
+                      screen=text[start:end] if '[[' in unit['screen'] else unit['screen'])
+                 for unit,(start,end) in zip(saved,spans)]
     known = set(draft.get('news_items',{})) if news else {i['ll2_id'] for i in draft['snapshot']['items']}
     included=known if news else {s['id'] for s in draft['selection'] if s['included']}
     result, cursor, reading_cursor = [], 0, 0
-    for unit in segment['units']:
+    for unit in saved:
         start, end = unit['start'], unit['end']
         ids = unit['task_ids']
         if start != cursor or text[start:end] != unit['text']:
@@ -257,13 +269,22 @@ def closing_hold(draft):
 
 def build_timeline(draft):
     rows, cursor = [], 0
+    news=content_namespace(draft)=='news'
+    before,after=0,0
+    if news:
+        intervals=draft.get('animation_gaps',{})
+        before,after=intervals.get('before_voice',.2),intervals.get('after_voice',.2)
+        if any(type(v) not in (float,int) or not math.isfinite(v) or not 0<=v<=2 for v in (before,after)):
+            raise ValueError('新闻配音前后间隔应为0至2秒')
+        cursor=round((1.95+before)*RATE)
+    lead=cursor
     pause = float(draft.get('pause_seconds', .3))
     if not math.isfinite(pause) or not 0 <= pause <= 3:
         raise ValueError('段间停顿应为0至3秒')
     for index, segment in enumerate(draft['segments']):
         row = segment_schedule(draft, segment)
         duration = row['duration_samples']
-        final_pause = closing_hold(draft) if content_namespace(draft)=='roundup' else 0
+        final_pause = closing_hold(draft) if not news else after+1.5
         silence = round((pause if index+1 < len(draft['segments']) else final_pause)*RATE)
         row.update(start_sample=cursor, speech_end_sample=cursor+duration, end_sample=cursor+duration+silence,
             pause_samples=silence, start_seconds=cursor/RATE, speech_end_seconds=(cursor+duration)/RATE,
@@ -274,21 +295,29 @@ def build_timeline(draft):
                 global_start_seconds=(cursor+unit['start_sample'])/RATE, global_end_seconds=(cursor+unit['end_sample'])/RATE)
         cursor += duration+silence
         rows.append(row)
-    return dict(version=VERSION, sample_rate=RATE, total_samples=cursor, duration_seconds=cursor/RATE,
+    result=dict(version=VERSION, sample_rate=RATE, total_samples=cursor, duration_seconds=cursor/RATE,lead_samples=lead,
         normalization_policy='PCM16-mono-24000-round-sample-count-v1',
         all_audio_current=bool(rows) and all(r['audio'] is not None for r in rows), segments=rows,
         precision='unit' if rows and all(r['precision']=='unit' for r in rows) else
                   'mixed' if any(r['precision']=='unit' for r in rows) else 'paragraph' if rows and all(r['audio'] for r in rows) else 'preview',
         gap_rule='hold_previous_until_next_start', animation_rule='within_existing_time', subtitles='unit_or_paragraph')
+    if news and rows:
+        from services.news_timing import animation
+        result['news_animation']=animation(draft,result)
+    return result
 
 
-def join_timelines(timelines):
+def join_timelines(timelines,*,leading_samples=0):
     """Offset each section in samples, keeping local alignment positions intact."""
     from copy import deepcopy
     result = deepcopy(timelines[0])
-    result.update(segments=[], total_samples=0, all_audio_current=True)
+    result.update(segments=[],total_samples=leading_samples,all_audio_current=True,
+                  lead_samples=leading_samples+result.get('lead_samples',0))
     for timeline in timelines:
         offset = result['total_samples']
+        if result['segments'] and timeline.get('lead_samples',0):
+            previous=result['segments'][-1];gap=timeline['lead_samples']
+            previous['pause_samples']+=gap;previous['end_sample']+=gap;previous['end_seconds']=previous['end_sample']/RATE
         for original in timeline['segments']:
             row = deepcopy(original)
             for prefix in ('start', 'speech_end', 'end'):
@@ -356,10 +385,12 @@ def _valid_pcm(path,expected):
         return False
 
 
-def timeline_audio(draft, timeline, token):
+def timeline_audio(draft, timeline, token, *, leading_audio=None):
     if not timeline['all_audio_current']:
         raise ValueError('整期音频预览需要各段当前配音；可继续使用无音频预览')
-    key = digest([(r['audio']['sha256'],r['duration_samples'],r['pause_samples']) for r in timeline['segments']])
+    identity=[timeline.get('lead_samples',0),[(r['audio']['sha256'],r['duration_samples'],r['pause_samples']) for r in timeline['segments']]]
+    if leading_audio:identity.append(file_hash(leading_audio))
+    key = digest(identity)
     directory = resource_path('cache',content_namespace(draft)+'_playback',key)
     directory.mkdir(parents=True, exist_ok=True)
     target = directory/'narration.wav'
@@ -371,6 +402,15 @@ def timeline_audio(draft, timeline, token):
     with reserved_output(directory,'.wav') as (output, temporary):
         with wave.open(str(temporary),'wb') as dest:
             dest.setparams((1,2,RATE,0,'NONE','not compressed'))
+            remaining=timeline.get('lead_samples',0)
+            if leading_audio:
+                with wave.open(str(leading_audio),'rb') as source:
+                    if source.getframerate()!=RATE or source.getnframes()>remaining:
+                        raise ValueError('片头音轨与整期时间表不一致')
+                    remaining-=source.getnframes()
+                    while chunk:=source.readframes(65536):
+                        token.check();dest.writeframesraw(chunk)
+            dest.writeframesraw(b'\0\0'*remaining)
             for row in timeline['segments']:
                 token.check()
                 path = canonical_audio(row['audio'],token)
@@ -391,8 +431,15 @@ def timeline_audio(draft, timeline, token):
 
 
 def align_draft(draft, provider, token, *, segment_id=None, on_progress=None):
-    jobs, by_id, errors, completed = [], {}, [], set()
-    for segment in draft['segments']:
+    return align_drafts([draft],provider,token,segment_id=segment_id,on_progress=on_progress)[0]
+
+
+def align_drafts(drafts, provider, token, *, segment_id=None, on_progress=None):
+    """Align cache misses for drafts sharing one model, with errors in draft order."""
+    jobs, by_id, completed = [], {}, set()
+    errors=[[] for _ in drafts]
+    segments=((index,draft,segment) for index,draft in enumerate(drafts) for segment in draft['segments'])
+    for index,draft,segment in segments:
         if segment_id and segment['id'] != segment_id:continue
         token.check()
         try:
@@ -402,10 +449,10 @@ def align_draft(draft, provider, token, *, segment_id=None, on_progress=None):
             if sound.get('reading_text',reading_text(draft,segment))!=reading_text(draft,segment):
                 raise ValueError('音频记录的实际 TTS 输入与当前最终文本不一致')
             key = alignment_key(draft,segment,sound)
-            index = resource_path('cache',content_namespace(draft)+'_alignment',key,'alignment.json')
+            cache = resource_path('cache',content_namespace(draft)+'_alignment',key,'alignment.json')
             cached=segment.get('alignment')
-            if cached and cached.get('key')==key or index.exists():
-                if not cached or cached.get('key')!=key:cached = json.loads(index.read_text(encoding='utf-8'))
+            if cached and cached.get('key')==key or cache.exists():
+                if not cached or cached.get('key')!=key:cached = json.loads(cache.read_text(encoding='utf-8'))
                 if not isinstance(cached,dict):raise ValueError('对齐缓存格式无效')
                 if cached.get('key') != key:raise ValueError('对齐缓存身份不匹配')
                 automatic=map_tokens(cached.get('tokens'),units,sound_samples(sound))
@@ -414,13 +461,14 @@ def align_draft(draft, provider, token, *, segment_id=None, on_progress=None):
                 continue
             if sound_samples(sound) > 300*RATE:raise ValueError('强制对齐单段最多五分钟；请按自然语义段编辑')
             path = canonical_audio(sound,token)
-            jobs.append(dict(id=segment['id'],audio=str(path.resolve()),text=reading_text(draft,segment)))
-            by_id[segment['id']] = (segment,key,index,units,sound)
+            identifier=segment['id'] if len(drafts)==1 else f"{index}:{segment['id']}"
+            jobs.append(dict(id=identifier,audio=str(path.resolve()),text=reading_text(draft,segment)))
+            by_id[identifier] = (draft,segment,key,cache,units,sound,errors[index])
         except (OSError,ValueError,TypeError,KeyError) as error:
-            segment['alignment_error']=str(error);errors.append((segment['id'],str(error)))
+            segment['alignment_error']=str(error);errors[index].append((segment['id'],str(error)))
     def complete(identifier,tokens,error=''):
         completed.add(identifier)
-        segment,key,index,units,sound=by_id[identifier]
+        draft,segment,key,cache,units,sound,draft_errors=by_id[identifier]
         try:
             if error:raise ValueError(error)
             automatic=map_tokens(tokens,units,sound_samples(sound))
@@ -428,12 +476,12 @@ def align_draft(draft, provider, token, *, segment_id=None, on_progress=None):
                 aligned_audio_sha256=file_hash(canonical_audio(sound,token)),
                 model=deepcopy(draft.get('aligner',DEFAULT_ALIGNER)),tokens=tokens,automatic=automatic,
                 duration_samples=sound_samples(sound),sample_rate=RATE)
-            write_json(index,result);segment['alignment']=result;segment.pop('alignment_error',None)
+            write_json(cache,result);segment['alignment']=result;segment.pop('alignment_error',None)
         except (OSError,ValueError,TypeError,KeyError) as exc:
-            segment['alignment_error']=str(exc);errors.append((identifier,str(exc)))
+            segment['alignment_error']=str(exc);draft_errors.append((segment['id'],str(exc)))
         finally:
-            write_json(resource_path('output',content_namespace(draft)+'-drafts',draft['id']+'.json'),draft)
-            if on_progress:on_progress(identifier)
+            write_json(resource_path('cache',content_namespace(draft)+'-drafts',draft['id']+'.json'),draft)
+            if on_progress:on_progress(segment['id'])
     if jobs:
         try:
             provider.align_batch(jobs,token,complete)

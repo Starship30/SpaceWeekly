@@ -232,7 +232,7 @@ class MissionNameTests(unittest.TestCase):
         article = _launch_to_article(raw)
         item = _launch_video_item(raw, 'UTC')
         before = copy.deepcopy(item)
-        self.assertEqual(launch_fields(article)['mission_name'], 'Test mission')
+        self.assertEqual(launch_fields(article)['mission_name'], 'Test mission（extra explanation）')
         self.assertEqual(mission_search_keywords(item)[0], 'Test mission')
         self.assertEqual(_localize_launch_video_items([item], None, CancellationToken())[0]['summary'], 'Test mission')
         with tempfile.TemporaryDirectory(dir='build') as directory:
@@ -250,8 +250,10 @@ class MissionNameTests(unittest.TestCase):
             self.assertEqual(validate_snapshot(data)['items'][0]['summary'], 'Test mission')
             self.assertEqual(data, snapshot_before)
             paragraphs = '\n'.join(p.text for p in Document(document).paragraphs)
+            # Formal data/Markdown retain the full name; Word keeps its existing compact heading.
+            self.assertNotIn('extra explanation',paragraphs)
+            self.assertIn('extra explanation',md)
             for text in (paragraphs, md):
-                self.assertNotIn('extra explanation', text)
                 self.assertNotIn('launch note', text)
                 self.assertIn('Payload (description stays complete).', text)
         self.assertEqual(item, before)

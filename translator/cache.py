@@ -53,6 +53,9 @@ def cache_translation(
 ) -> None:
     with _CACHE_LOCK:
         entries = load_translation_cache()
+        previous=next((v for k,v in entries.items() if k.casefold()==str(original).strip().casefold()),{})
+        if previous.get('status') in ('human_confirmed','confirmed'):
+            return
         entries[str(original).strip()] = {
             "original": str(original).strip(),
             "translation": str(translation).strip(),
@@ -61,7 +64,8 @@ def cache_translation(
             "source_url": str(source_url or "").strip(),
             "confidence": round(max(0.0, min(1.0, float(confidence))), 2),
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": "candidate",
+            "status": "unchanged" if str(translation).strip()==str(original).strip() else "candidate",
+            "validation_version": 1,
         }
         _write_cache(entries)
 

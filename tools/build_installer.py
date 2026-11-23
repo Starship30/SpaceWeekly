@@ -91,6 +91,7 @@ def main():
     release=dict(version=version,package_id='Starship30.SpaceWeekly'+('.QA' if qa else ''),channel='qa-win-x64' if qa else 'win-x64',
         runtime='win-x64',qa=qa,repository='https://github.com/Starship30/SpaceWeekly',sdk='1.2.161',signed=False)
     work=ROOT/'build'/('installer-'+uuid4().hex[:12]);work.mkdir(parents=True)
+    packages=work/'packages';packages.mkdir()
     (work/'tmp').mkdir()
     resources=work/'resources';defaults(resources,release)
     if args.reuse_onedir:
@@ -102,32 +103,46 @@ def main():
             subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm','--workpath',str(work/'pyi'),'--distpath',str(work/'dist'),str(ROOT/'SpaceWeekly.spec')],cwd=ROOT,env=env,stdout=log,stderr=log,check=True)
         stage=work/'dist/SpaceWeekly'
     compile_uninstaller(stage,work,release)
+    for name in ('USER_AGREEMENT.zh-CN.md','THIRD_PARTY_NOTICES.md','WIX-LICENSE.txt'):
+        shutil.copy2(ROOT/'tools/windows'/name,stage/name)
     paths=audit(stage)
     if args.previous_feed:
         for old in args.previous_feed.glob('*'):
-            if old.suffix=='.nupkg' or old.name.startswith('releases.'):shutil.copy2(old,output/old.name)
-    notes=ROOT/'tools'/('RELEASE_NOTES_'+app_version()+'.md')
+            if old.suffix=='.nupkg' or old.name.startswith('releases.'):shutil.copy2(old,packages/old.name)
+    notes=ROOT/'tools'/('WINDOWS_QA_NOTES.md' if qa else 'RELEASE_NOTES_'+app_version()+'.md')
     splash=work/'installer-splash.png';installer_splash(splash)
     msi_backgrounds(work)
     command=[str(args.vpk.resolve()),'pack','--packId',release['package_id'],'--packVersion',version,'--packDir',str(stage),'--mainExe','SpaceWeekly.exe',
         '--runtime','win-x64','--channel',release['channel'],'--packTitle','SpaceWeekly QA' if qa else 'SpaceWeekly','--icon',str(ROOT/'assets/sspo.ico'),
         '--releaseNotes',str(notes),'--shortcuts','Desktop,StartMenuRoot','--splashImage',str(splash),
-        '--splashProgressColor','#4468e8','--outputDir',str(output)]
+        '--splashProgressColor','#4468e8','--outputDir',str(packages)]
     msi_version=app_version()
     if qa:
         parts=msi_version.split('.');parts[-1]=str(int(parts[-1])+int(version.rsplit('.',1)[-1]));msi_version='.'.join(parts)
     if not args.no_msi:
+        from tools.msi_wizard import rtf
+        agreement=work/'agreement.rtf'
+        agreement.write_text(rtf((ROOT/'tools/windows/USER_AGREEMENT.zh-CN.md').read_text(encoding='utf-8')),encoding='ascii')
         command+=['--msi','--instLocation','PerUser','--msiVersion',msi_version,
+            '--instLicense',str(agreement),
             '--msiTopBanner',str(work/'msi-banner.bmp'),'--msiDialogBackground',str(work/'msi-background.bmp')]
     # Signing secrets are passed only by vpk's documented environment options; never bundled.
     package_env=dict(os.environ,TEMP=str(work/'tmp'),TMP=str(work/'tmp'))
     subprocess.run(command,cwd=ROOT,env=package_env,check=True)
-    checks={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in output.iterdir() if p.is_file()}
-    (output/'SHA256SUMS.txt').write_text(''.join(digest+'  '+name+'\n' for name,digest in checks.items()),encoding='utf-8')
+    if not args.no_msi:
+        from tools.msi_wizard import customize,bootstrap
+        msi=next(packages.glob('*.msi'));exe=next(packages.glob('*Setup.exe'))
+        customize(msi,work,release)
+        bootstrap(msi,exe,work,release)
+    for artifact in packages.iterdir():
+        if artifact.is_file():shutil.copy2(artifact,output/artifact.name)
     write(output/'build-info.json',dict(release=release,onedir=str(stage),work=str(work),files=len(paths),bytes=sum(p.stat().st_size for p in paths),
         signing='Not configured; SHA256 is integrity, not publisher identity',python=sys.version,
         source_revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
-        source_dirty=bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT,text=True))))
+        source_dirty=bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT,text=True)),
+        installer_sources={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (ROOT/'tools/windows').iterdir() if p.is_file()}))
+    checks={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in output.iterdir() if p.is_file() and p.name!='SHA256SUMS.txt'}
+    (output/'SHA256SUMS.txt').write_text(''.join(digest+'  '+name+'\n' for name,digest in checks.items()),encoding='utf-8')
     print('Build artifacts: '+str(output));print('Onedir: '+str(stage))
 
 

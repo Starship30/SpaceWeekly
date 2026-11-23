@@ -264,7 +264,7 @@ class SettingsDialog(ProductionComponent):
         self.nav.setObjectName("SettingsNav")
         self.nav.setFixedWidth(200)
         self.nav.setSpacing(8)
-        content.setSpacing(22)
+        content.setSpacing(14)
         self.stack = QStackedWidget()
 
         for title, page in [
@@ -306,9 +306,9 @@ class SettingsDialog(ProductionComponent):
         page, layout = self._form_page(tr("appearance"))
         layout.addRow(tr("theme"), self.theme_mode_combo)
         layout.addRow(tr("language"), self.language_combo)
-        reset_button = QPushButton(tr("reset.workspace"))
-        reset_button.clicked.connect(self._reset_workspace)
-        layout.addRow(reset_button)
+        self.workspace_button = QPushButton(tr("reset.workspace"))
+        self.workspace_button.clicked.connect(self._reset_workspace)
+        layout.addRow(self.workspace_button)
 
         return page
 
@@ -445,15 +445,16 @@ class SettingsDialog(ProductionComponent):
         card.setObjectName("SettingsCard")
         card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(26, 24, 26, 26)
-        card_layout.setSpacing(24)
+        card_layout.setContentsMargins(18, 16, 18, 18)
+        card_layout.setSpacing(14)
         heading = QLabel(title)
         heading.setObjectName("PanelTitle")
         card_layout.addWidget(heading)
         layout = QFormLayout()
         layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.setHorizontalSpacing(22)
-        layout.setVerticalSpacing(18)
+        layout.setHorizontalSpacing(16)
+        layout.setVerticalSpacing(10)
+        layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         card_layout.addLayout(layout)
         wrapper.addWidget(card)

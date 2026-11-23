@@ -88,6 +88,9 @@ def get_launches(
 
 
 def _launch_video_item(item, display_timezone):
+    from services.launch_display import resolve_launch,place
+    from services.roundup_style import rocket_recovery
+    context=launch_context(item);view=resolve_launch(context)
     url = _launch_url(item)
     identifier = _text(item.get('id'))
     net = _text(item.get('net'))
@@ -100,41 +103,24 @@ def _launch_video_item(item, display_timezone):
     except ValueError:
         pass
     return dict(id='ll2:'+identifier if identifier else 'launch-url-sha256:'+hashlib.sha256(url.encode()).hexdigest(),
-        title=_nested_text(item, 'rocket', 'configuration', 'full_name') or _text(item.get('name')) or 'Upcoming Launch',
-        summary=_nested_text(item, 'mission', 'name') or _text(item.get('name')),
+        title=context['rocket'] or context['english_name'],summary=context['english_name'],
         source=SOURCE, published=net, url=url, categories=[], video_type='launch',
-        launch_context=launch_context(item),
-        launch=dict(orbit=_nested_text(item, 'mission', 'orbit', 'name'),
-                    payload=_payload_text(item), site=_nested_text(item, 'pad', 'name'),
+        launch_context=context,display_record=view,
+        launch=dict(orbit=context['orbit'],
+                    payload=context['payload'], site=place(context['site_name'],context['pad_name'])[2],
                     time=display_time, display_timezone=display_timezone,
-                    status=launch_status_text(item.get("status")), recovery=recovery_text(item)))
+                    status=launch_status_text(item.get("status")), recovery=rocket_recovery(context)))
 
 
 def _payload_text(item: dict) -> str:
     """Prefer actual payload records; never use the mission name as a description."""
-    rows = []
-    flights = _nested_value(item, 'rocket', 'payloads')
-    for flight in flights if isinstance(flights, list) else []:
-        payload = flight.get('payload') if isinstance(flight, dict) else None
-        if not isinstance(payload, dict):
-            continue
-        payload_type = payload.get('type')
-        values = (payload.get('name'), payload.get('description'),
-                  payload_type.get('name') if isinstance(payload_type, dict) else None)
-        name, description, kind = [value.strip() if isinstance(value, str) else '' for value in values]
-        detail = description or kind
-        if detail.casefold() == name.casefold():
-            detail = ''
-        amount = flight.get('amount')
-        if name and type(amount) is int and amount > 1:
-            name = f'{amount} × {name}'
-        row = ': '.join(value for value in (name, detail) if value)
-        if row:
-            rows.append(row)
-    if rows:
-        return '; '.join(rows)
-    description = _nested_value(item, 'mission', 'description')
-    return description.strip() if isinstance(description, str) else ''
+    return '; '.join(p['name'] for p in _payload_records(item) if p['name'])
+
+
+def _payload_records(item):
+    flights=_nested_value(item,'rocket','payloads')
+    return [dict(name=f['payload']['name'].strip() if isinstance(f['payload'].get('name'),str) else '',amount=f.get('amount'),id=f['payload'].get('id'))
+            for f in flights if isinstance(f,dict) and isinstance(f.get('payload'),dict)] if isinstance(flights,list) else []
 
 
 def last_error() -> str:
@@ -303,6 +289,10 @@ def launch_context(item: dict) -> dict:
                 orbit=_nested_text(item, 'mission', 'orbit', 'name'),
                 **links)
     reusable = _nested_value(item, 'rocket', 'configuration', 'reusable')
+    context['payloads']=_payload_records(item)
+    context['organization_type']=_nested_text(item,'launch_service_provider','type','name')
+    context['manufacturer']=_nested_text(item,'rocket','configuration','manufacturer','name')
+    context['raw_record']=deepcopy(item)
     if type(reusable) is bool:
         context['rocket_reusable'] = reusable
     rocket = item.get('rocket')
