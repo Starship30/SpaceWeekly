@@ -219,13 +219,30 @@ def embed_ui(msi,work,release):
         db.execute('CREATE TABLE `MsiEmbeddedUI` (`MsiEmbeddedUI` CHAR(72) NOT NULL, `FileName` CHAR(255) NOT NULL, `Attributes` SHORT NOT NULL, `MessageFilter` LONG NOT NULL, `Data` OBJECT NOT NULL PRIMARY KEY `MsiEmbeddedUI`)').Close()
     else:db.execute('DELETE FROM `MsiEmbeddedUI`').Close()
     db.insert('MsiEmbeddedUI',('MsiEmbeddedUI','FileName','Attributes','MessageFilter','Data'),('SpaceWeeklyUI','InstallerUI.Native.dll',3,201359327,native))
-    secure=db.rows("SELECT `Value` FROM `Property` WHERE `Property`='SecureCustomProperties'")[0][0]
-    db.property('SecureCustomProperties',';'.join(dict.fromkeys((secure+';SW_WIZARD_APPROVED;SW_ACCEPT_AGREEMENT;LicenseAccepted').split(';'))))
-    db.execute('DELETE FROM `LaunchCondition` WHERE `Description`=?',('安装向导未完成或用户尚未同意协议，安装已停止。请重新运行完整安装向导。',)).Close()
-    db.insert('LaunchCondition',('Condition','Description'),
-        ('REMOVE OR (SW_WIZARD_APPROVED=1 AND SW_ACCEPT_AGREEMENT=1) OR (UILevel<5 AND NOT MSICLIENTUSESEMBEDDEDUI AND SW_ACCEPT_AGREEMENT=1)',
-         '安装向导未完成或用户尚未同意协议，安装已停止。请重新运行完整安装向导。'))
+    configure_agreement(db)
     summary=db.db.GetSummaryInformation(1);summary.SetProperty(14,500);summary.Persist();db.db.Commit()
+
+
+def configure_agreement(db):
+    secure=db.rows("SELECT `Value` FROM `Property` WHERE `Property`='SecureCustomProperties'")[0][0]
+    approval='SW_WIZARD_APPROVED;SW_ACCEPT_AGREEMENT;SW_NATIVE_APPROVED;LicenseAccepted'
+    db.property('SecureCustomProperties',';'.join(dict.fromkeys((secure+';'+approval).split(';'))))
+    note='安装向导未完成或用户尚未同意协议，安装已停止。请重新运行完整安装向导。'
+    db.execute('DELETE FROM `LaunchCondition` WHERE `Description`=?',(note,)).Close()
+    # In the native UI, LaunchConditions runs before the license dialog.
+    db.execute("DELETE FROM `ControlEvent` WHERE `Event`='[SW_NATIVE_APPROVED]'").Close()
+    db.execute("UPDATE `ControlEvent` SET `Ordering`=2 WHERE `Dialog_`='LicenseAgreementDlg' "
+               "AND `Control_`='Next' AND `Event`='NewDialog'").Close()
+    db.insert('ControlEvent',('Dialog_','Control_','Event','Argument','Condition','Ordering'),
+              ('LicenseAgreementDlg','Next','[SW_NATIVE_APPROVED]','1','LicenseAccepted = "1"',1))
+    db.execute("DELETE FROM `CustomAction` WHERE `Action`='SW_RequireAgreement'").Close()
+    db.insert('CustomAction',('Action','Type','Target'),('SW_RequireAgreement',19,note))
+    db.execute("DELETE FROM `InstallExecuteSequence` WHERE `Action`='SW_RequireAgreement'").Close()
+    db.insert('InstallExecuteSequence',('Action','Condition','Sequence'),
+              ('SW_RequireAgreement','NOT (Installed OR REMOVE OR '
+               '(SW_WIZARD_APPROVED=1 AND SW_ACCEPT_AGREEMENT=1) OR '
+               '(NOT MSICLIENTUSESEMBEDDEDUI AND ((SW_NATIVE_APPROVED=1 AND LicenseAccepted=1) OR '
+               '(UILevel<5 AND SW_ACCEPT_AGREEMENT=1))))',101))
 
 
 def bootstrap(msi,exe,work,release):
