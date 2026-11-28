@@ -238,24 +238,33 @@ def configure_native_directory(db):
 
 def configure_agreement(db):
     secure=db.rows("SELECT `Value` FROM `Property` WHERE `Property`='SecureCustomProperties'")[0][0]
-    approval='SW_WIZARD_APPROVED;SW_ACCEPT_AGREEMENT;SW_NATIVE_APPROVED;LicenseAccepted'
+    approval='SW_WIZARD_APPROVED;SW_ACCEPT_AGREEMENT;SW_NATIVE_ACCEPTED'
     db.property('SecureCustomProperties',';'.join(dict.fromkeys((secure+';'+approval).split(';'))))
     note='安装向导未完成或用户尚未同意协议，安装已停止。请重新运行完整安装向导。'
     db.execute('DELETE FROM `LaunchCondition` WHERE `Description`=?',(note,)).Close()
-    # In the native UI, LaunchConditions runs before the license dialog.
-    db.execute("DELETE FROM `ControlEvent` WHERE `Event`='[SW_NATIVE_APPROVED]'").Close()
-    db.execute("UPDATE `ControlEvent` SET `Ordering`=2 WHERE `Dialog_`='LicenseAgreementDlg' "
-               "AND `Control_`='Next' AND `Event`='NewDialog'").Close()
-    db.insert('ControlEvent',('Dialog_','Control_','Event','Argument','Condition','Ordering'),
-              ('LicenseAgreementDlg','Next','[SW_NATIVE_APPROVED]','1','LicenseAccepted = "1"',1))
+    # Only public properties transfer the native checkbox state to the MSI server.
+    db.execute("UPDATE `Control` SET `Property`='SW_NATIVE_ACCEPTED' WHERE `Dialog_`='LicenseAgreementDlg' "
+               "AND `Control`='LicenseAcceptedCheckBox'").Close()
+    db.execute("DELETE FROM `CheckBox` WHERE `Property`='LicenseAccepted' OR `Property`='SW_NATIVE_ACCEPTED'").Close()
+    db.insert('CheckBox',('Property','Value'),('SW_NATIVE_ACCEPTED','1'))
+    for table,columns in (
+            ('ControlCondition',('Dialog_','Control_','Action','Condition')),
+            ('ControlEvent',('Dialog_','Control_','Event','Argument','Condition','Ordering'))):
+        where="`Dialog_`='LicenseAgreementDlg' AND `Control_`='Next'"
+        rows=db.rows('SELECT * FROM `'+table+'` WHERE '+where)
+        db.execute('DELETE FROM `'+table+'` WHERE '+where).Close()
+        for row in rows:
+            index=columns.index('Condition')
+            row[index]=row[index].replace('LicenseAccepted','SW_NATIVE_ACCEPTED')
+            if table=='ControlEvent':row[-1]=int(row[-1])
+            db.insert(table,columns,row)
     db.execute("DELETE FROM `CustomAction` WHERE `Action`='SW_RequireAgreement'").Close()
     db.insert('CustomAction',('Action','Type','Target'),('SW_RequireAgreement',19,note))
     db.execute("DELETE FROM `InstallExecuteSequence` WHERE `Action`='SW_RequireAgreement'").Close()
     db.insert('InstallExecuteSequence',('Action','Condition','Sequence'),
-              ('SW_RequireAgreement','NOT (Installed OR REMOVE OR '
+              ('SW_RequireAgreement','NOT (Installed OR REMOVE OR SW_NATIVE_ACCEPTED=1 OR '
                '(SW_WIZARD_APPROVED=1 AND SW_ACCEPT_AGREEMENT=1) OR '
-               '(NOT MSICLIENTUSESEMBEDDEDUI AND ((SW_NATIVE_APPROVED=1 AND LicenseAccepted=1) OR '
-               '(UILevel<5 AND SW_ACCEPT_AGREEMENT=1))))',101))
+               '(UILevel<5 AND NOT MSICLIENTUSESEMBEDDEDUI AND SW_ACCEPT_AGREEMENT=1))',101))
 
 
 def bootstrap(msi,exe,work,release):
