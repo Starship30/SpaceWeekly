@@ -145,10 +145,7 @@ def customize(msi,work,release):
     event('SpaceWeeklyDirDlg','Browse','SpawnDialog','BrowseDlg',order=2)
     event('SpaceWeeklyDirDlg','Space','SetTargetPath','INSTALLFOLDER',order=1)
     event('SpaceWeeklyDirDlg','Space','SpawnDialog','DiskCostDlg',order=2)
-    event('SpaceWeeklyDirDlg','Next','SetTargetPath','INSTALLFOLDER',order=1)
-    event('SpaceWeeklyDirDlg','Next','DoAction','RustValidatePath',order=2)
-    event('SpaceWeeklyDirDlg','Next','[VELOPACK_INSTALLDIR]','[INSTALLFOLDER]','WIXUI_INSTALLDIR_VALID <> "0"',3)
-    event('SpaceWeeklyDirDlg','Next','NewDialog','VerifyReadyDlg','WIXUI_INSTALLDIR_VALID <> "0"',4)
+    configure_native_directory(db)
     # Desktop preference conditions only the known framework shortcut component.
     db.execute("UPDATE `Component` SET `Condition`='SW_DESKTOP=1' WHERE `Component`='ApplicationDesktopShortcut'").Close()
     registry='Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MSI:'+release['package_id']
@@ -221,6 +218,22 @@ def embed_ui(msi,work,release):
     db.insert('MsiEmbeddedUI',('MsiEmbeddedUI','FileName','Attributes','MessageFilter','Data'),('SpaceWeeklyUI','InstallerUI.Native.dll',3,201359327,native))
     configure_agreement(db)
     summary=db.db.GetSummaryInformation(1);summary.SetProperty(14,500);summary.Persist();db.db.Commit()
+
+
+def configure_native_directory(db):
+    db.execute("DELETE FROM `ControlEvent` WHERE `Dialog_`='SpaceWeeklyDirDlg' AND `Control_`='Next'").Close()
+    # The fresh-install validator rejects the registered, non-empty upgrade directory.
+    existing='(SW_EXISTINGDIR AND INSTALLFOLDER ~= SW_EXISTINGDIR)'
+    valid=f'{existing} OR WIXUI_INSTALLDIR_VALID = "1"'
+    for order,(event,value,condition) in enumerate((
+        ('SetTargetPath','INSTALLFOLDER','1'),
+        ('DoAction','RustValidatePath',f'NOT {existing}'),
+        ('SpawnDialog','InvalidDirDlg',f'NOT ({valid})'),
+        ('[VELOPACK_INSTALLDIR]','[INSTALLFOLDER]',valid),
+        ('NewDialog','VerifyReadyDlg',valid),
+    ),1):
+        db.insert('ControlEvent',('Dialog_','Control_','Event','Argument','Condition','Ordering'),
+                  ('SpaceWeeklyDirDlg','Next',event,value,condition,order))
 
 
 def configure_agreement(db):
